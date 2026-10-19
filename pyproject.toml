@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cairnwork"
+version = "0.0.1.dev0"
+description = "Cairnwork: governed agent task core (successor to Nexus-new)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "import-linter>=2.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cairnwork"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "BLE", "S110", "S112", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+
+[tool.importlinter]
+root_packages = ["cairnwork"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Core must not import experimental"
+type = "forbidden"
+source_modules = ["cairnwork"]
+forbidden_modules = ["experimental"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "No import cycles between cairnwork modules"
+type = "acyclic_siblings"
+ancestors = ["cairnwork"]
