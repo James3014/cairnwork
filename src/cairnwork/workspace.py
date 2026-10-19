@@ -89,6 +89,10 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
             path.parent, "clone", "--quiet", "--no-local", "--no-checkout", str(repo), path.name
         )
         run_git(path, "remote", "remove", "origin")
+        try:
+            run_git(path, "cat-file", "-e", f"{base_commit}^{{commit}}")
+        except GitCommandError:  # e.g. a candidate only reachable from refs/cairnwork/
+            run_git(path, "fetch", "--quiet", "--no-tags", str(repo), base_commit)
         run_git(path, "checkout", "--quiet", "--detach", base_commit)
         head = run_git(path, "rev-parse", "HEAD").strip()
         refs_before = _guarded_refs(repo, attempt_id)
