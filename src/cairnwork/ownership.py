@@ -9,7 +9,8 @@ never guess.
 At most one task per card is active. CANCELLED and SUPERSEDED release the card.
 COMPLETED and FAILED keep holding it: to retry a FAILED task, resend with the
 same key (same task) or mark it SUPERSEDED first, then bind a new key. The rule
-is enforced twice, in ``bind`` and by a partial unique index in the schema.
+lives in the schema (a partial unique index), so it also holds for raw writers;
+``bind`` maps the index violation to DuplicateLogicalTask.
 
 The ledger must live on a local disk: it uses SQLite WAL, which is unsafe on
 network filesystems, and opening fails if WAL cannot be enabled.
@@ -44,7 +45,8 @@ CREATE TABLE IF NOT EXISTS task_ownership (
     owner           TEXT NOT NULL,
     task_id         TEXT NOT NULL UNIQUE,
     card_hash       TEXT NOT NULL,
-    status          TEXT NOT NULL
+    status          TEXT NOT NULL CHECK (status IN
+        ('BOUND', 'DISPATCHED', 'COMPLETED', 'FAILED', 'CANCELLED', 'SUPERSEDED'))
 );
 CREATE INDEX IF NOT EXISTS task_ownership_card ON task_ownership (card_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS task_ownership_one_active_per_card
@@ -89,6 +91,10 @@ class LedgerStorageUnsupported(OwnershipError):
     code = "LEDGER_STORAGE_UNSUPPORTED"
 
 
+class LedgerIntegrityViolation(OwnershipError):
+    code = "LEDGER_INTEGRITY_VIOLATION"
+
+
 @dataclass(frozen=True)
 class OwnershipRecord:
     idempotency_key: str
@@ -129,7 +135,10 @@ class OwnershipLedger:
             mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             if str(mode).lower() != "wal":
                 raise LedgerStorageUnsupported(f"journal_mode is {mode!r}, need wal")
-            conn.executescript(_SCHEMA)
+            try:
+                conn.executescript(_SCHEMA)
+            except sqlite3.IntegrityError as exc:
+                raise LedgerIntegrityViolation(str(exc)) from exc
         finally:
             conn.close()
 
@@ -196,7 +205,7 @@ class OwnershipLedger:
             current = _select(conn, "task_id", task_id)
             if current is None:
                 raise OwnershipUnknown(task_id)
-            if status not in TRANSITIONS[current.status]:
+            if status not in TRANSITIONS.get(current.status, frozenset()):
                 raise InvalidStatusTransition(f"{current.status} -> {status}")
             conn.execute(
                 "UPDATE task_ownership SET status = ? WHERE task_id = ?", (status, task_id)

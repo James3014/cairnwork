@@ -8,6 +8,7 @@ from cairnwork.ownership import (
     InvalidOwnershipValue,
     InvalidStatusTransition,
     KeyReusedWithDifferentRequest,
+    LedgerIntegrityViolation,
     OwnerMismatch,
     OwnershipLedger,
     OwnershipUnknown,
@@ -207,3 +208,43 @@ def test_concurrent_binds_of_one_card_with_different_keys_leave_one_active(tmp_p
     assert other == []
     assert len(created) == 1
     assert len(rejected) == 7
+
+
+def test_existing_ledger_with_two_active_tasks_per_card_fails_with_a_code(tmp_path):
+    path = tmp_path / "ownership.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE task_ownership (idempotency_key TEXT PRIMARY KEY, request_digest TEXT,"
+        " owner TEXT, task_id TEXT UNIQUE, card_hash TEXT, status TEXT)"
+    )
+    conn.execute("INSERT INTO task_ownership VALUES ('a','d','cairnwork','t1','c','BOUND')")
+    conn.execute("INSERT INTO task_ownership VALUES ('b','d','cairnwork','t2','c','BOUND')")
+    conn.commit()
+    conn.close()
+    with pytest.raises(LedgerIntegrityViolation):
+        OwnershipLedger(path)
+
+
+def test_schema_rejects_unknown_status_values(tmp_path):
+    path = tmp_path / "ownership.sqlite"
+    OwnershipLedger(path)
+    conn = sqlite3.connect(path)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO task_ownership VALUES ('k','d','cairnwork','t','c','cancelled')")
+    conn.close()
+
+
+def test_failed_transaction_is_rolled_back_and_releases_the_lock(tmp_path):
+    path = tmp_path / "ownership.sqlite"
+    ledger = OwnershipLedger(path)
+    record = ledger.bind("key-1", REQUEST, "cairnwork", "card-1").record
+    ledger.set_status(record.task_id, "CANCELLED")
+    with pytest.raises(InvalidStatusTransition):
+        ledger.set_status(record.task_id, "BOUND")
+    with pytest.raises(OwnershipUnknown):
+        ledger.set_status("task-missing", "CANCELLED")
+    conn = sqlite3.connect(path, timeout=0)
+    conn.execute("BEGIN IMMEDIATE")  # would raise "database is locked" if a rollback was skipped
+    conn.execute("ROLLBACK")
+    conn.close()
+    assert ledger.get(task_id=record.task_id).status == "CANCELLED"
