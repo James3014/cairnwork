@@ -130,8 +130,9 @@ class Notary:
             ).fetchone()
             if has_table and version != SCHEMA_VERSION:
                 raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
-            conn.executescript(_SCHEMA)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            if not has_table:  # only a new database is written to; readers never take the lock
+                conn.executescript(_SCHEMA)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         finally:
             conn.close()
 
