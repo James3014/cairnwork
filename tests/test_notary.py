@@ -221,10 +221,13 @@ def test_tampered_stored_request_hash_is_not_verified(repo, notary, tmp_path):
     assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
 
 
-def test_verdict_requires_the_reader_to_name_its_commit(repo, notary):
+@pytest.mark.parametrize("candidate", [None, "", "HEAD", "abc", 7])
+def test_verdict_requires_the_reader_to_name_its_commit(repo, notary, candidate):
     notarize(notary, repo, {"src/a.py": "x = 2\n"})
     with pytest.raises(TypeError):
         notary.verdict("task-1", "a1")
+    with pytest.raises(NotaryInputError):
+        notary.verdict("task-1", "a1", expected_candidate=candidate)
 
 
 def test_change_set_is_read_from_git_not_from_the_caller(repo, notary):
@@ -275,3 +278,25 @@ def test_verified_row_copied_to_another_task_or_attempt_is_not_verified(
     conn.close()
     copied = notary.verdict(task, attempt, expected_candidate=verdict.candidate_commit)
     assert copied is not None and not copied.verified
+
+
+def test_concurrent_creation_of_a_new_ledger_never_reports_a_schema_mismatch(tmp_path):
+    for round_ in range(5):
+        path = tmp_path / f"new-{round_}.sqlite"
+        errors = []
+
+        def open_it(path=path, errors=errors):
+            try:
+                Notary(path)
+            except Exception as exc:  # noqa: BLE001 - collected for the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_it) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        conn = sqlite3.connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        conn.close()

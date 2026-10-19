@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_co
 CoreVerify = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
 CORE_ERROR = "CORE_ERROR"
 SCHEMA_VERSION = 1
+_OID = re.compile(r"^[0-9a-f]{40}$")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS core_verifications (
@@ -124,15 +126,20 @@ class Notary:
         self._core_verify = core_verify or default_core_verify()
         conn = self._connect()
         try:
+            conn.execute("BEGIN")  # one read snapshot for both checks
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             has_table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'core_verifications'"
             ).fetchone()
+            conn.execute("COMMIT")
             if has_table and version != SCHEMA_VERSION:
                 raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
             if not has_table:  # only a new database is written to; readers never take the lock
-                conn.executescript(_SCHEMA)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                # Tables, triggers and user_version commit together, so no other connection
+                # can see the tables without the version (or race to a half-built schema).
+                conn.executescript(
+                    f"BEGIN IMMEDIATE;{_SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                )
         finally:
             conn.close()
 
@@ -194,6 +201,8 @@ class Notary:
 
     def verdict(self, task_id: str, attempt_id: str, *, expected_candidate: str) -> Verdict | None:
         """Read the recorded verdict; it is unverified unless it is for expected_candidate."""
+        if not isinstance(expected_candidate, str) or not _OID.match(expected_candidate):
+            raise NotaryInputError("expected_candidate must be a 40-hex commit id")
         return self._read(task_id, attempt_id, expected_candidate)
 
     def _read(
