@@ -19,8 +19,8 @@
 | 3 | P0 | 嚴格解析任務 | 只能有一個 eia-task 區塊、key 固定、allowed_files ≤10、不能有 `..`、不能碰保護路徑 | EIA `eia_nightly.py:246-325` | planned | planned |
 | 4 | P1 | 路徑真實性 | allowed_files 必須是一般檔案，或位於既有目錄下的新檔；不能是 symlink | EIA `eia_nightly.py:1143-1155` | planned | planned |
 | 5 | P0 | verifier 白名單 | 只接受 `python3 -m pytest ... tests/*.py` 和 `git diff --check`；`shell=False` | EIA `eia_nightly.py:328-358`；`external_intelligence_closure.py:890-985` | planned | planned |
-| 6 | P0 | 送件冪等（RULE-506） | 同一個 key、同一個 hash：回傳既有任務；同一個 key、不同 hash：拒絕；同一張 card 出現第二個 task id：`DUPLICATE_LOGICAL_TASK` | `nexus/orchestrator/self_hosted_task_service.py:2061-2089` | planned | planned |
-| 7 | P0 | 任務歸屬紀錄 | 派工前用原子且持久的紀錄綁定冪等鍵、請求摘要、所屬系統、task id；歸屬不明就停止派工（議會 F 條，新規定） | — | planned | planned |
+| 6 | P0 | 送件冪等（RULE-506） | 同一個 key、同一個 hash：回傳既有任務；同一個 key、不同 hash：拒絕；同一張 card 出現第二個 task id：`DUPLICATE_LOGICAL_TASK` | `nexus/orchestrator/self_hosted_task_service.py:2061-2089` | `src/cairnwork/ownership.py` `OwnershipLedger.bind` | `test:tests/test_ownership.py::test_identical_resend_returns_the_same_task` 等 6 項 |
+| 7 | P0 | 任務歸屬紀錄 | 派工前用原子且持久的紀錄綁定冪等鍵、請求摘要、所屬系統、task id；歸屬不明就停止派工（議會 F 條，新規定） | — | `src/cairnwork/ownership.py` `OwnershipLedger.bind/route/set_status` | `test:tests/test_ownership.py::test_resend_cannot_move_the_task_to_another_system`、`test_unknown_task_raises_instead_of_guessing_an_owner`、`test_concurrent_binds_of_one_key_create_exactly_one_task` |
 | 8 | P0 | 防重送 | attempt 以 `request_sha256` 為 key；已完成或已失敗：`REPLAY_FORBIDDEN`；進行中：`RECONCILIATION_REQUIRED` | EIA `nexus/services/external_intelligence.py:1928-1946, 2028-2046` | planned | planned |
 | 9 | P1 | 派工去重 | 每個任務、每個單元只派一次；安全重試最多一次；session 綁定任務、單元、workspace、worker | EIA `external_intelligence_fanout.py:672-706, 2112-2125` | planned | planned |
 | 10 | P1 | 來源血緣 | `main_sha` 必須是 tracking main 的祖先，remote 必須相符 | EIA `external_intelligence_automation.py:579-610` | planned | planned |
