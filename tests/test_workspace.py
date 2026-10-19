@@ -5,7 +5,7 @@ from cairnwork.workspace import (
     Attempt,
     CandidateRejected,
     WorkspaceError,
-    _refs,
+    _guarded_refs,
     collect_candidate,
     create_attempt_clone,
     remove_attempt_clone,
@@ -33,7 +33,7 @@ _ATTEMPTS = {}
 
 
 def collect(repo, clone, base, **kwargs):
-    made = _ATTEMPTS.get(clone) or Attempt("a1", base, clone, _refs(repo))
+    made = _ATTEMPTS.get(clone) or Attempt("a1", base, clone, _guarded_refs(repo, "a1"))
     return collect_candidate(repo, made, ALLOWED, **kwargs)
 
 
@@ -255,10 +255,32 @@ def test_refs_pushed_into_cairnworks_repository_reject_the_candidate(repo, tmp_p
     made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
     (made.path / "src" / "a.py").write_text("x = 2\n")
     commit(made.path)
-    git(made.path, "push", "-q", str(repo), "HEAD:refs/tags/planted")
+    git(made.path, "push", "-q", str(repo), "HEAD:refs/replace/" + base)
     with pytest.raises(CandidateRejected) as info:
         collect_candidate(repo, made, ALLOWED)
     assert info.value.code == "REPOSITORY_REFS_CHANGED"
+
+
+def test_another_attempts_ref_changing_rejects_the_candidate(repo, tmp_path):
+    base = git(repo, "rev-parse", "HEAD")
+    made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    (made.path / "src" / "a.py").write_text("x = 2\n")
+    head = commit(made.path)
+    git(repo, "update-ref", "refs/cairnwork/attempts/other", base)
+    with pytest.raises(CandidateRejected) as info:
+        collect_candidate(repo, made, ALLOWED)
+    assert info.value.code == "REPOSITORY_REFS_CHANGED"
+    assert head
+
+
+def test_ordinary_branch_updates_by_cairnwork_are_allowed(repo, tmp_path):
+    base = git(repo, "rev-parse", "HEAD")
+    made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    (made.path / "src" / "a.py").write_text("x = 2\n")
+    head = commit(made.path)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "main moved on")
+    git(repo, "tag", "release")
+    assert collect_candidate(repo, made, ALLOWED).candidate_commit == head
 
 
 def test_gitlink_paths_must_stay_empty(repo, tmp_path):

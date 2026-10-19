@@ -5,8 +5,13 @@ Each attempt is a separate ``git clone --no-local`` with its own ``.git``
 commit, with its ``origin`` remote removed so git gives the worker no handle
 on Cairnwork's repository. Cairnwork's repository path must still not be
 writable from the worker's sandbox: git cannot stop a process that already
-has write access, so ``collect_candidate`` also refuses a candidate when any
-ref in Cairnwork's repository changed during the attempt.
+has write access, and branch and tag protection relies on that. As a check on
+the refs that matter for verification, ``collect_candidate`` refuses a
+candidate when ``refs/replace/`` or another attempt's ``refs/cairnwork/`` ref
+changed during the attempt; ordinary branch updates by Cairnwork are allowed.
+
+The worker process must have exited before ``collect_candidate`` runs, and the
+clone must not change afterwards: the checks describe the clone at that moment.
 
 After the worker stops, ``collect_candidate`` fetches the clone's HEAD into
 ``refs/cairnwork/attempts/<attempt_id>`` and decides from Cairnwork's own
@@ -86,10 +91,14 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
         run_git(path, "remote", "remove", "origin")
         run_git(path, "checkout", "--quiet", "--detach", base_commit)
         head = run_git(path, "rev-parse", "HEAD").strip()
-        refs_before = _refs(repo)
+        refs_before = _guarded_refs(repo, attempt_id)
     except (GitCommandError, OSError) as exc:
         raise WorkspaceError(str(exc)) from exc
-    if head != base_commit or tree_differences(repo, base_commit, path):
+    try:
+        differences = tree_differences(repo, base_commit, path)
+    except GitCommandError as exc:
+        raise WorkspaceError(str(exc)) from exc
+    if head != base_commit or differences:
         raise WorkspaceError(f"{path} is not a clean checkout of {base_commit}")
     return Attempt(attempt_id, base_commit, path, refs_before)
 
@@ -137,7 +146,10 @@ def collect_candidate(
         run_git(repo, "diff", "--no-ext-diff", "--no-textconv", "--check", base, head)
     except GitCommandError as exc:
         raise CandidateRejected("DIFF_CHECK_FAILED", "whitespace errors in the change") from exc
-    differences = tree_differences(repo, head, attempt.path)
+    try:
+        differences = tree_differences(repo, head, attempt.path)
+    except GitCommandError as exc:
+        raise CandidateRejected("UNREADABLE_CHANGE", str(exc)) from exc
     if differences:
         raise CandidateRejected("DIRTY_TREE", ", ".join(differences[:5]))
     return Candidate(base, head, tuple(change.paths))
@@ -149,18 +161,26 @@ def _attempt_path(root: Path, attempt_id: str) -> Path:
     return Path(root) / attempt_id
 
 
-def _refs(repo: Path) -> str:
-    lines = run_git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
-    return "\n".join(line for line in sorted(lines) if not line.startswith(ATTEMPT_REF_PREFIX))
+GUARDED_REF_PREFIXES = ("refs/replace/", "refs/cairnwork/")
+
+
+def _guarded_refs(repo: Path, attempt_id: str) -> str:
+    own = ATTEMPT_REF_PREFIX + attempt_id + " "
+    lines = run_git(
+        repo, "for-each-ref", "--format=%(refname) %(objectname)", *GUARDED_REF_PREFIXES
+    ).splitlines()
+    return "\n".join(line for line in sorted(lines) if not line.startswith(own))
 
 
 def _require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
     try:
-        now = _refs(repo)
+        now = _guarded_refs(repo, attempt.attempt_id)
     except GitCommandError as exc:
         raise CandidateRejected("UNREADABLE_REPOSITORY", str(exc)) from exc
     if now != attempt.refs_before:
-        raise CandidateRejected("REPOSITORY_REFS_CHANGED", "refs changed during the attempt")
+        raise CandidateRejected(
+            "REPOSITORY_REFS_CHANGED", "guarded refs changed during the attempt"
+        )
 
 
 def _fetch_head(repo: Path, attempt: Attempt) -> str:

@@ -95,7 +95,11 @@ def _file_matches(path: Path, entry: TreeEntry | None) -> bool:
     if mode != entry.mode or info.st_size != entry.size:
         return False
     digest = hashlib.sha1(b"blob %d\0" % info.st_size, usedforsecurity=False)
-    with path.open("rb") as handle:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != entry.size:
+            return False  # swapped between lstat and open
         for chunk in iter(lambda: handle.read(CHUNK), b""):
             digest.update(chunk)
     return digest.hexdigest() == entry.oid
