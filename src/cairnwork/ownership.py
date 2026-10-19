@@ -2,23 +2,40 @@
 
 Every task is bound to exactly one owning system before dispatch. The binding
 is one atomic SQLite transaction keyed by idempotency key, and it carries the
-request digest, the owner and the task id. Resend, query, cancel and recovery
-route by this record; when no record exists the caller must stop, never guess.
+request digest, the card hash, the owner and the task id. Resend, query, cancel
+and recovery route by this record; when no record exists the caller must stop,
+never guess.
+
+At most one task per card is active. CANCELLED and SUPERSEDED release the card.
+COMPLETED and FAILED keep holding it: to retry a FAILED task, resend with the
+same key (same task) or mark it SUPERSEDED first, then bind a new key. The rule
+is enforced twice, in ``bind`` and by a partial unique index in the schema.
+
+The ledger must live on a local disk: it uses SQLite WAL, which is unsafe on
+network filesystems, and opening fails if WAL cannot be enabled.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 OWNERS = frozenset({"cairnwork", "nexus-new"})
 INACTIVE_STATUSES = frozenset({"SUPERSEDED", "CANCELLED"})
-STATUSES = frozenset({"BOUND", "DISPATCHED", "COMPLETED", "FAILED"}) | INACTIVE_STATUSES
+TRANSITIONS: dict[str, frozenset[str]] = {
+    "BOUND": frozenset({"DISPATCHED", "FAILED", "CANCELLED", "SUPERSEDED"}),
+    "DISPATCHED": frozenset({"COMPLETED", "FAILED", "CANCELLED"}),
+    "FAILED": frozenset({"SUPERSEDED"}),
+    "COMPLETED": frozenset(),
+    "CANCELLED": frozenset(),
+    "SUPERSEDED": frozenset(),
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS task_ownership (
@@ -30,6 +47,8 @@ CREATE TABLE IF NOT EXISTS task_ownership (
     status          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_ownership_card ON task_ownership (card_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS task_ownership_one_active_per_card
+    ON task_ownership (card_hash) WHERE status NOT IN ('SUPERSEDED', 'CANCELLED');
 """
 
 
@@ -46,6 +65,10 @@ class KeyReusedWithDifferentRequest(OwnershipError):
     code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST"
 
 
+class OwnerMismatch(OwnershipError):
+    code = "OWNER_MISMATCH"
+
+
 class DuplicateLogicalTask(OwnershipError):
     code = "DUPLICATE_LOGICAL_TASK"
 
@@ -56,6 +79,14 @@ class OwnershipUnknown(OwnershipError):
 
 class InvalidOwnershipValue(OwnershipError):
     code = "INVALID_OWNERSHIP_VALUE"
+
+
+class InvalidStatusTransition(OwnershipError):
+    code = "INVALID_STATUS_TRANSITION"
+
+
+class LedgerStorageUnsupported(OwnershipError):
+    code = "LEDGER_STORAGE_UNSUPPORTED"
 
 
 @dataclass(frozen=True)
@@ -75,8 +106,18 @@ class BindResult:
 
 
 def request_digest(request: dict[str, Any]) -> str:
-    """sha256 over canonical JSON, so key order and whitespace do not matter."""
-    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """sha256 over canonical JSON; key order and whitespace do not matter.
+
+    Only JSON-native values with string keys are accepted, so two different
+    requests cannot collapse into one digest (``{1: x}`` vs ``{"1": x}``), and
+    NaN or infinity are rejected.
+    """
+    if not isinstance(request, dict):
+        raise InvalidOwnershipValue("request must be a dict")
+    _check_json_value(request, "request")
+    canonical = json.dumps(
+        request, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -85,13 +126,15 @@ class OwnershipLedger:
         self._path = Path(path)
         conn = self._connect()
         try:
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                raise LedgerStorageUnsupported(f"journal_mode is {mode!r}, need wal")
             conn.executescript(_SCHEMA)
         finally:
             conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=FULL")
         return conn
 
@@ -99,38 +142,22 @@ class OwnershipLedger:
         self, idempotency_key: str, request: dict[str, Any], owner: str, card_hash: str
     ) -> BindResult:
         """Bind a new task, or return the existing binding for an identical resend."""
-        _require(idempotency_key, "idempotency_key")
-        _require(card_hash, "card_hash")
+        _require_token(idempotency_key, "idempotency_key")
+        _require_token(card_hash, "card_hash")
         if owner not in OWNERS:
             raise InvalidOwnershipValue(f"owner {owner!r}")
         digest = request_digest(request)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            existing = _select_by_key(conn, idempotency_key)
+            existing = _select(conn, "idempotency_key", idempotency_key)
             if existing is not None:
                 conn.execute("ROLLBACK")
-                if existing.request_digest != digest:
-                    raise KeyReusedWithDifferentRequest(idempotency_key)
-                return BindResult(existing, duplicate=True)
-            active = _active_for_card(conn, card_hash)
-            if active is not None:
-                conn.execute("ROLLBACK")
-                raise DuplicateLogicalTask(f"card {card_hash} owned by task {active.task_id}")
+                return BindResult(_same_binding(existing, digest, owner, card_hash), True)
             record = OwnershipRecord(
                 idempotency_key, digest, owner, f"task-{uuid.uuid4().hex}", card_hash, "BOUND"
             )
-            conn.execute(
-                "INSERT INTO task_ownership VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    record.idempotency_key,
-                    record.request_digest,
-                    record.owner,
-                    record.task_id,
-                    record.card_hash,
-                    record.status,
-                ),
-            )
+            _insert(conn, record)
             conn.execute("COMMIT")
             return BindResult(record, duplicate=False)
         finally:
@@ -147,51 +174,108 @@ class OwnershipLedger:
     ) -> OwnershipRecord:
         if (task_id is None) == (idempotency_key is None):
             raise InvalidOwnershipValue("give exactly one of task_id or idempotency_key")
+        column, value = (
+            ("task_id", task_id) if task_id is not None else ("idempotency_key", idempotency_key)
+        )
         conn = self._connect()
         try:
-            if task_id is not None:
-                row = conn.execute(
-                    "SELECT * FROM task_ownership WHERE task_id = ?", (task_id,)
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM task_ownership WHERE idempotency_key = ?", (idempotency_key,)
-                ).fetchone()
+            record = _select(conn, column, value)
         finally:
             conn.close()
-        if row is None:
-            raise OwnershipUnknown(task_id or idempotency_key or "")
-        return OwnershipRecord(*row)
+        if record is None:
+            raise OwnershipUnknown(str(value))
+        return record
 
-    def set_status(self, task_id: str, status: str) -> None:
-        """Change the status only; the owner of a task can never change."""
-        if status not in STATUSES:
+    def set_status(self, task_id: str, status: str) -> OwnershipRecord:
+        """Move a task along TRANSITIONS; the owner of a task can never change."""
+        if status not in TRANSITIONS:
             raise InvalidOwnershipValue(f"status {status!r}")
         conn = self._connect()
         try:
-            cur = conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            current = _select(conn, "task_id", task_id)
+            if current is None:
+                raise OwnershipUnknown(task_id)
+            if status not in TRANSITIONS[current.status]:
+                raise InvalidStatusTransition(f"{current.status} -> {status}")
+            conn.execute(
                 "UPDATE task_ownership SET status = ? WHERE task_id = ?", (status, task_id)
             )
+            conn.execute("COMMIT")
+            return replace(current, status=status)
         finally:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             conn.close()
-        if cur.rowcount != 1:
-            raise OwnershipUnknown(task_id)
 
 
-def _require(value: str, name: str) -> None:
-    if not isinstance(value, str) or not value.strip():
-        raise InvalidOwnershipValue(f"{name} must be a non-empty string")
+def _same_binding(
+    existing: OwnershipRecord, digest: str, owner: str, card_hash: str
+) -> OwnershipRecord:
+    if existing.request_digest != digest or existing.card_hash != card_hash:
+        raise KeyReusedWithDifferentRequest(existing.idempotency_key)
+    if existing.owner != owner:
+        raise OwnerMismatch(f"{existing.task_id} is owned by {existing.owner}, not {owner}")
+    return existing
 
 
-def _select_by_key(conn: sqlite3.Connection, key: str) -> OwnershipRecord | None:
-    row = conn.execute("SELECT * FROM task_ownership WHERE idempotency_key = ?", (key,)).fetchone()
+def _insert(conn: sqlite3.Connection, record: OwnershipRecord) -> None:
+    try:
+        conn.execute(
+            "INSERT INTO task_ownership VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record.idempotency_key,
+                record.request_digest,
+                record.owner,
+                record.task_id,
+                record.card_hash,
+                record.status,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        active = _active_for_card(conn, record.card_hash)
+        if active is None:
+            raise
+        raise DuplicateLogicalTask(
+            f"card {record.card_hash} owned by task {active.task_id}"
+        ) from exc
+
+
+def _require_token(value: str, name: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise InvalidOwnershipValue(f"{name} must be a non-empty string without outer spaces")
+
+
+def _check_json_value(value: Any, where: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise InvalidOwnershipValue(f"{where}: key {key!r} is not a string")
+            _check_json_value(item, f"{where}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _check_json_value(item, f"{where}[{index}]")
+    elif isinstance(value, float):
+        if not math.isfinite(value):
+            raise InvalidOwnershipValue(f"{where}: {value!r} is not finite")
+    elif value is not None and not isinstance(value, str | int | bool):
+        raise InvalidOwnershipValue(f"{where}: {type(value).__name__} is not JSON")
+
+
+def _select(conn: sqlite3.Connection, column: str, value: Any) -> OwnershipRecord | None:
+    if column not in {"idempotency_key", "task_id"}:
+        raise InvalidOwnershipValue(f"column {column!r}")
+    row = conn.execute(
+        f"SELECT * FROM task_ownership WHERE {column} = ?",  # noqa: S608 - column is whitelisted
+        (value,),
+    ).fetchone()
     return OwnershipRecord(*row) if row else None
 
 
 def _active_for_card(conn: sqlite3.Connection, card_hash: str) -> OwnershipRecord | None:
-    placeholders = ",".join("?" for _ in INACTIVE_STATUSES)
     row = conn.execute(
-        f"SELECT * FROM task_ownership WHERE card_hash = ? AND status NOT IN ({placeholders})",  # noqa: S608
-        (card_hash, *sorted(INACTIVE_STATUSES)),
+        "SELECT * FROM task_ownership WHERE card_hash = ?"
+        " AND status NOT IN ('SUPERSEDED', 'CANCELLED')",
+        (card_hash,),
     ).fetchone()
     return OwnershipRecord(*row) if row else None
