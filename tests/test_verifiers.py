@@ -1,4 +1,5 @@
 import sys
+import time
 
 import pytest
 from conftest import commit_change, git
@@ -126,3 +127,130 @@ def test_verifier_observations_lead_to_core_verified(project, tmp_path):
     notary = Notary(tmp_path / "notary.sqlite")
     verdict = notary.notarize("task-1", "a1", spec, project, base, head, (result.observation,))
     assert verdict.verified
+
+
+@pytest.mark.parametrize(
+    "files,target",
+    [
+        ({"pytest.ini": "[pytest]\naddopts = --ignore=tests\n"}, "tests/test_a.py::test_x"),
+        ({"src/src_a.py": "import os\nos._exit(0)\n"}, "tests/test_a.py::test_x"),
+        (
+            {"tests/test_skip.py": "import pytest\n@pytest.mark.skip\ndef test_s():\n    pass\n"},
+            "tests/test_skip.py",
+        ),
+        ({"tests/test_none.py": "x = 1\n"}, "tests/test_none.py"),
+        (
+            {
+                "tests/test_ax.py": "import atexit, os\natexit.register(lambda: os._exit(0))\n"
+                "def test_f():\n    assert False\n"
+            },
+            "tests/test_ax.py",
+        ),
+        (
+            {
+                "tests/test_xf.py": "import pytest\npytestmark = pytest.mark.xfail\n"
+                "def test_f():\n    assert False\n"
+            },
+            "tests/test_xf.py",
+        ),
+        (
+            {
+                "tests/conftest.py": "def pytest_sessionfinish(session, exitstatus):\n"
+                "    session.exitstatus = 0\n",
+                "tests/test_cf.py": "def test_f():\n    assert False\n",
+            },
+            "tests/test_cf.py",
+        ),
+        (
+            {
+                "setup.cfg": "[tool:pytest]\naddopts = --co\n",
+                "tests/test_co.py": "def test_f():\n    assert False\n",
+            },
+            "tests/test_co.py",
+        ),
+    ],
+    ids=[
+        "addopts-hijack",
+        "exit-0-on-import",
+        "all-skipped",
+        "no-tests",
+        "atexit-exit-0",
+        "xfail-all",
+        "conftest-exitstatus",
+        "setup-cfg-collect-only",
+    ],
+)
+def test_runs_that_do_not_really_pass_tests_fail(project, tmp_path, files, target):
+    head = commit_change(project, files)
+    result = run(project, tmp_path, head, target)
+    assert not result.observation.passed
+
+
+def test_background_processes_are_killed_after_the_run(project, tmp_path):
+    marker = tmp_path / "late-write"
+    child = f"import time, pathlib; time.sleep(2); pathlib.Path({str(marker)!r}).write_text('x')"
+    head = commit_change(
+        project,
+        {
+            "tests/test_bg.py": (
+                "import subprocess, sys\n"
+                "def test_spawn():\n"
+                f"    subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            )
+        },
+    )
+    assert run(project, tmp_path, head, "tests/test_bg.py").observation.passed
+    time.sleep(3)
+    assert not marker.exists()
+
+
+def test_logs_are_never_written_through_a_symlink(tmp_path):
+    from cairnwork.verifiers import _write_new
+
+    target = tmp_path / "victim"
+    target.write_text("keep")
+    (tmp_path / "log").symlink_to(target)
+    with pytest.raises(OSError):
+        _write_new(tmp_path / "log", b"overwrite")
+    assert target.read_text() == "keep"
+
+
+def test_protected_verifier_inputs():
+    from cairnwork.verifiers import protected_verifier_inputs
+
+    paths = ("src/a.py", "tests/test_a.py", "pkg/conftest.py", "pyproject.toml", "setup.cfg")
+    assert protected_verifier_inputs(paths) == paths[1:]
+
+
+def test_ini_in_a_parent_directory_is_ignored(project, tmp_path):
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "pytest.ini").write_text("[pytest]\naddopts = --co\n")
+    result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
+    assert not result.observation.passed
+
+
+def test_duplicate_verifier_ids_are_rejected(project, tmp_path):
+    spec = parse_verifier("pytest", PYTEST + ["tests/test_a.py"])
+    with pytest.raises(VerifierRejected):
+        run_verifiers(project, git(project, "rev-parse", "HEAD"), (spec, spec), tmp_path, "r1")
+
+
+def test_output_over_the_cap_fails(project, tmp_path, monkeypatch):
+    import cairnwork.verifiers as verifiers
+
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    assert run(project, tmp_path / "ok", head, "tests/test_a.py::test_x").observation.passed
+    monkeypatch.setattr(verifiers, "MAX_LOG_BYTES", 10)
+    assert not run(project, tmp_path / "big", head, "tests/test_a.py::test_x").observation.passed
+
+
+def test_observation_hash_binds_the_candidate_commit(project, tmp_path, monkeypatch):
+    import cairnwork.verifiers as verifiers
+
+    monkeypatch.setattr(verifiers, "_file_sha256", lambda _path: "same-log")
+    first = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    second = commit_change(project, {"src/other.py": "Y = 1\n"})
+    one = run(project, tmp_path / "1", first, "tests/test_a.py::test_x").observation
+    two = run(project, tmp_path / "2", second, "tests/test_a.py::test_x").observation
+    assert one.passed and two.passed
+    assert one.artifact_hash != two.artifact_hash
