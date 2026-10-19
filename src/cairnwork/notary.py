@@ -214,7 +214,7 @@ class Notary:
         base, candidate, request_hash, request_json, http_status, status, integrity, resp = row
         request, response = json.loads(request_json), json.loads(resp)
         verified = _is_verified(http_status, status, integrity, response, request, request_hash)
-        verified = verified and _columns_match(request, base, candidate)
+        verified = verified and _columns_match(request, task_id, attempt_id, base, candidate)
         if expected_candidate is not None and expected_candidate != candidate:
             verified = False
         return Verdict(
@@ -279,12 +279,17 @@ def _is_verified(
     return all(expected[key] is not None and echoed.get(key) == expected[key] for key in _HASH_KEYS)
 
 
-def _columns_match(request: dict[str, Any], base: str, candidate: str) -> bool:
-    change_set = request.get("change_set")
-    if not isinstance(change_set, dict):
+def _columns_match(
+    request: dict[str, Any], task_id: str, attempt_id: str, base: str, candidate: str
+) -> bool:
+    """A row's key and commit columns must be the ones its stored request was built for."""
+    change_set, contract = request.get("change_set"), request.get("acceptance_contract")
+    if not isinstance(change_set, dict) or not isinstance(contract, dict):
         return False
     return (
-        change_set.get("source_revision") == f"git-commit:{base}"
+        contract.get("contract_id") == task_id
+        and change_set.get("change_set_id") == f"{task_id}/{attempt_id}"
+        and change_set.get("source_revision") == f"git-commit:{base}"
         and change_set.get("target_revision") == f"git-commit:{candidate}"
     )
 

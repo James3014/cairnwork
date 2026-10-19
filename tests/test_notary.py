@@ -256,3 +256,22 @@ def test_old_schema_fails_with_a_code(tmp_path):
     conn.close()
     with pytest.raises(NotarySchemaMismatch):
         Notary(path)
+
+
+@pytest.mark.parametrize("task,attempt", [("task-2", "a1"), ("task-1", "a9")])
+def test_verified_row_copied_to_another_task_or_attempt_is_not_verified(
+    repo, notary, tmp_path, task, attempt
+):
+    verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
+    conn = sqlite3.connect(tmp_path / "notary.sqlite")
+    conn.execute(
+        "INSERT INTO core_verifications (task_id, attempt_id, base_commit, candidate_commit,"
+        " request_hash, request_json, http_status, status, integrity, response_json, recorded_at)"
+        " SELECT ?, ?, base_commit, candidate_commit, request_hash, request_json, http_status,"
+        " status, integrity, response_json, recorded_at FROM core_verifications",
+        (task, attempt),
+    )
+    conn.commit()
+    conn.close()
+    copied = notary.verdict(task, attempt, expected_candidate=verdict.candidate_commit)
+    assert copied is not None and not copied.verified
