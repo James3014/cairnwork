@@ -235,6 +235,8 @@ def test_schema_rejects_unknown_status_values(tmp_path):
 
 
 def test_failed_transaction_is_rolled_back_and_releases_the_lock(tmp_path):
+    # The write lock must be free after a failed set_status. Either the explicit
+    # ROLLBACK or closing the connection releases it; both are intended.
     path = tmp_path / "ownership.sqlite"
     ledger = OwnershipLedger(path)
     record = ledger.bind("key-1", REQUEST, "cairnwork", "card-1").record
@@ -248,3 +250,12 @@ def test_failed_transaction_is_rolled_back_and_releases_the_lock(tmp_path):
     conn.execute("ROLLBACK")
     conn.close()
     assert ledger.get(task_id=record.task_id).status == "CANCELLED"
+
+
+def test_resend_of_a_failed_task_returns_it_without_reopening_it(ledger):
+    record = ledger.bind("key-1", REQUEST, "cairnwork", "card-1").record
+    ledger.set_status(record.task_id, "FAILED")
+    again = ledger.bind("key-1", REQUEST, "cairnwork", "card-1")
+    assert again.duplicate and again.record.status == "FAILED"
+    with pytest.raises(InvalidStatusTransition):
+        ledger.set_status(record.task_id, "DISPATCHED")

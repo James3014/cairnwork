@@ -7,8 +7,9 @@ and recovery route by this record; when no record exists the caller must stop,
 never guess.
 
 At most one task per card is active. CANCELLED and SUPERSEDED release the card.
-COMPLETED and FAILED keep holding it: to retry a FAILED task, resend with the
-same key (same task) or mark it SUPERSEDED first, then bind a new key. The rule
+COMPLETED and FAILED keep holding it. A resend with the same key returns the
+same record and never re-runs it (a FAILED task stays FAILED); to retry, mark the
+FAILED task SUPERSEDED, then bind a new key. The rule
 lives in the schema (a partial unique index), so it also holds for raw writers;
 ``bind`` maps the index violation to DuplicateLogicalTask.
 
