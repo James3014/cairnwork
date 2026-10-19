@@ -4,7 +4,7 @@ Cairnwork 是公開 repo。一次資安事件就可能毀掉整個產品，所�
 
 ## 回報
 
-不要開公開 Issue。請寄 coord 信給整合負責人（`coord who repo:cairnwork`），或直接告訴 James。
+不要開公開 Issue。外部回報請用 GitHub 的私密漏洞回報（repo 的 **Security → Report a vulnerability**）。內部 session 寄 coord 信給整合負責人。
 
 ## 情境一：憑證外洩（token、key、密碼進了 repo 或 log）
 
