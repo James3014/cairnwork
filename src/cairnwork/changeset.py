@@ -10,17 +10,14 @@ cannot point it at another repository.
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-_OID = re.compile(r"^[0-9a-f]{40}$")
+from cairnwork.gitcmd import OID, GitCommandError, run_git
+
 _ZERO_OID = "0" * 40
 _ZERO_MODE = "000000"
 _KINDS = {"A": "ADD", "M": "MODIFY", "D": "DELETE", "T": "MODIFY"}
-GIT_TIMEOUT_SECONDS = 60
 
 
 class ChangeSetError(Exception):
@@ -70,7 +67,7 @@ class GitChangeSet:
 def read_change_set(repo: Path, base_commit: str, candidate_commit: str) -> GitChangeSet:
     """Read the change from base to candidate; both must be full commit ids."""
     for name, value in (("base_commit", base_commit), ("candidate_commit", candidate_commit)):
-        if not _OID.match(value):
+        if not OID.match(value):
             raise ChangeSetError(f"{name} must be a 40-hex commit id")
     if base_commit == candidate_commit:
         raise ChangeSetError("candidate_commit equals base_commit")
@@ -90,7 +87,7 @@ def _tree_of(repo: Path, commit: str) -> str:
     if kind != "commit":
         raise ChangeSetError(f"{commit} is a {kind}, not a commit")
     tree = _git(repo, "rev-parse", f"{commit}^{{tree}}").strip()
-    if not _OID.match(tree):
+    if not OID.match(tree):
         raise ChangeSetError(f"tree of {commit} is malformed")
     return tree
 
@@ -122,15 +119,6 @@ def _parse_raw(raw: str) -> tuple[ManifestEntry, ...]:
 
 def _git(repo: Path, *args: str) -> str:
     try:
-        done = subprocess.run(  # noqa: S603 - fixed git argv, no shell
-            ["git", "-C", str(repo), *args],  # noqa: S607
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=GIT_TIMEOUT_SECONDS,
-            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
-        )
-    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
+        return run_git(repo, *args)
+    except GitCommandError as exc:
         raise ChangeSetError(f"git {args[0]} failed") from exc
-    return done.stdout
