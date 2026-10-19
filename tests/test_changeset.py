@@ -41,3 +41,20 @@ def test_empty_change_is_rejected(repo):
     git(repo, "commit", "-q", "--allow-empty", "-m", "empty")
     with pytest.raises(ChangeSetError):
         read_change_set(repo, base, git(repo, "rev-parse", "HEAD"))
+
+
+def test_typechange_is_a_modify_with_a_new_mode(repo):
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "b.py").unlink()
+    (repo / "src" / "b.py").symlink_to("a.py")
+    head = commit_change(repo)
+    entry = next(e for e in read_change_set(repo, base, head).entries if e.path == "src/b.py")
+    assert entry.change_type == "MODIFY"
+    assert (entry.before_mode, entry.after_mode) == ("100644", "120000")
+
+
+def test_inherited_git_environment_is_ignored(repo, tmp_path, monkeypatch):
+    base = git(repo, "rev-parse", "HEAD")
+    head = commit_change(repo, {"src/a.py": "x = 2\n"})
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "elsewhere"))
+    assert [e.path for e in read_change_set(repo, base, head).entries] == ["src/a.py"]

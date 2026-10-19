@@ -2,11 +2,15 @@
 
 The manifest is read from git itself (``git diff-tree --raw``), never from what
 a worker claims it changed. Renames are disabled so every path is an explicit
-ADD, MODIFY or DELETE, which is what nexus-certify's manifest expects.
+ADD, MODIFY or DELETE, which is what nexus-certify's manifest expects. A type
+change (file <-> symlink, git status ``T``) is a MODIFY with a different mode.
+Git runs with every inherited ``GIT_*`` variable removed, so a hook environment
+cannot point it at another repository.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -15,7 +19,7 @@ from pathlib import Path
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _ZERO_OID = "0" * 40
 _ZERO_MODE = "000000"
-_KINDS = {"A": "ADD", "M": "MODIFY", "D": "DELETE"}
+_KINDS = {"A": "ADD", "M": "MODIFY", "D": "DELETE", "T": "MODIFY"}
 GIT_TIMEOUT_SECONDS = 60
 
 
@@ -123,8 +127,10 @@ def _git(repo: Path, *args: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=GIT_TIMEOUT_SECONDS,
+            env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
         raise ChangeSetError(f"git {args[0]} failed") from exc
     return done.stdout
