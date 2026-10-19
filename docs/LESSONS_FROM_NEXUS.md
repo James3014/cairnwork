@@ -4,7 +4,7 @@ Cairnwork 是 Nexus-new 的後繼產品。下面每一條都是 Nexus-new 真的
 
 ## 1. 假完成
 
-**Nexus-new 的狀況**：2026-10-16 的稽核發現，整個 repo 家族裡有 6.6%～10% 的 PR 是「宣稱完成，其實沒完成」。治理規則訂得多嚴，跟假完成的比例沒有關係，真正抓得到的是實際使用和獨立審查。
+**Nexus-new 的狀況**：2026-10-17 對 11 個 repo、2,018 張 PR 的稽核發現，「宣稱完成，其實沒完成」的 PR 確認下限是 6.6%，推估 8%～10%。治理規則訂得多嚴，跟假完成的比例沒有關係，真正抓得到的是實際使用和獨立審查。
 
 **規則**
 - 只有 nexus-core 的 VERIFIED 才算完成，而且這個 VERIFIED 必須綁定 Core 實際驗證過的那一個 commit（`notary.verdict(..., expected_candidate=)`）。
@@ -23,7 +23,7 @@ Cairnwork 是 Nexus-new 的後繼產品。下面每一條都是 Nexus-new 真的
 
 ## 3. 紀錄被覆蓋
 
-**Nexus-new 的狀況**：公證紀錄用 `INSERT OR REPLACE` 寫入，結果後來的 VERIFIED 可以蓋掉先前的 FAILED_VERIFICATION（Nexus-new#2776）。
+**Nexus-new 的狀況**：公證紀錄用 `INSERT OR REPLACE` 寫入，後來的 VERIFIED 可以蓋掉先前的 FAILED（Nexus-new#2776，截至 2026-10-19 尚未修復）。
 
 **規則**
 - 判決、收據、證據一律只能新增，不能修改：用 UNIQUE 限制加上禁止 UPDATE／DELETE 的 trigger，也禁止對已經存在的鍵再做 INSERT。
@@ -58,18 +58,18 @@ Cairnwork 是 Nexus-new 的後繼產品。下面每一條都是 Nexus-new 真的
 
 ## 7. 照抄舊程式
 
-**Nexus-new 的狀況**：拆分 repo 時留下了寫死的主機路徑（17 個檔案）、散落在 41 個檔案裡的 port，還有寫死在 `/tmp` 的狀態檔。
+**Nexus-new 的狀況**：17 個檔案裡寫死了主機路徑（其中可能有一部分是刻意的部署契約），port 則散落在 41 個檔案裡。
 
 **規則**
-- 從對方的協定或規格重新實作，不要整段複製。例如 Core 公證是照 nexus-certify 自己的協定寫的，不是複製 Nexus-new 的 transport。
+- 從對方的協定或規格重新實作，不要整段複製。例如 Cairnwork 的 Core 公證是照 nexus-certify 公開的 generic verification 協定寫的，不是複製 Nexus-new 的 transport。
 - repo 是公開的，所以主機路徑、內部 IP、帳號 email、token 都不能進 repo。
 
 ## 8. 治理比產品長得快
 
-**Nexus-new 的狀況**：合併規則、anchor、簽章、lane 區塊一層一層疊上去，很多後來又退役了；治理機制本身就占了相當大的程式量與維護量。
+**Nexus-new 的狀況**：合併規則、anchor、簽章、lane 區塊一層一層疊上去，其中簽章和 lane 區塊後來都退役了。
 
 **規則**
-- 一條新的關卡，要先說清楚它擋住的是哪一種真實會發生的錯誤，而且要有評估證據（見 skill nexus-detector-eval）。
+- 一條新的關卡，要先說清楚它擋住的是哪一種真實會發生的錯誤，並附上評估證據：用真實資料量誤擋率，用另外寫的案例量偵測率。
 - 能用一條 CI 規則或一個測試擋住的，就不要另外造一套機制。
 
 ## 9. 審查要對抗式，而且要動手試
