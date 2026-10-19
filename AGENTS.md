@@ -1,6 +1,6 @@
 # Cairnwork repository contract
 
-Read `README.md` first. Decision and council record: knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md` and `nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md` (clauses A–I).
+Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first. Decision and council record: knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md` and `nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md` (clauses A–I).
 
 ## Before you change anything
 
