@@ -33,9 +33,18 @@ Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexu
 - Ruff BLE001／S110 開啟；失敗情境測試證明失敗不會變成成功。
 - import-linter：禁止循環、禁止核心 import `experimental/`。
 
+## 對外說法
+
+README、發布說明、PR 描述只寫已經量到的結果，不寫預期的提升。11/16 試點到期時，評估標準是有沒有在 A/B 贏過裸骨幹、四種演練有沒有通過，不看功能數或 PR 數。
+
 ## 參與方式
 
 要改 Cairnwork，先寄 coord 信給整合負責人（`coord who repo:cairnwork`）取得範圍。同時開發的 Claude session 最多 2 個。
+
+## 文件
+
+- `docs/PRESERVED_BEHAVIORS.md`：試點必須保留的必要保障（議會 D 條）。
+- `SECURITY.md`：事故應變。
 
 ## 開發
 
