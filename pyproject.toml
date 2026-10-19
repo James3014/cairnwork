@@ -8,7 +8,9 @@ version = "0.0.1.dev0"
 description = "Cairnwork: governed agent task core (successor to Nexus-new)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "nexus-certify",
+]
 
 [dependency-groups]
 dev = [
@@ -49,3 +51,6 @@ allow_indirect_imports = false
 name = "No import cycles between cairnwork modules"
 type = "acyclic_siblings"
 ancestors = ["cairnwork"]
+
+[tool.uv.sources]
+nexus-certify = { git = "https://github.com/James3014/nexus-core.git", rev = "b07ae36d64501af761e8f2069830b79f89ac733b" }
