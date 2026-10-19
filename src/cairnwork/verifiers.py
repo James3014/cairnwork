@@ -23,8 +23,12 @@ code, timeout, mutations, test result and log hash.
 The candidate's code runs on this host and in the same process as pytest. This
 is not a sandbox: hostile code can reach the network and the user's files, and
 can forge a passing result (for example by writing the report and exiting).
-Callers must therefore keep tests and pytest configuration out of the files a
-candidate may change (``protected_verifier_inputs``). Running verifiers in a
+Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
+pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
+pytest configuration and root-level modules out of the files a candidate may
+change (``protected_verifier_inputs``), but that is not enough on its own:
+candidate source code also runs inside the pytest process and can forge a
+result. A pass here is evidence, not proof, until verifiers run in a sandbox. Running verifiers in a
 sandbox is tracked in docs/PRESERVED_BEHAVIORS.md (open question under #14).
 """
 
@@ -34,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import signal
 import subprocess
 import sys
@@ -51,7 +56,16 @@ _TARGET = re.compile(r"^tests/(?:[A-Za-z0-9_\-]+/)*[A-Za-z0-9_\-]+\.py(?:::[A-Za
 _OPTIONS = {("-q",), ("-p", "no:cacheprovider")}
 _ENV_KEEP = ("PATH", "LANG", "LC_ALL")
 _PROTECTED_NAMES = frozenset(
-    {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "setup.py"}
+    {
+        "conftest.py",
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+        "setup.py",
+        "sitecustomize.py",
+        "usercustomize.py",
+    }
 )
 MAX_LOG_BYTES = 4 << 20
 MAX_REPORT_BYTES = 4 << 20
@@ -139,7 +153,9 @@ def protected_verifier_inputs(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(
         path
         for path in paths
-        if path.startswith("tests/") or path.rsplit("/", 1)[-1] in _PROTECTED_NAMES
+        if path.startswith("tests/")
+        or path.rsplit("/", 1)[-1] in _PROTECTED_NAMES
+        or ("/" not in path and path.endswith((".py", ".pth")))
     )
 
 
@@ -157,6 +173,7 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
     )
     argv = [
         python,
+        "-P",
         "-m",
         "pytest",
         "-q",
@@ -191,7 +208,7 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
     )
     digest = hashlib.sha256(record.encode()).hexdigest()
     observation = VerifierObservation(
-        spec.verifier_id, f"{checkout.name}.log", f"sha256:{digest}", passed
+        spec.verifier_id, f"{private.name}/verifier.log", f"sha256:{digest}", passed
     )
     return VerifierRun(spec, returncode, timed_out, mutated, log_path, observation)
 
@@ -208,6 +225,7 @@ def _execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool]:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            preexec_fn=_limit_file_size,  # noqa: PLW1509 - only setrlimit, no locks
         )
         timed_out = False
         try:
@@ -217,6 +235,12 @@ def _execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool]:
         _kill_group(process.pid)
         process.wait()
     return (None if timed_out else process.returncode), timed_out
+
+
+def _limit_file_size() -> None:
+    """In the child: no file it writes (log, report, scratch) may exceed the caps."""
+    limit = MAX_LOG_BYTES + MAX_REPORT_BYTES
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
 
 
 def _file_sha256(path: Path) -> str:

@@ -218,7 +218,16 @@ def test_logs_are_never_written_through_a_symlink(tmp_path):
 def test_protected_verifier_inputs():
     from cairnwork.verifiers import protected_verifier_inputs
 
-    paths = ("src/a.py", "tests/test_a.py", "pkg/conftest.py", "pyproject.toml", "setup.cfg")
+    paths = (
+        "src/a.py",
+        "tests/test_a.py",
+        "pkg/conftest.py",
+        "pyproject.toml",
+        "setup.cfg",
+        "pytest.py",
+        "evil.pth",
+        "src/sitecustomize.py",
+    )
     assert protected_verifier_inputs(paths) == paths[1:]
 
 
@@ -254,3 +263,33 @@ def test_observation_hash_binds_the_candidate_commit(project, tmp_path, monkeypa
     two = run(project, tmp_path / "2", second, "tests/test_a.py::test_x").observation
     assert one.passed and two.passed
     assert one.artifact_hash != two.artifact_hash
+
+
+def test_root_pytest_module_cannot_replace_pytest(project, tmp_path):
+    fake = (
+        "import sys\n"
+        "for arg in sys.argv:\n"
+        "    if arg.startswith('--junitxml='):\n"
+        "        open(arg.split('=', 1)[1], 'w').write(\n"
+        '            \'<testsuite tests="1" failures="0" errors="0" skipped="0"/>\')\n'
+        "sys.exit(0)\n"
+    )
+    head = commit_change(
+        project, {"pytest.py": fake, "tests/test_fake.py": "def test_f():\n    assert False\n"}
+    )
+    assert not run(project, tmp_path, head, "tests/test_fake.py").observation.passed
+
+
+def test_candidate_only_reachable_from_attempt_refs_can_be_verified(project, tmp_path):
+    base = git(project, "rev-parse", "HEAD")
+    tree_commit = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    git(project, "update-ref", "refs/cairnwork/attempts/a1", tree_commit)
+    git(project, "reset", "-q", "--hard", base)
+    git(project, "reflog", "expire", "--expire=now", "--all")
+    result = run(project, tmp_path, tree_commit, "tests/test_a.py::test_x")
+    assert result.observation.passed
+
+
+def test_artifact_id_points_at_the_log(project, tmp_path):
+    result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
+    assert (tmp_path / "runs" / result.observation.artifact_id) == result.log_path
