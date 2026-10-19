@@ -7,9 +7,12 @@ not verified.
 
 The notary builds the Core request itself from the task's acceptance spec, the
 git change set and Cairnwork's verifier observations, so a verdict is always
-bound to one exact change: the stored row keeps the full request, the base and
-candidate commits, and its digest. A reader confirms the commit it holds with
-``verdict(..., expected_candidate=...)``.
+bound to one exact change. It reads the change set from git itself (callers
+pass a repository and two commit ids, never a change set), and the stored row
+keeps the full request, the base and candidate commits, and its digest. Every
+reader must name the candidate commit it holds: ``verdict(..., expected_candidate=)``
+is required, and a row whose columns disagree with its stored request is not
+verified.
 
 The record is append-only: one row per (task_id, attempt_id), enforced by a
 UNIQUE constraint and by triggers that abort UPDATE, DELETE and any INSERT
@@ -32,11 +35,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cairnwork.changeset import GitChangeSet
+from cairnwork.changeset import read_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
 
 CoreVerify = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
 CORE_ERROR = "CORE_ERROR"
+SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS core_verifications (
@@ -90,6 +94,10 @@ class NotaryInputError(NotaryError):
     code = "NOTARY_INPUT_ERROR"
 
 
+class NotarySchemaMismatch(NotaryError):
+    code = "NOTARY_SCHEMA_MISMATCH"
+
+
 @dataclass(frozen=True)
 class Verdict:
     task_id: str
@@ -116,7 +124,14 @@ class Notary:
         self._core_verify = core_verify or default_core_verify()
         conn = self._connect()
         try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'core_verifications'"
+            ).fetchone()
+            if has_table and version != SCHEMA_VERSION:
+                raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
             conn.executescript(_SCHEMA)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         finally:
             conn.close()
 
@@ -130,12 +145,15 @@ class Notary:
         task_id: str,
         attempt_id: str,
         spec: AcceptanceSpec,
-        change: GitChangeSet,
+        repo: Path,
+        base_commit: str,
+        candidate_commit: str,
         observations: tuple[VerifierObservation, ...],
     ) -> Verdict:
         """Verify one attempt with Core, once; later calls return the recorded verdict."""
         if spec.contract_id != task_id:
             raise NotaryInputError(f"spec.contract_id {spec.contract_id!r} is not task {task_id!r}")
+        change = read_change_set(repo, base_commit, candidate_commit)
         request = _frozen(build_core_request(spec, change, observations, attempt_id=attempt_id))
         request_hash = _digest(request)
         recorded = self._recorded(task_id, attempt_id, request_hash)
@@ -169,14 +187,17 @@ class Notary:
         finally:
             conn.close()
         stored = self._recorded(task_id, attempt_id, request_hash)
-        if stored is None:
+        if stored is None:  # pragma: no cover - only if the row vanished
             raise NotaryError("core verification was not recorded")
         return stored
 
-    def verdict(
-        self, task_id: str, attempt_id: str, *, expected_candidate: str | None = None
+    def verdict(self, task_id: str, attempt_id: str, *, expected_candidate: str) -> Verdict | None:
+        """Read the recorded verdict; it is unverified unless it is for expected_candidate."""
+        return self._read(task_id, attempt_id, expected_candidate)
+
+    def _read(
+        self, task_id: str, attempt_id: str, expected_candidate: str | None
     ) -> Verdict | None:
-        """Read the recorded verdict; with expected_candidate, a different commit is unverified."""
         conn = self._connect()
         try:
             row = conn.execute(
@@ -192,6 +213,7 @@ class Notary:
         base, candidate, request_hash, request_json, http_status, status, integrity, resp = row
         request, response = json.loads(request_json), json.loads(resp)
         verified = _is_verified(http_status, status, integrity, response, request, request_hash)
+        verified = verified and _columns_match(request, base, candidate)
         if expected_candidate is not None and expected_candidate != candidate:
             verified = False
         return Verdict(
@@ -208,7 +230,7 @@ class Notary:
         )
 
     def _recorded(self, task_id: str, attempt_id: str, request_hash: str) -> Verdict | None:
-        recorded = self.verdict(task_id, attempt_id)
+        recorded = self._read(task_id, attempt_id, expected_candidate=None)
         if recorded is not None and recorded.request_hash != request_hash:
             raise AttemptRequestMismatch(
                 f"{task_id}/{attempt_id} was notarized for another request"
@@ -254,6 +276,16 @@ def _is_verified(
     if not isinstance(echoed, dict):
         return False
     return all(expected[key] is not None and echoed.get(key) == expected[key] for key in _HASH_KEYS)
+
+
+def _columns_match(request: dict[str, Any], base: str, candidate: str) -> bool:
+    change_set = request.get("change_set")
+    if not isinstance(change_set, dict):
+        return False
+    return (
+        change_set.get("source_revision") == f"git-commit:{base}"
+        and change_set.get("target_revision") == f"git-commit:{candidate}"
+    )
 
 
 def _request_hashes(request: dict[str, Any]) -> dict[str, str | None]:

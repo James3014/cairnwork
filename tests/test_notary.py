@@ -6,9 +6,14 @@ import pytest
 from conftest import commit_change, git
 from product.adapters.generic_verification import verify_generic_changeset
 
-from cairnwork.changeset import read_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
-from cairnwork.notary import CORE_ERROR, AttemptRequestMismatch, Notary, NotaryInputError
+from cairnwork.notary import (
+    CORE_ERROR,
+    AttemptRequestMismatch,
+    Notary,
+    NotaryInputError,
+    NotarySchemaMismatch,
+)
 
 PASS = (VerifierObservation("pytest", "artifact-1", "sha256:" + "e" * 64, True),)
 FAIL = (VerifierObservation("pytest", "artifact-1", "sha256:" + "e" * 64, False),)
@@ -20,12 +25,16 @@ def spec(allowed=("src/a.py",), verifiers=("pytest",), deletions=False, task="ta
 
 def change(repo, files=None, delete=()):
     base = git(repo, "rev-parse", "HEAD")
-    head = commit_change(repo, files or {}, delete=delete)
-    return read_change_set(repo, base, head)
+    return base, commit_change(repo, files or {}, delete=delete)
 
 
 def notarize(notary, repo, files=None, *, s=None, obs=PASS, delete=(), attempt="a1"):
-    return notary.notarize("task-1", attempt, s or spec(), change(repo, files, delete), obs)
+    base, head = change(repo, files, delete)
+    return notary.notarize("task-1", attempt, s or spec(), repo, base, head, obs)
+
+
+def head_of(repo):
+    return git(repo, "rev-parse", "HEAD")
 
 
 @pytest.fixture
@@ -73,18 +82,22 @@ def test_failed_attempt_stays_failed_and_core_is_called_once(repo, tmp_path):
         return verify_generic_changeset(request)
 
     notary = Notary(tmp_path / "notary.sqlite", core_verify=counting)
-    the_change = change(repo, {"src/a.py": "x = 2\n"})
-    failed = notary.notarize("task-1", "a1", spec(), the_change, FAIL)
-    again = notary.notarize("task-1", "a1", spec(), the_change, FAIL)
+    base, head = change(repo, {"src/a.py": "x = 2\n"})
+    failed = notary.notarize("task-1", "a1", spec(), repo, base, head, FAIL)
+    again = notary.notarize("task-1", "a1", spec(), repo, base, head, FAIL)
     assert not failed.verified and again == failed
     assert len(calls) == 1
-    fresh = notary.notarize("task-1", "a2", spec(), change(repo, {"src/a.py": "x = 4\n"}), PASS)
+    fresh = notary.notarize(
+        "task-1", "a2", spec(), repo, *change(repo, {"src/a.py": "x = 4\n"}), PASS
+    )
     assert fresh.verified
 
 
 def test_spec_must_belong_to_the_task(repo, notary):
     with pytest.raises(NotaryInputError):
-        notary.notarize("task-1", "a1", spec(task="OTHER"), change(repo, {"src/a.py": "x\n"}), PASS)
+        notary.notarize(
+            "task-1", "a1", spec(task="OTHER"), repo, *change(repo, {"src/a.py": "x\n"}), PASS
+        )
 
 
 def test_reader_must_hold_the_verified_commit(repo, notary):
@@ -110,7 +123,7 @@ def test_record_is_append_only_for_any_connection(repo, notary, tmp_path):
             " 'VERIFIED', 'VALID', '{}', 'now')"
         )
     conn.close()
-    assert not notary.verdict("task-1", "a1").verified
+    assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
 
 
 def test_tampered_stored_request_is_not_verified(repo, notary, tmp_path):
@@ -120,7 +133,7 @@ def test_tampered_stored_request_is_not_verified(repo, notary, tmp_path):
     conn.execute("UPDATE core_verifications SET request_json = '{}'")
     conn.commit()
     conn.close()
-    assert not notary.verdict("task-1", "a1").verified
+    assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
 
 
 def test_core_exception_is_recorded_and_not_verified(repo, tmp_path):
@@ -173,12 +186,12 @@ def test_concurrent_notarize_of_one_attempt_returns_one_recorded_verdict(repo, t
         return verify_generic_changeset(request)
 
     notary = Notary(tmp_path / "n.sqlite", core_verify=slow)
-    the_change = change(repo, {"src/a.py": "x = 2\n"})
+    base, head = change(repo, {"src/a.py": "x = 2\n"})
     results, errors = [], []
 
     def run():
         try:
-            results.append(notary.notarize("task-1", "a1", spec(), the_change, PASS))
+            results.append(notary.notarize("task-1", "a1", spec(), repo, base, head, PASS))
         except Exception as exc:  # noqa: BLE001 - collected for the assertion below
             errors.append(exc)
 
@@ -195,7 +208,7 @@ def test_concurrent_notarize_of_one_attempt_returns_one_recorded_verdict(repo, t
 def test_verdict_survives_reopening(repo, tmp_path):
     path = tmp_path / "n.sqlite"
     first = notarize(Notary(path), repo, {"src/a.py": "x = 2\n"})
-    assert Notary(path).verdict("task-1", "a1") == first
+    assert Notary(path).verdict("task-1", "a1", expected_candidate=first.candidate_commit) == first
 
 
 def test_tampered_stored_request_hash_is_not_verified(repo, notary, tmp_path):
@@ -205,4 +218,41 @@ def test_tampered_stored_request_hash_is_not_verified(repo, notary, tmp_path):
     conn.execute("UPDATE core_verifications SET request_hash = 'sha256:forged'")
     conn.commit()
     conn.close()
-    assert not notary.verdict("task-1", "a1").verified
+    assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
+
+
+def test_verdict_requires_the_reader_to_name_its_commit(repo, notary):
+    notarize(notary, repo, {"src/a.py": "x = 2\n"})
+    with pytest.raises(TypeError):
+        notary.verdict("task-1", "a1")
+
+
+def test_change_set_is_read_from_git_not_from_the_caller(repo, notary):
+    base = head_of(repo)
+    good = commit_change(repo, {"src/a.py": "x = 2\n"})
+    bad = commit_change(repo, {"src/b.py": "y = 9\n"})
+    verdict = notary.notarize("task-1", "a1", spec(), repo, base, bad, PASS)
+    assert not verdict.verified
+    assert verdict.candidate_commit == bad
+    assert not notary.verdict("task-1", "a1", expected_candidate=good).verified
+
+
+def test_row_columns_must_agree_with_the_stored_request(repo, notary, tmp_path):
+    verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
+    conn = sqlite3.connect(tmp_path / "notary.sqlite")
+    conn.execute("DROP TRIGGER core_verifications_no_update")
+    conn.execute("UPDATE core_verifications SET candidate_commit = ?", ("f" * 40,))
+    conn.commit()
+    conn.close()
+    assert not notary.verdict("task-1", "a1", expected_candidate="f" * 40).verified
+    assert not notary.verdict("task-1", "a1", expected_candidate=verdict.candidate_commit).verified
+
+
+def test_old_schema_fails_with_a_code(tmp_path):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE core_verifications (seq INTEGER PRIMARY KEY, task_id TEXT)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(NotarySchemaMismatch):
+        Notary(path)
