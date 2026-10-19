@@ -267,6 +267,10 @@ def test_another_attempts_ref_changing_rejects_the_candidate(repo, tmp_path):
     (made.path / "src" / "a.py").write_text("x = 2\n")
     head = commit(made.path)
     git(repo, "update-ref", "refs/cairnwork/attempts/other", base)
+    made_other_ref_first = _guarded_refs(repo, "a1")
+    other = git(repo, "commit-tree", f"{base}^{{tree}}", "-p", base, "-m", "other")
+    git(repo, "update-ref", "refs/cairnwork/attempts/other", other)
+    made = Attempt(made.attempt_id, made.base_commit, made.path, made_other_ref_first)
     with pytest.raises(CandidateRejected) as info:
         collect_candidate(repo, made, ALLOWED)
     assert info.value.code == "REPOSITORY_REFS_CHANGED"
@@ -362,3 +366,26 @@ def test_clone_with_unwritable_directories_can_still_be_removed(repo, attempt):
     (clone / "locked").chmod(0o500)
     remove_attempt_clone(root, "a1")
     assert not clone.exists()
+
+
+def test_concurrent_attempts_on_one_base_do_not_reject_each_other(repo, tmp_path):
+    base = git(repo, "rev-parse", "HEAD")
+    first = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    second = create_attempt_clone(repo, base, tmp_path / "attempts", "a2")
+    for made, text in ((first, "x = 2\n"), (second, "x = 3\n")):
+        (made.path / "src" / "a.py").write_text(text)
+        commit(made.path)
+    assert collect_candidate(repo, second, ALLOWED)
+    assert collect_candidate(repo, first, ALLOWED)
+
+
+def test_deleted_attempt_ref_rejects_the_candidate(repo, tmp_path):
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", "refs/cairnwork/attempts/old", base)
+    made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    (made.path / "src" / "a.py").write_text("x = 2\n")
+    commit(made.path)
+    git(repo, "update-ref", "-d", "refs/cairnwork/attempts/old")
+    with pytest.raises(CandidateRejected) as info:
+        collect_candidate(repo, made, ALLOWED)
+    assert info.value.code == "REPOSITORY_REFS_CHANGED"

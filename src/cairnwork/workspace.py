@@ -64,7 +64,7 @@ class Attempt:
     attempt_id: str
     base_commit: str
     path: Path
-    refs_before: str
+    refs_before: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -164,12 +164,24 @@ def _attempt_path(root: Path, attempt_id: str) -> Path:
 GUARDED_REF_PREFIXES = ("refs/replace/", "refs/cairnwork/")
 
 
-def _guarded_refs(repo: Path, attempt_id: str) -> str:
-    own = ATTEMPT_REF_PREFIX + attempt_id + " "
+def _guarded_refs(repo: Path, attempt_id: str) -> tuple[tuple[str, str], ...]:
+    own = ATTEMPT_REF_PREFIX + attempt_id
     lines = run_git(
         repo, "for-each-ref", "--format=%(refname) %(objectname)", *GUARDED_REF_PREFIXES
     ).splitlines()
-    return "\n".join(line for line in sorted(lines) if not line.startswith(own))
+    pairs = (tuple(line.split(" ", 1)) for line in lines)
+    return tuple(sorted((name, oid) for name, oid in pairs if name != own))
+
+
+def _refs_acceptable(before: dict[str, str], now: dict[str, str]) -> bool:
+    """refs/replace/ and non-attempt refs must be identical; other attempts may only add refs."""
+    for name in before.keys() | now.keys():
+        added = name not in before
+        if name.startswith(ATTEMPT_REF_PREFIX) and added:
+            continue  # another attempt was collected meanwhile
+        if before.get(name) != now.get(name):
+            return False
+    return True
 
 
 def _require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
@@ -177,7 +189,7 @@ def _require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
         now = _guarded_refs(repo, attempt.attempt_id)
     except GitCommandError as exc:
         raise CandidateRejected("UNREADABLE_REPOSITORY", str(exc)) from exc
-    if now != attempt.refs_before:
+    if not _refs_acceptable(dict(attempt.refs_before), dict(now)):
         raise CandidateRejected(
             "REPOSITORY_REFS_CHANGED", "guarded refs changed during the attempt"
         )
