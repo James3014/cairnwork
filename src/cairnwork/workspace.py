@@ -1,31 +1,32 @@
 """Isolated attempt clones and candidate checks (preserved behaviors #11-#13, #19).
 
-A worker never gets a checkout that shares Cairnwork's repository. Each attempt
-is a separate ``git clone --no-local`` with its own ``.git`` (config, hooks,
-refs, index, info/), detached at the task's base commit. Whatever the worker
-does to that repository cannot reach Cairnwork's.
+Each attempt is a separate ``git clone --no-local`` with its own ``.git``
+(objects, config, hooks, refs, index, info/), detached at the task's base
+commit, with its ``origin`` remote removed so git gives the worker no handle
+on Cairnwork's repository. Cairnwork's repository path must still not be
+writable from the worker's sandbox: git cannot stop a process that already
+has write access, so ``collect_candidate`` also refuses a candidate when any
+ref in Cairnwork's repository changed during the attempt.
 
 After the worker stops, ``collect_candidate`` fetches the clone's HEAD into
-Cairnwork's repository under ``refs/cairnwork/attempts/<attempt_id>`` and decides
-from Cairnwork's own repository whether it is acceptable:
+``refs/cairnwork/attempts/<attempt_id>`` and decides from Cairnwork's own
+repository whether it is acceptable:
 
 - exactly one new commit whose only parent is the base (#19);
 - every changed path is in allowed_files, deletions only when allowed, and no
   symlinks or submodules are added or changed (#12);
 - ``git diff --check`` finds no whitespace errors (#13);
-- the clone's files are exactly the candidate's tree. This is compared in
-  Python, file by file (content hash, executable bit, symlink target), so no
-  git config, index flag (skip-worktree, assume-unchanged), exclude file or
-  ``core.worktree`` in the clone can hide a leftover change.
+- the clone's files are exactly the candidate's tree, compared in Python
+  (see treecompare.py), so no git state in the clone can hide a leftover.
 
-The only git command that touches the worker's clone is that fetch (git runs
-upload-pack in it). Any other state is a typed CandidateRejected.
+The only git command that touches the clone after the worker starts is that
+fetch (git runs upload-pack in it). Any other state is a typed CandidateRejected.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
+import re
 import shutil
 import stat
 from dataclasses import dataclass
@@ -33,9 +34,11 @@ from pathlib import Path
 
 from cairnwork.changeset import ChangeSetError, read_change_set
 from cairnwork.gitcmd import OID, GitCommandError, run_git
+from cairnwork.treecompare import tree_differences
 
 FORBIDDEN_MODES = frozenset({"120000", "160000"})  # symlink, submodule
 ATTEMPT_REF_PREFIX = "refs/cairnwork/attempts/"
+_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 class WorkspaceError(Exception):
@@ -52,13 +55,21 @@ class CandidateRejected(Exception):
 
 
 @dataclass(frozen=True)
+class Attempt:
+    attempt_id: str
+    base_commit: str
+    path: Path
+    refs_before: str
+
+
+@dataclass(frozen=True)
 class Candidate:
     base_commit: str
     candidate_commit: str
     paths: tuple[str, ...]
 
 
-def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: str) -> Path:
+def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: str) -> Attempt:
     """Clone repo into root/attempt_id, detached at base_commit; never reuse a path."""
     if not OID.match(base_commit):
         raise WorkspaceError("base_commit must be a 40-hex commit id")
@@ -72,40 +83,46 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
         run_git(
             path.parent, "clone", "--quiet", "--no-local", "--no-checkout", str(repo), path.name
         )
+        run_git(path, "remote", "remove", "origin")
         run_git(path, "checkout", "--quiet", "--detach", base_commit)
         head = run_git(path, "rev-parse", "HEAD").strip()
-    except GitCommandError as exc:
+        refs_before = _refs(repo)
+    except (GitCommandError, OSError) as exc:
         raise WorkspaceError(str(exc)) from exc
-    if head != base_commit or _tree_differences(repo, base_commit, path):
+    if head != base_commit or tree_differences(repo, base_commit, path):
         raise WorkspaceError(f"{path} is not a clean checkout of {base_commit}")
-    return path
+    return Attempt(attempt_id, base_commit, path, refs_before)
 
 
 def remove_attempt_clone(root: Path, attempt_id: str) -> None:
     path = _attempt_path(root, attempt_id)
     if path.is_symlink() or not path.is_dir():
         raise WorkspaceError(f"{path} is not an attempt directory")
-    shutil.rmtree(path)
+    try:
+        _make_tree_writable(path)
+        shutil.rmtree(path)
+    except OSError as exc:
+        raise WorkspaceError(f"could not remove {path}: {exc}") from exc
 
 
 def collect_candidate(
     repo: Path,
-    clone: Path,
-    attempt_id: str,
-    base_commit: str,
+    attempt: Attempt,
     allowed_files: tuple[str, ...],
     *,
     allow_deletions: bool = False,
 ) -> Candidate:
     """Fetch the clone's HEAD into repo and accept it, or raise CandidateRejected."""
-    head = _fetch_head(repo, clone, attempt_id)
-    if head == base_commit:
+    base = attempt.base_commit
+    _require_refs_unchanged(repo, attempt)
+    head = _fetch_head(repo, attempt)
+    if head == base:
         raise CandidateRejected("NO_COMMIT", "the worker made no commit")
     parents = _parents(repo, head)
-    if parents != [base_commit]:
+    if parents != [base]:
         raise CandidateRejected("NOT_ONE_COMMIT_ON_BASE", f"parents of {head} are {parents}")
     try:
-        change = read_change_set(repo, base_commit, head)
+        change = read_change_set(repo, base, head)
     except ChangeSetError as exc:
         raise CandidateRejected("UNREADABLE_CHANGE", str(exc)) from exc
     allowed = set(allowed_files)
@@ -117,23 +134,37 @@ def collect_candidate(
         if entry.after_mode in FORBIDDEN_MODES or entry.before_mode in FORBIDDEN_MODES:
             raise CandidateRejected("FORBIDDEN_MODE", f"{entry.path} ({entry.after_mode})")
     try:
-        run_git(repo, "diff", "--no-ext-diff", "--no-textconv", "--check", base_commit, head)
+        run_git(repo, "diff", "--no-ext-diff", "--no-textconv", "--check", base, head)
     except GitCommandError as exc:
         raise CandidateRejected("DIFF_CHECK_FAILED", "whitespace errors in the change") from exc
-    differences = _tree_differences(repo, head, clone)
+    differences = tree_differences(repo, head, attempt.path)
     if differences:
         raise CandidateRejected("DIRTY_TREE", ", ".join(differences[:5]))
-    return Candidate(base_commit, head, tuple(change.paths))
+    return Candidate(base, head, tuple(change.paths))
 
 
 def _attempt_path(root: Path, attempt_id: str) -> Path:
-    if not attempt_id or "/" in attempt_id or attempt_id in {".", ".."}:
-        raise WorkspaceError(f"attempt_id {attempt_id!r} is not a single path component")
+    if not isinstance(attempt_id, str) or not _ATTEMPT_ID.match(attempt_id):
+        raise WorkspaceError(f"attempt_id {attempt_id!r} must match {_ATTEMPT_ID.pattern}")
     return Path(root) / attempt_id
 
 
-def _fetch_head(repo: Path, clone: Path, attempt_id: str) -> str:
-    ref = ATTEMPT_REF_PREFIX + attempt_id
+def _refs(repo: Path) -> str:
+    lines = run_git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+    return "\n".join(line for line in sorted(lines) if not line.startswith(ATTEMPT_REF_PREFIX))
+
+
+def _require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
+    try:
+        now = _refs(repo)
+    except GitCommandError as exc:
+        raise CandidateRejected("UNREADABLE_REPOSITORY", str(exc)) from exc
+    if now != attempt.refs_before:
+        raise CandidateRejected("REPOSITORY_REFS_CHANGED", "refs changed during the attempt")
+
+
+def _fetch_head(repo: Path, attempt: Attempt) -> str:
+    ref = ATTEMPT_REF_PREFIX + attempt.attempt_id
     try:
         run_git(
             repo,
@@ -141,7 +172,7 @@ def _fetch_head(repo: Path, clone: Path, attempt_id: str) -> str:
             "--quiet",
             "--no-tags",
             "--no-recurse-submodules",
-            str(clone),
+            str(attempt.path),
             f"+HEAD:{ref}",
         )
         head = run_git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
@@ -159,66 +190,11 @@ def _parents(repo: Path, commit: str) -> list[str]:
         raise CandidateRejected("UNREADABLE_CHANGE", str(exc)) from exc
 
 
-def _tree_differences(repo: Path, commit: str, directory: Path) -> list[str]:
-    """Paths where directory's files differ from commit's tree (ignoring the top .git)."""
-    expected = _tree_entries(repo, commit)
-    differences = []
-    seen = set()
-    for rel, kind, data in _walk(
-        directory, gitlinks={p for p, (m, _) in expected.items() if m == "160000"}
-    ):
-        seen.add(rel)
-        mode_oid = expected.get(rel)
-        if mode_oid is None:
-            differences.append(f"extra {rel}")
-        elif mode_oid[0] == "160000":
-            continue
-        elif (kind, _blob_oid(data)) != (mode_oid[0], mode_oid[1]):
-            differences.append(f"changed {rel}")
-    differences.extend(f"missing {rel}" for rel in expected if rel not in seen)
-    return sorted(differences)
-
-
-def _tree_entries(repo: Path, commit: str) -> dict[str, tuple[str, str]]:
-    raw = run_git(repo, "ls-tree", "-r", "-z", "--full-tree", commit)
-    entries = {}
-    for record in filter(None, raw.split("\0")):
-        meta, path = record.split("\t", 1)
-        mode, _kind, oid = meta.split(" ")
-        entries[path] = (mode, oid)
-    return entries
-
-
-def _walk(directory: Path, gitlinks: set[str]):
-    top = Path(directory)
-    for current, dirnames, filenames in os.walk(top, followlinks=False):
-        rel_dir = Path(current).relative_to(top).as_posix()
-        if rel_dir == ".":
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-            filenames = [f for f in filenames if f != ".git"]
-        for name in sorted(dirnames):
-            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
-            full = Path(current) / name
-            if rel in gitlinks:
-                dirnames.remove(name)
-                yield rel, "160000", b""
-            elif full.is_symlink():
-                dirnames.remove(name)
-                yield rel, "120000", os.readlink(full).encode()
-        for name in filenames:
-            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
-            yield (rel, *_file_kind_and_data(Path(current) / name))
-
-
-def _file_kind_and_data(path: Path) -> tuple[str, bytes]:
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode):
-        return "120000", os.readlink(path).encode()
-    if not stat.S_ISREG(info.st_mode):
-        return "special", b""
-    mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
-    return mode, path.read_bytes()
-
-
-def _blob_oid(data: bytes) -> str:
-    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+def _make_tree_writable(path: Path) -> None:
+    """A worker may chmod directories away; give them back before removal (no symlinks)."""
+    path.chmod(stat.S_IRWXU)
+    for current, dirnames, _ in os.walk(path, followlinks=False):
+        for name in dirnames:
+            child = Path(current) / name
+            if not child.is_symlink():
+                child.chmod(stat.S_IRWXU)

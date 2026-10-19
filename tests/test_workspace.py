@@ -2,8 +2,10 @@ import pytest
 from conftest import git
 
 from cairnwork.workspace import (
+    Attempt,
     CandidateRejected,
     WorkspaceError,
+    _refs,
     collect_candidate,
     create_attempt_clone,
     remove_attempt_clone,
@@ -17,7 +19,8 @@ WORKER = ("-c", "user.email=w@example.invalid", "-c", "user.name=w")
 def attempt(repo, tmp_path):
     base = git(repo, "rev-parse", "HEAD")
     root = tmp_path / "attempts"
-    return base, root, create_attempt_clone(repo, base, root, "a1")
+    made = create_attempt_clone(repo, base, root, "a1")
+    return base, root, made.path
 
 
 def commit(path, message="candidate"):
@@ -26,8 +29,12 @@ def commit(path, message="candidate"):
     return git(path, "rev-parse", "HEAD")
 
 
+_ATTEMPTS = {}
+
+
 def collect(repo, clone, base, **kwargs):
-    return collect_candidate(repo, clone, "a1", base, ALLOWED, **kwargs)
+    made = _ATTEMPTS.get(clone) or Attempt("a1", base, clone, _refs(repo))
+    return collect_candidate(repo, made, ALLOWED, **kwargs)
 
 
 def rejected_code(repo, clone, base, **kwargs):
@@ -55,7 +62,9 @@ def test_existing_empty_directory_is_not_reused(repo, tmp_path):
         create_attempt_clone(repo, git(repo, "rev-parse", "HEAD"), tmp_path / "attempts", "a1")
 
 
-@pytest.mark.parametrize("attempt_id", ["", "a/b", "..", "."])
+@pytest.mark.parametrize(
+    "attempt_id", ["", "a/b", "..", ".", "-x", "a:b", "a*", "a..b", "a.lock", "a b", None]
+)
 def test_attempt_id_must_be_one_path_component(repo, tmp_path, attempt_id):
     with pytest.raises(WorkspaceError):
         create_attempt_clone(repo, git(repo, "rev-parse", "HEAD"), tmp_path, attempt_id)
@@ -74,7 +83,7 @@ def test_hooks_in_cairnworks_repository_never_run(repo, tmp_path):
         hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
         hook.chmod(0o755)
     base = git(repo, "rev-parse", "HEAD")
-    clone = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    clone = create_attempt_clone(repo, base, tmp_path / "attempts", "a1").path
     (clone / "src" / "a.py").write_text("x = 2\n")
     commit(clone)
     collect(repo, clone, base)  # the fetch into Cairnwork's repo runs reference-transaction
@@ -234,3 +243,100 @@ def test_remove_refuses_a_symlinked_attempt(tmp_path):
     with pytest.raises(WorkspaceError):
         remove_attempt_clone(tmp_path / "attempts", "a1")
     assert (tmp_path / "elsewhere").exists()
+
+
+def test_clone_has_no_remote_back_to_cairnworks_repository(attempt):
+    _, _, clone = attempt
+    assert git(clone, "remote") == ""
+
+
+def test_refs_pushed_into_cairnworks_repository_reject_the_candidate(repo, tmp_path):
+    base = git(repo, "rev-parse", "HEAD")
+    made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    (made.path / "src" / "a.py").write_text("x = 2\n")
+    commit(made.path)
+    git(made.path, "push", "-q", str(repo), "HEAD:refs/tags/planted")
+    with pytest.raises(CandidateRejected) as info:
+        collect_candidate(repo, made, ALLOWED)
+    assert info.value.code == "REPOSITORY_REFS_CHANGED"
+
+
+def test_gitlink_paths_must_stay_empty(repo, tmp_path):
+    sub = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{sub},vendor/lib")
+    git(repo, "commit", "-q", "-m", "add gitlink")
+    base = git(repo, "rev-parse", "HEAD")
+    made = create_attempt_clone(repo, base, tmp_path / "attempts", "a1")
+    (made.path / "src" / "a.py").write_text("x = 2\n")
+    commit(made.path)
+    (made.path / "vendor" / "lib").mkdir(parents=True, exist_ok=True)
+    (made.path / "vendor" / "lib" / "leftover.py").write_text("x\n")
+    with pytest.raises(CandidateRejected) as info:
+        collect_candidate(repo, made, ALLOWED)
+    assert info.value.code == "DIRTY_TREE"
+
+
+def test_extra_empty_directory_is_a_difference(repo, attempt):
+    base, _, clone = attempt
+    (clone / "src" / "a.py").write_text("x = 2\n")
+    commit(clone)
+    (clone / "src" / "empty").mkdir()
+    assert rejected_code(repo, clone, base) == "DIRTY_TREE"
+
+
+@pytest.mark.parametrize("tracked", [True, False])
+def test_unreadable_files_are_rejected_with_a_code(repo, attempt, tracked):
+    base, _, clone = attempt
+    (clone / "src" / "a.py").write_text("x = 2\n")
+    commit(clone)
+    target = clone / "src" / ("b.py" if tracked else "extra.bin")
+    if not tracked:
+        target.write_bytes(b"x" * 10)
+    target.chmod(0)
+    try:
+        assert rejected_code(repo, clone, base) == "DIRTY_TREE"
+    finally:
+        target.chmod(0o644)
+
+
+def test_unreadable_directory_cannot_hide_leftovers(repo, attempt):
+    base, _, clone = attempt
+    (clone / "src" / "a.py").write_text("x = 2\n")
+    commit(clone)
+    hidden = clone / "hidden"
+    hidden.mkdir()
+    (hidden / "leftover.txt").write_text("x\n")
+    hidden.chmod(0)
+    try:
+        assert rejected_code(repo, clone, base) == "DIRTY_TREE"
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_nested_git_entries_are_leftovers(repo, attempt):
+    base, _, clone = attempt
+    (clone / "src" / "a.py").write_text("x = 2\n")
+    commit(clone)
+    (clone / "src" / ".git").write_text("gitdir: /elsewhere\n")
+    assert rejected_code(repo, clone, base) == "DIRTY_TREE"
+
+
+def test_worker_pack_objects_hook_does_not_run_on_fetch(repo, attempt, tmp_path):
+    base, _, clone = attempt
+    marker = tmp_path / "pack-hook-ran"
+    git(clone, "config", "uploadpack.packObjectsHook", f"touch {marker};")
+    (clone / "src" / "a.py").write_text("x = 2\n")
+    commit(clone)
+    collect(repo, clone, base)
+    assert not marker.exists()
+
+
+def test_clone_with_unwritable_directories_can_still_be_removed(repo, attempt):
+    _, root, clone = attempt
+    locked = clone / "locked" / "deeper"
+    locked.mkdir(parents=True)
+    (locked / "f").write_text("x\n")
+    locked.chmod(0)
+    (clone / "locked").chmod(0o500)
+    remove_attempt_clone(root, "a1")
+    assert not clone.exists()
