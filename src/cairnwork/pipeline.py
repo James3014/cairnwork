@@ -31,6 +31,7 @@ from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.snapshot import snapshot_candidate
+from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
     VerifierRejected,
     VerifierSpec,
@@ -139,6 +140,7 @@ def run_task(
     journal: Journal,
     worker: Worker,
     run_root: Path,
+    verifier_account: VerifierAccount | None = None,
 ) -> TaskResult:
     specs = check_task(task)
     with runlock.held(ledger.path, exclusive=False):
@@ -152,7 +154,17 @@ def run_task(
         ledger.set_status(record.task_id, "DISPATCHED")
         result = TaskResult(record.task_id, attempt_id, "FAILED")
         try:
-            _attempt(task, specs, record.request_digest, notary, worker, run_root, result, steps)
+            _attempt(
+                task,
+                specs,
+                record.request_digest,
+                notary,
+                worker,
+                run_root,
+                result,
+                steps,
+                verifier_account,
+            )
         except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
             result.verified = False
             result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
@@ -178,7 +190,9 @@ class _Steps:
             os._exit(137)
 
 
-def _attempt(task, specs, digest, notary, worker, run_root, result, steps) -> None:
+def _attempt(
+    task, specs, digest, notary, worker, run_root, result, steps, verifier_account
+) -> None:
     task_id = steps.task_id
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
@@ -205,6 +219,7 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps) -> No
             run_root,
             f"{result.attempt_id}-v",
             attempt_id=result.attempt_id,
+            account=verifier_account,
         )
         result.logs = [str(run.log_path) for run in runs]
         spec = AcceptanceSpec(

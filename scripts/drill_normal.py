@@ -19,6 +19,7 @@ from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
+from cairnwork.verifier_account import VerifierAccount
 from cairnwork.workers.agy import AgyWorker
 
 FILES = {
@@ -37,6 +38,9 @@ FILES = {
         "def test_average_of_one():\n    assert average([5]) == 5\n"
     ),
 }
+
+# Run verifiers as the dedicated account when it is set up (Issue #9).
+ACCOUNT = VerifierAccount() if VerifierAccount().available() else None
 
 
 def git(repo: Path, *args: str) -> str:
@@ -81,11 +85,22 @@ def main() -> int:
         journal=Journal(work / "journal.sqlite"),
         worker=AgyWorker(model=model),
         run_root=work / "runs",
+        verifier_account=ACCOUNT,
     )
     diff = ""
     if result.candidate_commit:
         diff = git(repo, "diff", base, result.candidate_commit)
-    print(json.dumps({**result.__dict__, "model": model, "diff": diff}, indent=2))
+    print(
+        json.dumps(
+            {
+                **result.__dict__,
+                "model": model,
+                "verifier_account": ACCOUNT is not None,
+                "diff": diff,
+            },
+            indent=2,
+        )
+    )
     return 0 if result.status == "COMPLETED" else 1
 
 

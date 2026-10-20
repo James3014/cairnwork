@@ -20,7 +20,7 @@ MAX_LOG_BYTES = 4 << 20
 MAX_REPORT_BYTES = 4 << 20
 
 
-def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
+def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, bool, int]:
     """Run in a new process group; the parent copies output into log_path (the child
     never holds the log's file descriptor); kill the group afterwards."""
     token = env.get(RUN_TOKEN_VAR)
@@ -45,9 +45,12 @@ def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+        # Another account's processes: the owner cannot signal them; reap() kills them
+        # all and says how many were running (the main one, if it timed out, included).
+        escaped = reap() if reap is not None else 0
         _kill_group(process.pid)
         process.wait()
-        survivors = _sweep_survivors(token, process.pid)
+        survivors = _sweep_survivors(token, process.pid) + escaped
         copier.join(timeout=10)  # a descendant that escaped the group may hold the pipe
         process.stdout.close()
     return (None if timed_out else process.returncode), timed_out, survivors

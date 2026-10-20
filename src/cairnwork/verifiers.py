@@ -31,10 +31,11 @@ directory; a pass is evidence, not proof.
 Known gap: Seatbelt does not stop a sandboxed process from reading other
 processes' arguments and environment (sysctl KERN_PROCARGS2) when they run as
 the same user, so tokens in other processes' environments are readable and could
-be printed into the verifier log. Until verifiers run under a dedicated uid,
-never pass raw verifier logs to a worker or a model. A process that leaves the
-run's process group is killed if it still carries the run token in its
-environment; one that clears its environment escapes the sweep.
+be printed into the verifier log. Passing a VerifierAccount closes that (the
+verifier runs as another uid) and kills every process the account still runs
+after each verifier, so nothing escapes. Without one, a process that leaves the
+run's process group is killed only if it still carries the run token in its
+environment. Either way, never pass raw verifier logs to a worker or a model.
 Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
 pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
 pytest configuration and root-level modules out of the files a candidate may
@@ -65,6 +66,7 @@ from cairnwork import confined, sandbox
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
+from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
 from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
 
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -139,12 +141,38 @@ def run_verifiers(
     python: str = sys.executable,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     attempt_id: str = "",
+    account: VerifierAccount | None = None,
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
 
     If a checkout cannot be created the error propagates and no observation is
-    returned (fail closed).
+    returned (fail closed). With an account, verifiers run as that dedicated user
+    (verifier_account.py), in its run root and with its Python, one at a time.
     """
+    if account is not None:
+        if not account.available():
+            raise VerifierAccountError(f"account {account.user} is not usable")
+        run_root, python = account.run_root, account.python
+        with account.exclusive():
+            return _run_all(
+                repo,
+                candidate_commit,
+                specs,
+                run_root,
+                run_id,
+                python,
+                timeout,
+                attempt_id,
+                account,
+            )
+    return _run_all(
+        repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, None
+    )
+
+
+def _run_all(
+    repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, account
+) -> tuple[VerifierRun, ...]:
     if not os.path.isabs(python):
         raise VerifierRejected(f"python must be an absolute path, got {python!r}")
     ids = [spec.verifier_id for spec in specs]
@@ -156,7 +184,9 @@ def run_verifiers(
         checkout = create_attempt_clone(repo, candidate_commit, run_root, clone_id).path
         try:
             runs.append(
-                _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id)
+                _run_one(
+                    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account
+                )
             )
         finally:
             try:
@@ -177,7 +207,9 @@ def protected_verifier_inputs(paths: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id) -> VerifierRun:
+def _run_one(
+    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account
+) -> VerifierRun:
     private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent))
     log_path, ini, profile_path = (
         private / "verifier.log",
@@ -185,6 +217,8 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id
         private / "profile.sb",
     )
     run_dir, home, tmp, report, env = _prepare_run(private, ini)
+    if account is not None:
+        _share_with_account(private, ini, run_dir, home, tmp)
     if attempt_id:
         env[ATTEMPT_ENV] = attempt_id
     argv = [
@@ -211,8 +245,8 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id
             write_roots=(checkout, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
-        returncode, timed_out, survivors = confined.execute(
-            sandbox.wrap(argv, profile_path), checkout, env, timeout, log_path
+        returncode, timed_out, survivors = _execute(
+            argv, profile_path, checkout, env, timeout, log_path, account
         )
     else:
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
@@ -229,8 +263,10 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id
         and not too_big
         and survivors == 0
     )
-    shutil.rmtree(home, ignore_errors=True)
-    shutil.rmtree(tmp, ignore_errors=True)
+    for scratch in (home, tmp):
+        if account is not None:
+            account.remove(scratch)
+        shutil.rmtree(scratch, ignore_errors=True)
     digest = _record_digest(
         candidate_commit=candidate_commit,
         verifier_id=spec.verifier_id,
@@ -247,6 +283,31 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id
         spec.verifier_id, f"{private.name}/verifier.log", f"sha256:{digest}", passed
     )
     return VerifierRun(spec, returncode, timed_out, mutated, log_path, observation)
+
+
+def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
+    """Run argv under the sandbox profile, as the verifier account when one is given."""
+    if account is None:
+        return confined.execute(sandbox.wrap(argv, profile_path), checkout, env, timeout, log_path)
+    os.chmod(profile_path, 0o640)
+    returncode, timed_out, survivors = confined.execute(
+        account.wrap(argv, profile_path, env),
+        checkout,
+        env,
+        timeout,
+        log_path,
+        reap=account.reap,
+    )
+    return returncode, timed_out, survivors
+
+
+def _share_with_account(private: Path, ini: Path, run_dir: Path, home: Path, tmp: Path) -> None:
+    """Let the verifier account (group cairnwork) enter the run dir and read the ini,
+    and write only its run/ scratch. The log stays owner-only."""
+    os.chmod(private, 0o750)
+    os.chmod(ini, 0o640)
+    for directory in (run_dir, home, tmp):
+        os.chmod(directory, 0o2770)
 
 
 def _prepare_run(private: Path, ini: Path):

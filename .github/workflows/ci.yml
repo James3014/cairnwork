@@ -34,6 +34,7 @@ jobs:
     runs-on: macos-latest
     env:
       CAIRNWORK_REQUIRE_SANDBOX: "1"
+      CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Fail closed without sandbox-exec
@@ -44,4 +45,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --locked
+      - name: Create the verifier account (Issue #9)
+        run: |
+          sudo zsh scripts/setup_verifier_user.sh "$USER"
+          zsh scripts/setup_verifier_python.sh
       - run: uv run pytest -q
