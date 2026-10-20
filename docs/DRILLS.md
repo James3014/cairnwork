@@ -4,7 +4,7 @@
 
 | 演練 | 狀態 | 證據 |
 |---|---|---|
-| 正常 | **通過**（2026-10-20，1 次） | 見下方 |
+| 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
 | 失敗 | 自動測試覆蓋：錯誤修正 → `CORE_FAILED_VERIFICATION`；改到範圍外的檔案 → `DIRTY_TREE`；沒有改動 → `NO_COMMIT`；worker 當掉 → `WORKER_FAILED`。四種結果的任務狀態都是 FAILED（`tests/test_pipeline.py`）。真 agent 的失敗演練還沒跑。 | `tests/test_pipeline.py::test_failures_never_complete` |
 | 重啟 | **未做**：重啟恢復（保留行為 #21）還沒實作 | — |
 | 回退 | **未做**：線上切換（議會 F 條）還沒開始 | — |
@@ -28,7 +28,9 @@
 +    return sum(values) / len(values)
 ```
 
-這只是一次、一個很簡單的題目，只能證明整條主線接通了，不能拿來說明 agent 的能力或成功率。
+第 2 次（同一天，加上 `--sandbox`，也就是現行的 worker 設定）：狀態 `COMPLETED`，Core 判定 `VERIFIED`，task_id 為 `task-de18074413e04dfa80436aa801908ff3`，候選 commit 為 `391eeda4e93045088a64d2b8a3af7345741d27fc`，改動是同一行。
+
+這只是一個很簡單的題目、跑了兩次，只能證明整條主線接通了，不能拿來說明 agent 的能力或成功率。
 
 ## Agy worker 權限實測 2026-10-20
 
@@ -41,6 +43,6 @@
 | 修改工作目錄內的檔案 | 允許（見正常演練） |
 
 注意事項：
-- 被拒之後，agy 會中止整次執行，連允許的修改也不會套用，所以這次嘗試的結果是 `NO_COMMIT`。
+- 被拒之後，agy 會中止整次執行，連允許的修改也不會套用。agy 本身的 exit code 是 0（兩次實測都是 `exit=0`），所以 worker 正常結束，snapshot 判定為 `NO_COMMIT`。
 - 這是 agy 自己的權限機制，不是作業系統層級的 sandbox，所以 Cairnwork 不把它當成安全邊界。真正的防線仍然是：只收允許的檔案，並比對整個 clone。
 - 另一個測試：提示詞裡帶著 Cairnwork 的規則時，模型會直接拒絕執行這些要求。這只代表模型遵守了規則，不能證明權限有在擋。

@@ -102,3 +102,18 @@ def test_fifo_in_place_of_an_allowed_file_is_rejected(repo, attempt):
     target.unlink()
     os.mkfifo(target)
     assert code(repo, attempt) == "FORBIDDEN_MODE"
+
+
+def test_allowed_path_that_is_a_directory_is_forbidden(repo, attempt):
+    target = attempt.path / "src" / "a.py"
+    target.unlink()
+    target.mkdir()
+    assert code(repo, attempt) == "FORBIDDEN_MODE"
+
+
+def test_oversized_allowed_file_is_rejected(repo, attempt, monkeypatch):
+    import cairnwork.snapshot as snapshot
+
+    monkeypatch.setattr(snapshot, "MAX_FILE_BYTES", 4)
+    (attempt.path / "src" / "a.py").write_text("x = 2222\n")
+    assert code(repo, attempt) == "FORBIDDEN_MODE"

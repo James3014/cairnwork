@@ -28,6 +28,7 @@ from cairnwork.workspace import (
     require_refs_unchanged,
 )
 
+MAX_FILE_BYTES = 5 << 20
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
 
 
@@ -81,13 +82,23 @@ def _stage(repo: Path, clone: Path, path: str, index: Path) -> None:
         return
     except OSError as exc:  # a symlink (ELOOP), FIFO, unreadable file, ...
         raise CandidateRejected("FORBIDDEN_MODE", f"{path}: {exc.strerror}") from exc
+    info = os.fstat(fd)
+    problem = (
+        "is not a regular file"
+        if not stat.S_ISREG(info.st_mode)
+        else "is a hard link"
+        if info.st_nlink != 1
+        else f"is larger than {MAX_FILE_BYTES} bytes"
+        if info.st_size > MAX_FILE_BYTES
+        else ""
+    )
+    if problem:
+        os.close(fd)
+        raise CandidateRejected("FORBIDDEN_MODE", f"{path} {problem}")
     with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise CandidateRejected("FORBIDDEN_MODE", f"{path} is not a regular file")
-        if info.st_nlink != 1:
-            raise CandidateRejected("FORBIDDEN_MODE", f"{path} is a hard link")
-        data = handle.read()
+        data = handle.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise CandidateRejected("FORBIDDEN_MODE", f"{path} grew while being read")
     oid = hash_blob(repo, data)
     mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
     run_git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{oid},{path}", index_file=index)
