@@ -6,7 +6,8 @@ Rules (from Nexus-new's experience, see docs/LESSONS_FROM_NEXUS.md):
   run lock (runlock.py), which the kernel releases when a run dies;
 - never re-run an interrupted attempt. A task becomes COMPLETED only if Core
   already recorded a verdict that is verified for the candidate the journal
-  names; every other in-flight task becomes FAILED with an INTERRUPTED reason.
+  names and the run had not already decided FAILED; every other in-flight
+  task becomes FAILED with an INTERRUPTED reason.
   To try again, supersede it and submit a new key (pipeline.py);
 - kill any worker the dead run left behind (found by its CAIRNWORK_ATTEMPT
   environment marker) and remove the attempt's clones;
@@ -70,8 +71,9 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root) -> Decis
     killed = sweep_marked(ATTEMPT_ENV, attempt_id)
     _remove_clones(run_root, attempt_id)
     candidates = [e.detail for e in phases if e.phase == "CANDIDATE"]
+    finished = [e.detail for e in phases if e.phase == "FINISHED"]
     verified = False
-    if candidates:
+    if candidates and finished[-1:] != ["FAILED"]:  # the run's own FAILED decision stands
         verdict = notary.verdict(record.task_id, attempt_id, expected_candidate=candidates[-1])
         verified = bool(verdict and verdict.verified)
     if verified:

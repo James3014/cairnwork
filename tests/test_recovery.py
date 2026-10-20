@@ -207,3 +207,16 @@ def test_sweep_matches_the_whole_marker_only():
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
+
+
+@pytest.mark.sandbox
+def test_run_that_decided_failed_stays_failed_even_if_core_verified(project, tmp_path):
+    crash(project, tmp_path, "FINISHED", GOOD)
+    ledger, notary, journal = stores(tmp_path)
+    task_id = ledger.in_flight()[0].task_id
+    attempt = journal.entries(task_id)[-1].attempt_id
+    journal.record(task_id, attempt, "FINISHED", "FAILED")  # e.g. INFRA_ERROR after notarize
+    decisions, _ = settle(tmp_path)
+    assert [(d.new_status, d.reason) for d in decisions] == [
+        ("FAILED", "INTERRUPTED_AFTER_FINISHED")
+    ]
