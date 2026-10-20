@@ -38,7 +38,7 @@ def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, b
             start_new_session=True,
             preexec_fn=_limit_file_size,  # noqa: PLW1509 - only setrlimit, no locks
         )
-        copier = threading.Thread(target=_copy_capped, args=(process.stdout, log), daemon=True)
+        copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
         copier.start()
         timed_out = False
         try:
@@ -132,7 +132,7 @@ def _linux_processes():
     return rows
 
 
-def _copy_capped(source, target) -> None:
+def copy_capped(source, target) -> None:
     """Copy at most MAX_LOG_BYTES + 1 bytes (one over the cap marks the log too big)."""
     written = 0
     for chunk in iter(lambda: source.read(1 << 16), b""):

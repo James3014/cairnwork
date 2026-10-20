@@ -27,7 +27,7 @@ from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger, OwnershipRecord
 from cairnwork.verifier_account import VerifierAccount
-from cairnwork.workspace import WorkspaceError, remove_attempt_clone
+from cairnwork.workspace import ATTEMPT_ID, WorkspaceError, remove_attempt_clone
 
 
 @dataclass(frozen=True)
@@ -115,6 +115,8 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root) -> Decis
 def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
     """Attempt and verifier clones, a snapshot index, and verifier scratch (run/) dirs.
     Verifier logs (the private dirs themselves) are kept as evidence."""
+    if not ATTEMPT_ID.fullmatch(attempt_id):  # the journal is a file: do not trust it for paths
+        return
     root = Path(run_root)
     (root / f"{attempt_id}.index").unlink(missing_ok=True)
     for private in root.glob(f"{attempt_id}-v-v*.*"):

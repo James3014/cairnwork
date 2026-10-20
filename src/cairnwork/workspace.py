@@ -43,7 +43,7 @@ from cairnwork.treecompare import tree_differences
 
 FORBIDDEN_MODES = frozenset({"120000", "160000"})  # symlink, submodule
 ATTEMPT_REF_PREFIX = "refs/cairnwork/attempts/"
-_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+ATTEMPT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 class WorkspaceError(Exception):
@@ -76,7 +76,7 @@ class Candidate:
 
 def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: str) -> Attempt:
     """Clone repo into root/attempt_id, detached at base_commit; never reuse a path."""
-    if not OID.match(base_commit):
+    if not OID.fullmatch(base_commit):
         raise WorkspaceError("base_commit must be a 40-hex commit id")
     path = _attempt_path(root, attempt_id)
     if path.exists() or path.is_symlink():
@@ -174,8 +174,8 @@ def check_candidate_commit(
 
 
 def _attempt_path(root: Path, attempt_id: str) -> Path:
-    if not isinstance(attempt_id, str) or not _ATTEMPT_ID.match(attempt_id):
-        raise WorkspaceError(f"attempt_id {attempt_id!r} must match {_ATTEMPT_ID.pattern}")
+    if not isinstance(attempt_id, str) or not ATTEMPT_ID.fullmatch(attempt_id):
+        raise WorkspaceError(f"attempt_id {attempt_id!r} must match {ATTEMPT_ID.pattern}")
     return Path(root) / attempt_id
 
 
@@ -228,7 +228,7 @@ def _fetch_head(repo: Path, attempt: Attempt) -> str:
         head = run_git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
     except GitCommandError as exc:
         raise CandidateRejected("UNREADABLE_WORKTREE", str(exc)) from exc
-    if not OID.match(head):
+    if not OID.fullmatch(head):
         raise CandidateRejected("UNREADABLE_WORKTREE", f"HEAD {head!r} is malformed")
     return head
 
