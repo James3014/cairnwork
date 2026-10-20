@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from conftest import commit_change, git
@@ -260,7 +261,15 @@ def test_the_runner_ignores_the_callers_working_tree(state, project, tmp_path):
     caller = tmp_path / "caller-tree"
     (caller / "product").mkdir(parents=True)
     (caller / "product" / "__init__.py").write_text("raise ImportError('caller tree shadowed')\n")
-    route(state, "accept")
-    code, out = route(state, "submit", stdin=request(project), cwd=caller)
-    assert code == 0, out
-    assert wait_finished(state, out["task_id"])["status"] == "COMPLETED"
+    route(state, "accept")  # intake is closed by default
+    script = Path(sys.executable).parent / "cairnwork-route"  # what the Gateway runs
+    done = subprocess.run(
+        [str(script), "--state", str(state), "submit"],
+        input=json.dumps(request(project)), capture_output=True, text=True, timeout=120,
+        check=False, cwd=caller,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = json.loads(done.stdout)
+    status = wait_finished(state, out["task_id"])
+    # COMPLETED needs a Core verdict: the runner imported nexus-certify's real `product`
+    assert status["status"] == "COMPLETED" and status["core_verified"] is True
