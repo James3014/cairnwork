@@ -65,15 +65,18 @@ def sweep_marked(var: str, value: str, *, skip_group: int = -1) -> int:
     """
     marker = f"{var}={value}"
     try:
-        listing = subprocess.run(  # noqa: S603 - fixed argv
+        done = subprocess.run(  # noqa: S603 - fixed argv
             ["/bin/ps", "-axwwE", "-o", "pid=,pgid=,command="],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
-        ).stdout
+        )
     except (OSError, subprocess.SubprocessError):
         return 1
+    listing = done.stdout
+    if done.returncode != 0 or not listing.strip():
+        return 1  # an unreadable process list counts as a survivor (fail closed)
     found = 0
     for line in listing.splitlines():
         fields = line.split(None, 2)
