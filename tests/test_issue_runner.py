@@ -63,6 +63,8 @@ def setup(repo, tmp_path, monkeypatch):
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)
     clone = tmp_path / "clone"
     subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    git(clone, "config", "user.email", "t@e")  # CI runners have no git identity
+    git(clone, "config", "user.name", "t")
     started = []
     monkeypatch.setattr(intake_module, "_spawn", lambda argv, **kw: started.append(argv))
     intake = Intake(tmp_path / "state")
