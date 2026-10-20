@@ -297,3 +297,13 @@ def test_developer_dirs_maps_xcode_to_its_bundle(monkeypatch, selected, readable
         assert sandbox.developer_dirs() == readable
     finally:
         sandbox.developer_dirs.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("dirs", "licensed"),
+    [(("/Applications/Xcode.app",), True), (("/Library/Developer/CommandLineTools",), False)],
+)
+def test_xcode_license_plist_only_with_a_full_xcode(monkeypatch, tmp_path, dirs, licensed):
+    monkeypatch.setattr(sandbox, "developer_dirs", lambda: dirs)
+    profile = sandbox.build_profile((), (tmp_path / "w",), home=tmp_path / "home")
+    assert (sandbox.XCODE_LICENSE_PLIST in profile.text) is licensed

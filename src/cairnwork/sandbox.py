@@ -36,6 +36,9 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _SAFE = re.compile(r"^/[A-Za-z0-9 _./+@~-]*$")
 SYSTEM_READ_SUBPATHS = ("/usr/lib", "/usr/share", "/System/Library", "/dev")
 SYSTEM_READ_LITERALS = ("/", "/private/etc/localtime", "/private/etc/passwd", "/usr/bin/env")
+# Where xcodebuild records that the Xcode license was accepted; a full Xcode's tools
+# refuse to run without reading it. It holds no user data.
+XCODE_LICENSE_PLIST = "/Library/Preferences/com.apple.dt.Xcode.plist"
 DEVICE_WRITES = ("/dev/null", "/dev/tty", "/dev/dtracehelper")
 CREDENTIAL_HOME_PATHS = (
     ".ssh",
@@ -149,6 +152,9 @@ def build_profile(
         *[f'  (subpath "{p}")' for p in SYSTEM_READ_SUBPATHS],
         *[f'  (literal "{p}")' for p in SYSTEM_READ_LITERALS],
         *[f'  (subpath "{p}")' for p in developer_dirs()],
+        *[f'  (literal "{XCODE_LICENSE_PLIST}")' for p in developer_dirs() if p.endswith(".app")][
+            :1
+        ],
         *[f"  {rule}" for rule in reads],
         ")",
         "(allow file-write*",
