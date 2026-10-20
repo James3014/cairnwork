@@ -293,3 +293,14 @@ def test_sigkill_during_verification_kills_the_verifier_and_cleans_up(repo, tmp_
     runs = tmp_path / "runs"
     assert not (runs / f"{attempt}-v-v0").exists()
     assert all(not (p / "run").exists() for p in runs.glob(f"{attempt}-v-v0.*"))
+
+
+def test_leftover_cleanup_ignores_an_attempt_id_that_is_not_a_name(tmp_path):
+    from cairnwork.recovery import _remove_leftovers
+
+    victim = tmp_path / "keep.index"
+    victim.write_text("x")
+    (tmp_path / "runs").mkdir()
+    _remove_leftovers(tmp_path / "runs", "../keep")
+    _remove_leftovers(tmp_path, "keep\n")
+    assert victim.exists()

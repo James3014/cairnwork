@@ -122,7 +122,7 @@ def parse_verifier(verifier_id: str, argv: list[str]) -> VerifierSpec:
             rest = rest[1:]
         elif tuple(rest[:2]) in _OPTIONS:
             rest = rest[2:]
-        elif _TARGET.match(rest[0]):
+        elif _TARGET.fullmatch(rest[0]):
             targets.append(rest.pop(0))
         else:
             raise VerifierRejected(f"{verifier_id}: argument {rest[0]!r} is not allowed")

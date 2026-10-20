@@ -82,6 +82,6 @@ def hash_blob(repo: Path, data: bytes) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitCommandError("git hash-object failed") from exc
     oid = done.stdout.decode("ascii", "replace").strip()
-    if not OID.match(oid):
+    if not OID.fullmatch(oid):
         raise GitCommandError(f"git hash-object returned {oid!r}")
     return oid

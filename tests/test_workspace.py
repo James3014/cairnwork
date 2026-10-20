@@ -389,3 +389,10 @@ def test_deleted_attempt_ref_rejects_the_candidate(repo, tmp_path):
     with pytest.raises(CandidateRejected) as info:
         collect_candidate(repo, made, ALLOWED)
     assert info.value.code == "REPOSITORY_REFS_CHANGED"
+
+
+def test_attempt_id_with_a_trailing_newline_is_refused(tmp_path):
+    from cairnwork.workspace import WorkspaceError, remove_attempt_clone
+
+    with pytest.raises(WorkspaceError, match="must match"):
+        remove_attempt_clone(tmp_path, "a1\n")

@@ -102,7 +102,7 @@ class TaskResult:
 
 def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     """Reject a task before anything is bound or run."""
-    if not isinstance(task.base_commit, str) or not OID.match(task.base_commit):
+    if not isinstance(task.base_commit, str) or not OID.fullmatch(task.base_commit):
         raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
     if not task.allowed_files or len(set(task.allowed_files)) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")

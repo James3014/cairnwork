@@ -201,7 +201,7 @@ class Notary:
 
     def verdict(self, task_id: str, attempt_id: str, *, expected_candidate: str) -> Verdict | None:
         """Read the recorded verdict; it is unverified unless it is for expected_candidate."""
-        if not isinstance(expected_candidate, str) or not _OID.match(expected_candidate):
+        if not isinstance(expected_candidate, str) or not _OID.fullmatch(expected_candidate):
             raise NotaryInputError("expected_candidate must be a 40-hex commit id")
         return self._read(task_id, attempt_id, expected_candidate)
 
