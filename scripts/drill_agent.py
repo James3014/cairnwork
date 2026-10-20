@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from cairnwork.confined import ATTEMPT_ENV
+from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
@@ -123,27 +123,39 @@ def restart(work: Path, model: str) -> dict:
         stderr=subprocess.DEVNULL,
     )
     ledger, notary, journal = stores(work)
+    attempt = _wait_for_agy(child, ledger, journal)
+    before = agy_processes(attempt) if attempt else []
+    if child.poll() is None:
+        os.kill(child.pid, signal.SIGKILL)
+    child.wait()
+    decisions, left = [], []
+    try:
+        decisions = recover(ledger=ledger, notary=notary, journal=journal, run_root=work / "runs")
+        time.sleep(2)
+        left = agy_processes(attempt) if attempt else []
+    finally:
+        if attempt:
+            sweep_marked(ATTEMPT_ENV, attempt)  # never leave the drill's agy running
+    return {
+        "agy_running_when_killed": len(before),
+        "decisions": [d.__dict__ for d in decisions],
+        "agy_left_after_recovery": left,
+        "task_status": ledger.get(task_id=decisions[0].task_id).status if decisions else None,
+    }
+
+
+def _wait_for_agy(child, ledger, journal) -> str:
+    """Return the attempt id once its Agy process is running ('' on timeout or exit)."""
     deadline = time.monotonic() + 120
-    attempt = ""
     while time.monotonic() < deadline and child.poll() is None:
         flight = ledger.in_flight()
         phases = journal.entries(flight[0].task_id) if flight else []
         if any(e.phase == "WORKER_STARTED" for e in phases):
             attempt = phases[-1].attempt_id
             if agy_processes(attempt):
-                break
+                return attempt
         time.sleep(0.5)
-    before = agy_processes(attempt) if attempt else []
-    os.kill(child.pid, signal.SIGKILL)
-    child.wait()
-    decisions = recover(ledger=ledger, notary=notary, journal=journal, run_root=work / "runs")
-    time.sleep(2)
-    return {
-        "agy_running_when_killed": len(before),
-        "decisions": [d.__dict__ for d in decisions],
-        "agy_left_after_recovery": agy_processes(attempt) if attempt else [],
-        "task_status": ledger.get(task_id=decisions[0].task_id).status if decisions else None,
-    }
+    return ""
 
 
 def main() -> int:
@@ -157,15 +169,20 @@ def main() -> int:
     make_project(work / "project", contradictory=mode == "failure")
     if mode == "failure":
         outcome = run(work, ("src/stats.py",), model)
-        ok = outcome["status"] == "FAILED" and not outcome["verified"]
+        # the intended path: the agent changed the file and Core did not verify it
+        ok = outcome["status"] == "FAILED" and outcome["reason"].startswith("CORE_")
     elif mode == "scope":
         outcome = run(work, ("src/report.py",), model)
-        ok = outcome["status"] == "FAILED" and not outcome["verified"]
+        # the intended path: an edit outside the allowed file was caught
+        ok = outcome["status"] == "FAILED" and outcome["reason"].startswith("DIRTY_TREE")
     elif mode == "restart":
         outcome = restart(work, model)
+        decision = outcome["decisions"][0] if outcome["decisions"] else {}
         ok = (
             outcome["task_status"] == "FAILED"
             and outcome["agy_running_when_killed"] > 0
+            and decision.get("reason") == "INTERRUPTED_AFTER_WORKER_STARTED"
+            and decision.get("killed_processes", 0) >= 1
             and not outcome["agy_left_after_recovery"]
         )
     else:

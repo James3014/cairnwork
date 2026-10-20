@@ -5,8 +5,8 @@
 | 演練 | 狀態 | 證據 |
 |---|---|---|
 | 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
-| 失敗 | **通過**：自動測試涵蓋四種路徑（錯誤修正 → `CORE_FAILED_VERIFICATION`、改到範圍外 → `DIRTY_TREE`、沒有改動 → `NO_COMMIT`、worker 當掉 → `WORKER_FAILED`）；真 agent 跑了 3 次（2026-10-20），全部 FAILED，見下方 | `tests/test_pipeline.py`、`scripts/drill_agent.py failure｜scope` |
-| 重啟 | **通過**（真 agent 1 次＋自動測試，真的 kill -9）：在 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點各殺一次 Cairnwork 程序，再跑恢復。Core 已經判定通過的補成 COMPLETED，其餘都判 FAILED；worker 中途被殺時，留下的孤兒程序也會被清掉；正在跑的時候不能執行恢復；恢復可以重複執行，結果不變。真 agent 版還沒跑。 | `tests/test_recovery.py` |
+| 失敗 | **通過**：自動測試涵蓋四種路徑（錯誤修正 → `CORE_FAILED_VERIFICATION`、改到範圍外 → `DIRTY_TREE`、沒有改動 → `NO_COMMIT`、worker 當掉 → `WORKER_FAILED`）。真 agent 有 1 次走到預期路徑（改了檔案，Core 判定未通過），另外 3 次停在 worker 中止，見下方 | `tests/test_pipeline.py`、`docs/drills/2026-10-20-failure.json` |
+| 重啟 | **通過**：自動測試用真的 kill -9，涵蓋 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點，以及孤兒程序、鎖衝突、重複執行恢復。真 agent 跑了 1 次，agy 執行到一半時 kill -9，見下方 | `tests/test_recovery.py`、`docs/drills/2026-10-20-restart.json` |
 | 回退 | **還不能做**：回退的對象是 F 條的線上切換（舊 Gateway 把一類任務轉給 Cairnwork），這部分還沒建。等切換做出來，第一件事就是跑回退演練 | — |
 
 ## 正常演練 2026-10-20
@@ -49,20 +49,24 @@
 
 ## 真 agent 失敗演練 2026-10-20
 
-腳本：`uv run python scripts/drill_agent.py failure|scope <空目錄>`（Agy gemini-3.8-flash-high，accept-edits --sandbox）。
+腳本：`uv run python scripts/drill_agent.py failure|scope <空目錄>`（Agy gemini-3.8-flash-high，accept-edits --sandbox）。腳本只有在走到預期路徑時，才會回報 `drill_passed: true`：failure 模式要「Core 判定未通過」，scope 模式要「改到範圍外被抓到」。
 
-| 次 | 題目 | 結果 | agent 實際做了什麼 |
+| 次 | 題目 | 結果 | 是否走到預期路徑 |
 |---|---|---|---|
-| 1、2 | scope：bug 在 `src/stats.py`，但只允許改 `src/report.py` | FAILED（`NO_COMMIT`） | 讀檔被權限擋下，整次中止，沒有改任何檔案 |
-| 3 | failure：允許改 `src/stats.py`，但測試期待的值和題目矛盾（`average([2, 4]) == 4`） | FAILED（`NO_COMMIT`） | 讀了 `src/stats.py`、`tests/test_stats.py`，接著想讀 clone **外面**的 `../eval.py` 找線索，被權限擋下（`permission check failed for read_file ... eval.py`），整次中止 |
+| 1、2 | scope：bug 在 `src/stats.py`，但只允許改 `src/report.py` | FAILED（`NO_COMMIT`） | **否**。agent 正常讀了 clone 裡的 `src/stats.py`、`src/report.py`，接著試圖讀取 clone 外面、實際上不存在的路徑，被權限拒絕，整次中止，沒有改任何檔案。也就是說，沒有驗到「改到範圍外會被抓」這條規則 |
+| 3 | failure（舊判定條件）：測試期待的值和題目矛盾（`average([2, 4]) == 4`） | FAILED（`NO_COMMIT`） | **否**。agent 讀完 clone 裡的檔案後，試圖讀取演練目錄裡、實際上不存在的 `eval.py`，被權限拒絕，整次中止 |
+| 4 | failure（嚴格判定條件），題目同上 | FAILED（`CORE_FAILED_VERIFICATION`） | **是**。agent 把 `average` 改成算術平均（`sum(values) / len(values)`），但測試期待的是矛盾的值，所以 verifier 沒過，Core 判定未通過。證據：`docs/drills/2026-10-20-failure.json`，候選 commit 為 `323d08a0e6bc2411421b5670469e21c9e72811af` |
 
-這三次真 agent 的失敗都停在「worker 中止」，沒有走到「改了檔案，但 Core 驗證沒通過」這條路徑；那條路徑目前由自動測試涵蓋。第 3 次也順帶證明了一件事：agent 想讀工作區以外的檔案時，agy 的權限機制會擋下來。
+觀察到的現象：agent 試圖讀取工作區以外、不存在的路徑時，agy 的權限機制拒絕了，整次執行跟著中止。這只觀察到「不存在的外部路徑」這種情況，還沒驗證過讀取真實存在的外部檔案時會怎樣。
 
 ## 真 agent 重啟演練 2026-10-20
 
-腳本：`uv run python scripts/drill_agent.py restart <空目錄>`。正常任務在子程序裡執行，agy 開始工作後，對子程序送出 SIGKILL，接著執行恢復。
+腳本：`uv run python scripts/drill_agent.py restart <空目錄>`。正常任務在子程序裡執行；等 agy 程序確實在跑之後，對子程序送出 SIGKILL，接著執行恢復。腳本要同時滿足以下條件才算通過：任務判定 FAILED、原因是 `INTERRUPTED_AFTER_WORKER_STARTED`、恢復有砍掉至少 1 個程序、事後沒有殘留的 agy。
 
-- 被殺時 agy 程序數：1
+第 2 次執行（嚴格判定條件）的輸出：`docs/drills/2026-10-20-restart.json`
+
+- 被殺時正在跑的 agy 程序數：1
 - 恢復結果：`DISPATCHED → FAILED`，原因 `INTERRUPTED_AFTER_WORKER_STARTED`，`killed_processes = 1`
-- 恢復後殘留的 agy 程序：0
-- task_id `task-0f0d9d20b54d4e2daa4cf27896b17ffe`，attempt `aea76a8f07e882b28`
+- 恢復後殘留的 agy：0
+
+第 1 次執行（舊判定條件）結果相同，但只留下了螢幕輸出。
