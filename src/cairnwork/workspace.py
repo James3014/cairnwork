@@ -94,6 +94,7 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
         except GitCommandError:  # e.g. a candidate only reachable from refs/cairnwork/
             run_git(path, "fetch", "--quiet", "--no-tags", str(repo), base_commit)
         run_git(path, "checkout", "--quiet", "--detach", base_commit)
+        _restrict_to_base_history(path, base_commit)
         head = run_git(path, "rev-parse", "HEAD").strip()
         refs_before = _guarded_refs(repo, attempt_id)
     except (GitCommandError, OSError) as exc:
@@ -105,6 +106,26 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
     if head != base_commit or differences:
         raise WorkspaceError(f"{path} is not a clean checkout of {base_commit}")
     return Attempt(attempt_id, base_commit, path, refs_before)
+
+
+def _restrict_to_base_history(path: Path, base_commit: str) -> None:
+    """Leave the worker only base's history. ``git clone`` copies every object and keeps
+    a branch at the source tip, so when base is not that tip a worker can read a later
+    "answer" commit with ``git log``/``git show`` (preserved behavior #11). Delete every
+    ref, expire reflogs, drop unreachable objects, and fail closed if any commit outside
+    base's history survives. The detached HEAD keeps base reachable, so the fetch-back in
+    ``collect_candidate`` still works."""
+    for ref in run_git(path, "for-each-ref", "--format=%(refname)").splitlines():
+        run_git(path, "update-ref", "-d", ref)
+    run_git(path, "reflog", "expire", "--expire=now", "--all")
+    run_git(path, "gc", "--prune=now", "--quiet")
+    history = set(run_git(path, "rev-list", base_commit).split())
+    objects = run_git(
+        path, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)"
+    )
+    commits = {line.split()[1] for line in objects.splitlines() if line.startswith("commit ")}
+    if commits - history:
+        raise WorkspaceError(f"{path} still holds commits outside base history")
 
 
 def remove_attempt_clone(root: Path, attempt_id: str) -> None:
