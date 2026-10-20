@@ -159,6 +159,11 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
         "allowed_files": list(task.allowed_files),
         "verifiers": [[f"pytest-{i}", list(v)] for i, v in enumerate(task.verifiers)],
     }
+    if task.test_commit:  # the tests' own base: the parent of the test commit, on main
+        _git(clone, "fetch", "-q", "origin", task.test_commit)
+        payload["test_commit"] = task.test_commit
+        payload["base_commit"] = _git(clone, "rev-parse", f"{task.test_commit}^").strip()
+        _git(clone, "merge-base", "--is-ancestor", payload["base_commit"], base)
     out = intake.submit(payload)
     _remember(intake, github.repo, number, out["task_id"], task.block_sha256)
     github.relabel(number, RUNNING, QUEUE)
@@ -214,7 +219,11 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     request = intake.load_request(str(status["task_id"]))
     _git(clone, "merge-base", "--is-ancestor", request.base_commit, commit)
     changed = _git(clone, "diff", "--name-only", "--no-renames", request.base_commit, commit)
-    if not set(changed.split()) <= set(request.allowed_files):
+    tests = ()
+    if request.test_commit:
+        tests = _git(clone, "diff", "--name-only", "--no-renames", request.base_commit,
+                     request.test_commit).split()  # fmt: skip
+    if not set(changed.split()) <= set(request.allowed_files) | set(tests):
         raise ValueError(f"candidate {commit} changes files outside the Issue's allowed_files")
     branch = f"cairnwork/{number}-{attempt}"
     existing = github.find_pr(branch)

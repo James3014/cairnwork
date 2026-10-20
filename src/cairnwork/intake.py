@@ -73,9 +73,13 @@ class IntakeRefused(Exception):
 
 def task_from_payload(payload: Any) -> TaskSpec:
     """A closed schema: unknown or missing fields are refused, never ignored."""
-    if not isinstance(payload, dict) or set(payload) != FIELDS:
+    if not isinstance(payload, dict) or not FIELDS <= set(payload) <= FIELDS | {"test_commit"}:
         got = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
-        raise IntakeRefused("BAD_REQUEST", f"fields must be exactly {sorted(FIELDS)}, got {got}")
+        raise IntakeRefused(
+            "BAD_REQUEST", f"fields must be {sorted(FIELDS)} (+test_commit), got {got}"
+        )
+    if not isinstance(payload.get("test_commit", ""), str):
+        raise IntakeRefused("BAD_REQUEST", "test_commit must be a string")
     texts = ("idempotency_key", "card_hash", "title", "instructions", "repo", "base_commit")
     if not all(isinstance(payload[name], str) for name in texts):
         raise IntakeRefused("BAD_REQUEST", "text fields must be strings")
@@ -95,6 +99,7 @@ def task_from_payload(payload: Any) -> TaskSpec:
         base_commit=payload["base_commit"],
         allowed_files=tuple(files),
         verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
+        test_commit=payload.get("test_commit", ""),
     )
 
 

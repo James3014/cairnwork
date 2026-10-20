@@ -7,7 +7,12 @@
 1. 在 Issue 內文放**一個** ```` ```eia-task ```` JSON 區塊，格式和 Nexus-new 的 EIA 相同（`docs/ops/eia_nightly.md`）。有三點不同：
    - `verification` 只接受 `python3 -m pytest [-q] [-p no:cacheprovider] tests/...`，不接受 `git diff --check` 那種 shell 寫法。
    - `hard` 的 Issue 不收。
-   - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。所以會失敗的那個測試要先放到 main 上（例如先標成 `xfail(strict=True)`，再讓修正把標記拿掉，這種情況要事先講好），worker 只改原始碼。
+   - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。
+   - **證明 bug 的測試用 `test_commit` 提供（測試延後套用）**：開 Issue 的人先推一個分支，上面只有一個 commit，父 commit 是 main 上的某個版本，內容只新增或修改 `tests/` 底下的一般檔案，不能有 `conftest.py`。把它的 40 位 hex 填進區塊的 `test_commit`。
+     - worker 只拿到父 commit（base），看不到這個測試。
+     - Cairnwork 先在「base + 測試」上跑 verifier：至少要有一個以 exit 1 失敗，而且沒有其他錯誤，才算測試有效。測試原本就通過，或者只是 import 失敗，都拒絕（`TESTS_DO_NOT_FAIL_ON_BASE`）。
+     - worker 修完後，Cairnwork 把測試疊到修正上，再跑 verifier、交給 Core 公證；PR 的內容就是這個 commit（修正加測試）。
+     - 有 `test_commit` 時，base 是它的父 commit（必須在 origin/main 的歷史裡），不是當下的 main。
 2. 由可信身分貼上 `cairnwork:queue` 標籤。可信身分是 `James3014` 或 `james3014-nexus-agent[bot]`。
    - repo 是公開的，所以會逐一檢查：Issue 作者、最後一次貼標籤的人、貼標籤之後所有的標題和內文修改，都必須是可信身分。
    - 編輯歷史不完整也一律拒絕。

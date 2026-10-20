@@ -286,3 +286,33 @@ def test_a_github_error_while_refusing_does_not_stop_the_pass(setup):
     github = Flaky([issue(block={**BLOCK, "allowed_files": ["pyproject.toml"]}), issue(number=8)])
     out = runner.take(setup["intake"], github, setup["clone"])
     assert "502" in out[0]["error"] and out[1]["duplicate"] is False
+
+
+def test_an_issue_with_deferred_tests_binds_to_the_tests_base(setup, monkeypatch):
+    clone = setup["clone"]
+    base = git(clone, "rev-parse", "HEAD")
+    git(clone, "checkout", "-q", "-b", "tests-7")
+    test_commit = commit_change(clone, {"tests/test_bug.py": "def test_bug():\n    assert 0\n"})
+    git(clone, "push", "-q", "origin", "tests-7")
+    git(clone, "checkout", "-q", "main")
+    commit_change(clone, {"later.txt": "main moved on\n"})
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "update-ref", "-d", "refs/heads/tests-7")
+    git(clone, "update-ref", "-d", "refs/remotes/origin/tests-7")
+    github = FakeGitHub([issue(block={**BLOCK, "test_commit": test_commit})])
+    taken = runner.take(setup["intake"], github, clone)[0]
+    request = setup["intake"].load_request(taken["task_id"])
+    assert request.test_commit == test_commit and request.base_commit == base
+    git(clone, "checkout", "-q", "--detach", base)  # what Cairnwork builds: fix, then tests
+    commit_change(clone, {"src/calc.py": "x = 2\n"}, message="fix")
+    final = commit_change(clone, {"tests/test_bug.py": "def test_bug():\n    assert 0\n"})
+    git(clone, "checkout", "-q", "main")
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, final))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    out = runner.settle(setup["intake"], github, clone)
+    assert out[0]["pr"].startswith("https://")
+
+    stray = commit_change(clone, {"src/other.py": "y\n"})  # outside allowed ∪ tests
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, stray))
+    github.labels[7] = {runner.RUNNING}
+    assert "outside" in runner.settle(setup["intake"], github, clone)[0]["error"]

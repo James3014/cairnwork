@@ -35,6 +35,7 @@ SAFE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 TEST_TARGET = re.compile(
     r"tests/(?:[A-Za-z0-9_\-]+/)*[A-Za-z0-9_\-]+\.py(?:::[A-Za-z0-9_\[\]\-]+)*"
 )
+COMMIT = re.compile(r"[0-9a-f]{40}")
 MAX_ALLOWED_FILES = 10
 KEYS = frozenset(
     {
@@ -44,6 +45,7 @@ KEYS = frozenset(
         "capability_ids",
         "capability_disposition",
         "summary",
+        "test_commit",
     }
 )
 PROTECTED_PATHS = (
@@ -96,6 +98,7 @@ class IssueTask:
     verifiers: tuple[tuple[str, ...], ...]
     summary: str
     block_sha256: str
+    test_commit: str = ""  # deferred tests (cairnwork.deferred_tests)
 
 
 def parse_task_block(body: str) -> IssueTask:
@@ -131,12 +134,16 @@ def parse_task_block(body: str) -> IssueTask:
     summary = raw.get("summary", "")
     if not isinstance(summary, str):
         raise IssueRefused("TASK_SUMMARY_INVALID")
+    test_commit = raw.get("test_commit", "")
+    if test_commit and not (isinstance(test_commit, str) and COMMIT.fullmatch(test_commit)):
+        raise IssueRefused("TASK_TEST_COMMIT_INVALID")
     return IssueTask(
         difficulty=difficulty,
         allowed_files=tuple(files),
         verifiers=tuple(pytest_argv(c) for c in commands),
         summary=" ".join(summary.split())[:400],
         block_sha256=hashlib.sha256(blocks[0].encode()).hexdigest(),
+        test_commit=test_commit,
     )
 
 
