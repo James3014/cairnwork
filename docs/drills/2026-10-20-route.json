@@ -1,0 +1,90 @@
+{
+  "runs": [
+    {
+      "request": {
+        "idempotency_key": "live-1",
+        "card_hash": "card-live-1",
+        "title": "fix average",
+        "instructions": "average([2, 4]) returns 2.0 but should return 3. Fix average() in src/stats.py so it returns the arithmetic mean.",
+        "repo": "<drill dir>/project",
+        "base_commit": "2fbfebd7c1bc7243bb9904ba7d02fe19dbed4996",
+        "allowed_files": [
+          "src/stats.py"
+        ],
+        "verifiers": [
+          [
+            "pytest",
+            [
+              "python3",
+              "-m",
+              "pytest",
+              "-q",
+              "tests/test_stats.py"
+            ]
+          ]
+        ]
+      },
+      "submit": {
+        "duplicate": false,
+        "status": "BOUND",
+        "task_id": "task-5f291518a90a43399d4eabe59c88893b"
+      },
+      "final": {
+        "attempt_id": "a1cfff63134abd182",
+        "candidate_commit": "1ef2d4e3a9dc8067aeb7c9c8ac9d4e53352de358",
+        "core_verified": true,
+        "detail": "COMPLETED",
+        "idempotency_key": "live-1",
+        "owner": "cairnwork",
+        "phase": "FINISHED",
+        "status": "COMPLETED",
+        "task_id": "task-5f291518a90a43399d4eabe59c88893b"
+      },
+      "date": "2026-10-20",
+      "note": "cairnwork-route check/accept/submit/status/drain/resend, real agy gemini-3.8-flash-high, verifier as cairnwork-verifier; 35 s submit to COMPLETED"
+    },
+    {
+      "umask": "077",
+      "request": {
+        "idempotency_key": "live-2",
+        "card_hash": "card-live-2",
+        "title": "fix average",
+        "instructions": "average([2, 4]) returns 2.0 but should return 3. Fix average() in src/stats.py so it returns the arithmetic mean.",
+        "repo": "<drill dir>/project",
+        "base_commit": "5ff3d5571c8377888350be1ae1b5078419ed74d6",
+        "allowed_files": [
+          "src/stats.py"
+        ],
+        "verifiers": [
+          [
+            "pytest",
+            [
+              "python3",
+              "-m",
+              "pytest",
+              "-q",
+              "tests/test_stats.py"
+            ]
+          ]
+        ]
+      },
+      "submit": {
+        "duplicate": false,
+        "status": "BOUND",
+        "task_id": "task-2a2cd4093ad744388ebb35d9bc6601e9"
+      },
+      "final": {
+        "attempt_id": "a94a1bc4f1d0f856e",
+        "candidate_commit": "9715c39f40c0de2040292eda06f91f6b56c234ef",
+        "core_verified": true,
+        "detail": "COMPLETED",
+        "idempotency_key": "live-2",
+        "owner": "cairnwork",
+        "phase": "FINISHED",
+        "status": "COMPLETED",
+        "task_id": "task-2a2cd4093ad744388ebb35d9bc6601e9"
+      },
+      "note": "after review fixes, caller umask 077 (strict Gateway service); drain then a new key -> NOT_ACCEPTING; 29 s submit to COMPLETED"
+    }
+  ]
+}

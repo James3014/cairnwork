@@ -183,6 +183,8 @@ def _run_all(
     for index, spec in enumerate(specs):
         clone_id = f"{run_id}-v{index}"
         checkout = create_attempt_clone(repo, candidate_commit, run_root, clone_id).path
+        if account is not None:
+            account.grant_read(checkout)  # whatever the caller's umask was
         try:
             runs.append(
                 _run_one(
@@ -219,7 +221,7 @@ def _run_one(
     )
     run_dir, home, tmp, report, env = _prepare_run(private, ini)
     if account is not None:
-        _share_with_account(private, ini, run_dir, home, tmp)
+        account.share_run(private, ini, run_dir, home, tmp)
     if attempt_id:
         env[ATTEMPT_ENV] = attempt_id
     argv = [
@@ -300,15 +302,6 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
         reap=account.reap,
     )
     return returncode, timed_out, survivors
-
-
-def _share_with_account(private: Path, ini: Path, run_dir: Path, home: Path, tmp: Path) -> None:
-    """Let the verifier account (group cairnwork) enter the run dir and read the ini,
-    and write only its run/ scratch. The log stays owner-only."""
-    os.chmod(private, 0o750)
-    os.chmod(ini, 0o640)
-    for directory in (run_dir, home, tmp):
-        os.chmod(directory, 0o2770)
 
 
 def _prepare_run(private: Path, ini: Path):

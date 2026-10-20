@@ -52,4 +52,4 @@
   - 自己開新 session、又清掉環境變數的子程序：帳號模式下，執行結束後會以該帳號執行 `kill -9 -1` 清掉它的所有程序，有任何殘留就判失敗；沒有帳號時仍然躲得過清除。帳號模式一次只能跑一個 verifier（獨占鎖）。每次開跑前，也會先確認該帳號底下沒有任何程序。
   - 專屬帳號保護的是擁有者不被 verifier 讀取，反方向不成立：sudoers 允許擁有者以該帳號執行任意 profile 的 sandbox-exec，所以任何以擁有者身分執行的程序，都能以該帳號執行程式碼。該帳號本身沒有任何特權，不能用來提升權限。
   - Seatbelt 只能用在 macOS，不是可以移植的正式 sandbox。
-- Gateway 怎麼把一類任務轉給 Cairnwork：介面和認證由部署器負責人和整合負責人另外訂，F 條的「先驗證、晚切換」照做。
+- Gateway 怎麼把一類任務轉給 Cairnwork：Cairnwork 端的 `cairnwork-route` 已完成（`docs/GATEWAY_ROUTE.md`）；Gateway 端的分流、靜止閘門和開關由部署器負責人和整合負責人另外訂，F 條的「先驗證、晚切換」照做。

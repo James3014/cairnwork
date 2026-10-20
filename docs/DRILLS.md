@@ -7,7 +7,7 @@
 | 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
 | 失敗 | **通過**：自動測試涵蓋四種路徑（錯誤修正 → `CORE_FAILED_VERIFICATION`、改到範圍外 → `DIRTY_TREE`、沒有改動 → `NO_COMMIT`、worker 當掉 → `WORKER_FAILED`）。真 agent 有 1 次走到預期路徑（改了檔案，Core 判定未通過），另外 3 次停在 worker 中止，見下方 | `tests/test_pipeline.py`、`docs/drills/2026-10-20-failure.json` |
 | 重啟 | **通過**：自動測試用真的 kill -9，涵蓋 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點，以及孤兒程序、鎖衝突、重複執行恢復。真 agent 跑了 1 次，agy 執行到一半時 kill -9，見下方 | `tests/test_recovery.py`、`docs/drills/2026-10-20-restart.json` |
-| 回退 | **還不能做**：回退的對象是 F 條的線上切換（舊 Gateway 把一類任務轉給 Cairnwork），這部分還沒建。等切換做出來，第一件事就是跑回退演練 | — |
+| 回退 | **還不能做**：Cairnwork 端的接收與 `drain` 已完成，也實測過（drain 後重送拿回同一個任務、新任務被拒），但回退的對象是 Gateway 的線上切換，Gateway 端還沒做。步驟見 `docs/GATEWAY_ROUTE.md` | `docs/drills/2026-10-20-route.json`（只有 Cairnwork 端） |
 
 ## 正常演練 2026-10-20
 

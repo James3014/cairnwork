@@ -29,7 +29,7 @@ from cairnwork.core_request import AcceptanceSpec
 from cairnwork.gitcmd import OID
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import OwnershipLedger
+from cairnwork.ownership import OwnershipLedger, request_digest
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -69,6 +69,7 @@ class TaskSpec:
 
     def request(self) -> dict:
         return {
+            "repo": str(self.repo),
             "title": self.title,
             "instructions": self.instructions,
             "base_commit": self.base_commit,
@@ -148,31 +149,68 @@ def run_task(
         record = bound.record
         if bound.duplicate:
             return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
-        attempt_id = f"a{secrets.token_hex(8)}"
-        steps = _Steps(journal, record.task_id, attempt_id)
-        steps.reach("DISPATCHED", str(Path(run_root).resolve()))
-        ledger.set_status(record.task_id, "DISPATCHED")
-        result = TaskResult(record.task_id, attempt_id, "FAILED")
-        try:
-            _attempt(
-                task,
-                specs,
-                record.request_digest,
-                notary,
-                worker,
-                run_root,
-                result,
-                steps,
-                verifier_account,
-            )
-        except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
-            result.verified = False
-            result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
-        finally:
-            result.status = "COMPLETED" if result.verified else "FAILED"
-            steps.reach("FINISHED", result.status)
-            ledger.set_status(record.task_id, result.status)
-        return result
+        return _execute(
+            task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
+        )
+
+
+def run_bound_task(
+    task: TaskSpec,
+    task_id: str,
+    *,
+    ledger: OwnershipLedger,
+    notary: Notary,
+    journal: Journal,
+    worker: Worker,
+    run_root: Path,
+    verifier_account: VerifierAccount | None = None,
+) -> TaskResult:
+    """Run a task bound earlier (intake.submit). Its request must be the one bound;
+    a task that is no longer BOUND (cancelled, or already run) is not run again."""
+    specs = check_task(task)
+    with runlock.held(ledger.path, exclusive=False):
+        record = ledger.get(task_id=task_id)
+        same = record.idempotency_key == task.idempotency_key and (
+            record.request_digest == request_digest(task.request())
+        )
+        if not same or record.owner != "cairnwork" or record.card_hash != task.card_hash:
+            raise TaskRejected("REQUEST_MISMATCH", f"{task_id} was bound to another request")
+        if record.status != "BOUND":
+            return TaskResult(task_id, "", record.status, reason="NOT_BOUND")
+        return _execute(
+            task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
+        )
+
+
+def _execute(
+    task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
+) -> TaskResult:
+    """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
+    attempt_id = f"a{secrets.token_hex(8)}"
+    steps = _Steps(journal, record.task_id, attempt_id)
+    steps.reach("DISPATCHED", str(Path(run_root).resolve()))
+    ledger.set_status(record.task_id, "DISPATCHED")
+    result = TaskResult(record.task_id, attempt_id, "FAILED")
+    try:
+        _attempt(
+            task,
+            specs,
+            record.request_digest,
+            notary,
+            worker,
+            run_root,
+            result,
+            steps,
+            verifier_account,
+        )
+    except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
+        result.verified = False
+        result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
+    finally:
+        result.status = "COMPLETED" if result.verified else "FAILED"
+        steps.reach("FINISHED", result.status)
+        ledger.set_status(record.task_id, result.status)
+    return result
 
 
 @dataclass(frozen=True)
