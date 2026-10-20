@@ -6,6 +6,7 @@ the sandbox let it through, the test (and so the verifier) would fail.
 """
 
 import sys
+from pathlib import Path
 
 import pytest
 from conftest import commit_change, git
@@ -155,3 +156,12 @@ def test_profile_resolves_symlinked_paths(tmp_path):
     profile = sandbox.build_profile((), (tmp_path / "link",), home=tmp_path)
     assert str(real.resolve()) in profile.text
     assert "(deny network*)" in profile.text and "(deny default)" in profile.text
+
+
+@pytest.mark.parametrize("root", ["/", "/Users", "/private/tmp", "HOME", "HOME_PARENT"])
+def test_broad_roots_are_refused(tmp_path, root):
+    home = tmp_path / "home"
+    home.mkdir()
+    path = {"HOME": home, "HOME_PARENT": tmp_path}.get(root, root)
+    with pytest.raises(sandbox.SandboxError):
+        sandbox.build_profile((Path(path),), (), home=home)

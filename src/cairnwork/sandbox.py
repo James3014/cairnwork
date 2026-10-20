@@ -96,9 +96,11 @@ def build_profile(
     read_roots: tuple[Path, ...], write_roots: tuple[Path, ...], home: Path | None = None
 ) -> Profile:
     """Default-deny profile: reads from system + read_roots, writes to write_roots only."""
+    real_home = sbpl_path(home or Path.home())
+    for root in (*read_roots, *write_roots):
+        _require_narrow(sbpl_path(root), real_home)
     reads = [f'(subpath "{sbpl_path(p)}")' for p in (*read_roots, *write_roots)]
     writes = [f'(subpath "{sbpl_path(p)}")' for p in write_roots]
-    real_home = sbpl_path(home or Path.home())
     denied = [f'(subpath "{real_home}/{rel}")' for rel in CREDENTIAL_HOME_PATHS]
     lines = [
         "(version 1)",
@@ -123,6 +125,15 @@ def build_profile(
         ")",
     ]
     return Profile("\n".join(lines) + "\n")
+
+
+_TOO_BROAD = ("/", "/Users", "/private", "/private/var", "/private/tmp", "/var", "/tmp")
+
+
+def _require_narrow(root: str, real_home: str) -> None:
+    """A root may not be '/', $HOME, a temp root, or any ancestor of $HOME."""
+    if root in _TOO_BROAD or root == real_home or real_home.startswith(root.rstrip("/") + "/"):
+        raise SandboxError(f"root {root!r} is too broad for a sandbox profile")
 
 
 def wrap(argv: list[str], profile_path: Path) -> list[str]:
