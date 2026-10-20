@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 cairnwork-route = "cairnwork.route:main"
+cairnwork-issues = "cairnwork.issue_runner:main"
 
 [dependency-groups]
 dev = [
