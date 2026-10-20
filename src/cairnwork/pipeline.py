@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -31,6 +32,7 @@ from cairnwork.deferred_tests import (
     ensure_test_commit,
     failed_on_base,
     lay_tests_over,
+    never_seen,
     test_paths,
 )
 from cairnwork.gitcmd import OID
@@ -253,7 +255,10 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
         python=verifying[1],
         base_commit=task.base_commit,
     )
-    if not failed_on_base(runs, paths):
+    teeth = failed_on_base(runs, paths)
+    for run in runs:  # not evidence for Core; would show the tests to later workers
+        shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
+    if not teeth:
         codes = [run.returncode for run in runs]
         raise TestCommitRejected("TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
     return paths
@@ -262,6 +267,12 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
     task_id = steps.task_id
+    if task.test_commit:
+        try:
+            never_seen(task.repo, task.test_commit)
+        except TestCommitRejected as exc:
+            result.reason = str(exc)
+            return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:

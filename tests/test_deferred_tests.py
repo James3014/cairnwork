@@ -1,6 +1,7 @@
 """Deferred tests: the worker never sees them, they must fail on the base, and the
 commit that is verified and notarised carries the fix and the tests together."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,11 +38,21 @@ CHECK = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_regression.py"
 
 
 def make_test_commit(project, files):
-    """A test commit on its own branch, whose parent is the current main."""
+    """A test commit on the base that exists only in the origin, as on GitHub: the
+    project (Cairnwork's repository) gets it only when Cairnwork fetches it."""
     base = git(project, "rev-parse", "HEAD")
-    git(project, "checkout", "-q", "-b", "tests-only")
-    test_commit = commit_change(project, files, message="tests")
-    git(project, "checkout", "-q", "main")
+    root = Path(project).parent
+    origin = root / "origin.git"
+    if not origin.exists():
+        git(root, "clone", "-q", "--bare", str(project), str(origin))
+        git(project, "remote", "add", "origin", str(origin))
+    work = root / f"author-{len(list(root.glob('author-*')))}"
+    git(root, "clone", "-q", str(origin), str(work))
+    git(work, "config", "user.email", "t@e")
+    git(work, "config", "user.name", "t")
+    git(work, "checkout", "-q", "--detach", base)
+    test_commit = commit_change(work, files, message="tests")
+    git(work, "push", "-q", "origin", f"{test_commit}:refs/heads/tests-{test_commit[:8]}")
     return base, test_commit
 
 
@@ -145,9 +156,18 @@ def test_teeth_need_a_failing_case_from_the_deferred_files(tmp_path):
 
 
 class ScanningWorker(EditWorker):
-    """Writes the fix and records any readable file near its clone that holds the test."""
+    """Writes the fix and records anything readable that holds the test."""
+
+    def __init__(self, files, test_commit):
+        super().__init__(files)
+        self.test_commit = test_commit
 
     def run(self, workdir: Path, task) -> None:
+        probe = subprocess.run(
+            ["git", "-C", str(task.repo), "cat-file", "-e", f"{self.test_commit}^{{commit}}"],
+            capture_output=True, check=False,
+        )  # fmt: skip
+        self.has_object = probe.returncode == 0
         self.found = [str(p) for p in Path(task.repo).rglob("*") if _holds(p)] + [
             str(p) for p in workdir.parent.rglob("*") if _holds(p)
         ]
@@ -162,15 +182,26 @@ def _holds(path: Path) -> bool:
 
 
 def test_nothing_the_worker_can_read_holds_the_deferred_test(project, tmp_path):
-    origin = tmp_path / "origin.git"
-    git(project, "clone", "-q", "--bare", str(project), str(origin))
-    git(project, "remote", "add", "origin", str(origin))
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
-    git(project, "push", "-q", "origin", "tests-only")
-    git(project, "branch", "-D", "tests-only")
-    git(project, "reflog", "expire", "--expire=now", "--all")
-    git(project, "gc", "-q", "--prune=now")
-    worker = ScanningWorker({"src/calc.py": "def add(a, b):\n    return a + b\n"})
+    worker = ScanningWorker(FIX, test_commit)
     result = run(project, tmp_path, base, test_commit, worker)
     assert result.status == "COMPLETED", result.reason
-    assert worker.found == []  # fetched only after the worker was done
+    assert worker.found == [] and worker.has_object is False  # fetched after the worker
+    assert list((tmp_path / "state" / "runs").glob("*-b-v*")) == []  # base-run logs dropped
+
+
+def test_a_retry_with_the_same_test_commit_is_refused(project, tmp_path):
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    first = run(project, tmp_path, base, test_commit, SeeingWorker({"src/calc.py": "x = 1\n"}))
+    assert first.status == "FAILED"
+    worker = SeeingWorker(FIX)
+    second = run(project, tmp_path, base, test_commit, worker, key="k2")
+    assert "TEST_COMMIT_ALREADY_EXPOSED" in second.reason
+    assert not hasattr(worker, "saw_test")  # refused before any worker started
+
+
+def test_an_oversized_report_does_not_count(tmp_path):
+    run = _Run(tmp_path, "big", 1, {"tests.test_regression"})
+    report = run.log_path.parent / "run" / "junit.xml"
+    report.write_text(report.read_text() + "<!--" + "x" * (5 << 20) + "-->")
+    assert not dt.failed_on_base([run], PATHS)

@@ -12,7 +12,9 @@
      - **worker 在修 bug 的期間，這台機器上沒有任何地方有這個測試**：
        - 接手時只透過 GitHub API 讀取它的父 commit，不下載測試。
        - 給 worker 的指示裡不含 `eia-task` 區塊，也不含 commit id。
-       - worker 結束後，Cairnwork 才抓取測試，所以 Cairnwork 的 repo 和之前的 log 裡都不會有它。
+       - worker 結束後，Cairnwork 才抓取測試；在 base 上跑的 log 用完就刪。
+       - 任務開始前，如果這個測試 commit 已經在本機出現過（例如重試、或另一個任務用了同一個），就拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）。重試時要把測試推成一個新的 commit。
+       - **限制**：worker 和 Cairnwork 用同一個系統帳號，而修正的驗證 log 是 Core 公證的證據，必須保留。所以重試時如果新的測試內容和上一次相同，worker 仍可能從上一次的 log 讀到。要徹底解決，必須讓 worker 改在獨立的帳號或環境裡執行（追蹤中）。
      - **確認測試有效**：在「base + 測試」上跑 verifier，JUnit 報告裡必須有延後測試檔的測試案例失敗，而且沒有 verifier 用其他方式出錯。測試原本就通過、只是 import 失敗、或只有別的檔案失敗，都拒絕（`TESTS_DO_NOT_FAIL_ON_BASE`）。
      - **驗證修正**：把測試疊到修正上，再跑 verifier、交給 Core 公證。PR 的內容就是這個 commit，修正和測試一起送出。
      - **base 的決定方式**：有 `test_commit` 時，base 是它的父 commit，而且必須在 origin/main 的歷史裡，不是當下的 main。

@@ -21,8 +21,9 @@ with network access could still look for a public test branch.
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from xml.etree import ElementTree  # noqa: S405 - JUnit from our own verifier run, 4 MB cap
+from xml.etree import ElementTree  # noqa: S405 - JUnit from our own verifier run, size-capped
 
+from cairnwork.confined import MAX_REPORT_BYTES
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.workspace import ATTEMPT_REF_PREFIX
 
@@ -36,6 +37,17 @@ class TestCommitRejected(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+
+
+def never_seen(repo: Path, test_commit: str) -> None:
+    """Before the worker starts: the test commit must not be on this machine yet. A retry
+    or a sibling task that already fetched it would have left it (and its logs) where the
+    worker can read them, so such a task needs a fresh test commit."""
+    try:
+        run_git(repo, "cat-file", "-e", f"{test_commit}^{{commit}}")
+    except GitCommandError:
+        return
+    raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push the tests as a new commit")
 
 
 def ensure_test_commit(repo: Path, test_commit: str) -> None:
@@ -95,6 +107,8 @@ def failed_on_base(runs, paths: tuple[str, ...]) -> bool:
     for run in runs:
         report = Path(run.log_path).parent / "run" / "junit.xml"
         try:
+            if report.stat().st_size > MAX_REPORT_BYTES:
+                continue
             cases = ElementTree.parse(report).getroot().iter("testcase")
         except (OSError, ElementTree.ParseError):
             continue
