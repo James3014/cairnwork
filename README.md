@@ -32,6 +32,7 @@ Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexu
 - 單檔 ≤400 行、單函式 ≤80 行；核心（`src/cairnwork/`）總行數 ≤5,000 行。
 - Ruff BLE001／S110 開啟；失敗情境測試證明失敗不會變成成功。
 - import-linter：禁止循環、禁止核心 import `experimental/`。
+- verifier sandbox 的見證測試在 macOS CI job（`test-macos`）一定會實際執行；缺少 sandbox-exec 時，這個 job 直接判失敗。
 
 ## 對外說法
 
