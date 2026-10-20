@@ -34,6 +34,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,7 +81,11 @@ class BlackBoxError(Exception):
 
 @dataclass(frozen=True)
 class BlackBoxCase:
-    """One hidden case. ``expected`` stays in the supervisor and never reaches the candidate."""
+    """One hidden case. ``expected`` stays in the supervisor and never reaches the candidate.
+
+    ``args`` and ``expected`` must survive a JSON round-trip: the candidate's return value is
+    compared after ``json.loads``, so give ``expected`` in that form (lists not tuples, string
+    dict keys), or a correct candidate would be failed on a representation mismatch."""
 
     args: tuple
     expected: object
@@ -157,16 +162,20 @@ def _judge(checkout, target, cases, python, timeout, private) -> BlackBoxVerdict
     # -P (not -I): keep PYTHONPATH so the candidate imports from the checkout, but never put the
     # harness's own directory on sys.path. The environment is already scrubbed to what we set here.
     argv = [python, "-P", str(harness)]
-    returncode, timed_out, _ = confined.execute(
+    _returncode, timed_out, survivors = confined.execute(
         sandbox.wrap(argv, profile_path), checkout, env, timeout, run_dir / "judge.log"
     )
-    return _verdict(results_path, cases, timed_out)
+    return _verdict(results_path, cases, timed_out, survivors)
 
 
-def _verdict(results_path: Path, cases, timed_out: bool) -> BlackBoxVerdict:
+def _verdict(results_path: Path, cases, timed_out: bool, survivors: int) -> BlackBoxVerdict:
     n_total = len(cases)
     if timed_out:
         return BlackBoxVerdict(False, False, 0, n_total, "timed out (possible resource abuse)")
+    if survivors:
+        # A process that outlived the group kill (e.g. one that escaped its session to tamper with
+        # run_dir). It cannot forge a pass, but a clean run leaves none, so do not accept one.
+        return BlackBoxVerdict(False, False, 0, n_total, "a process escaped the run")
     results = _read_results(results_path)
     executed = results is not None
     n_correct = 0
@@ -186,12 +195,20 @@ def _verdict(results_path: Path, cases, timed_out: bool) -> BlackBoxVerdict:
 
 
 def _read_results(results_path: Path) -> list | None:
-    """Read RESULTS as a list, or None. Never trust its shape; fail closed on anything odd."""
+    """Read RESULTS as a list, or None. The candidate controls this path inside run_dir, so open it
+    the way report_guard reads its verdict: O_NOFOLLOW + O_NONBLOCK and a regular-file check, so a
+    FIFO or symlink planted in its place cannot hang or redirect the parent. Fail closed on anything
+    odd (missing, not a regular file, too large, malformed, not a list)."""
     try:
-        if results_path.stat().st_size > MAX_RESULT_BYTES:
+        fd = os.open(results_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
             return None
-        with results_path.open("rb") as handle:
-            data = json.loads(handle.read())
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(MAX_RESULT_BYTES + 1)  # cap the read, no stat->read TOCTOU
+        if len(raw) > MAX_RESULT_BYTES:
+            return None
+        data = json.loads(raw)
     except (OSError, ValueError):
         return None
     return data if isinstance(data, list) else None
