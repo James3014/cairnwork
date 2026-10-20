@@ -183,3 +183,71 @@ def test_shadow_check_validates_without_side_effects(state, project):
     code, out = route(state, "check", stdin={**request(project), "allowed_files": ["../x"]})
     assert code == 2 and out["error"] == "BAD_SCOPE"
     assert sorted(p.name for p in state.iterdir()) == ["config.json"]
+
+
+def _with_mirror(state, mirror):
+    config = json.loads((state / "config.json").read_text())
+    (state / "config.json").write_text(json.dumps({**config, "mirror": str(mirror)}))
+
+
+def test_a_mirror_keeps_every_write_out_of_the_callers_repository(state, project, tmp_path):
+    mirror = tmp_path / "mirror"
+    git(tmp_path, "clone", "-q", str(project), str(mirror))  # Cairnwork's own clone
+    _with_mirror(state, mirror)
+    refs_before = git(project, "for-each-ref")
+    route(state, "drain")
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 2 and out["error"] == "NOT_ACCEPTING"
+    assert "cairnwork-bases" not in git(mirror, "for-each-ref")  # drained: nothing fetched
+    route(state, "accept")
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 0, out
+    status = wait_finished(state, out["task_id"])
+    assert status["status"] == "COMPLETED" and status["core_verified"] is True
+    candidate = status["candidate_commit"]
+    assert git(mirror, "cat-file", "-t", candidate) == "commit"
+    base = request(project)["base_commit"]
+    assert git(mirror, "rev-parse", f"refs/cairnwork-bases/{base}") == base  # pinned
+    assert git(project, "for-each-ref") == refs_before  # no ref written in the caller's repo
+    probe = subprocess.run(
+        ["git", "-C", str(project), "cat-file", "-e", candidate], capture_output=True, check=False
+    )
+    assert probe.returncode != 0  # nor the candidate's objects
+    code, again = route(state, "submit", stdin=request(project))  # resend: no new fetch needed
+    assert code == 0 and again["duplicate"] is True and again["task_id"] == out["task_id"]
+    bad = {**request(project, key="gw-2"), "base_commit": "d" * 40}
+    code, refused = route(state, "submit", stdin=bad)
+    assert code == 2 and refused["error"] == "BAD_REQUEST"
+
+
+def test_a_missing_mirror_is_a_config_error(state, project, tmp_path):
+    _with_mirror(state, tmp_path / "nowhere")
+    route(state, "accept")
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 2 and out["error"] == "BAD_CONFIG"
+
+
+def test_a_request_from_the_mirror_itself_is_not_fetched_again(state, project):
+    _with_mirror(state, project)  # e.g. the Issue runner's clone is the mirror
+    route(state, "accept")
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 0, out
+    assert "cairnwork-bases" not in git(project, "for-each-ref")
+    assert wait_finished(state, out["task_id"])["status"] == "COMPLETED"
+
+
+def test_another_submit_pinning_its_base_does_not_upset_a_running_attempt(state, project, tmp_path):
+    mirror = tmp_path / "mirror"
+    git(tmp_path, "clone", "-q", str(project), str(mirror))
+    _with_mirror(state, mirror)
+    (state.parent / "delay").write_text("4")
+    route(state, "accept")
+    _, first = route(state, "submit", stdin=request(project))
+    deadline = time.monotonic() + 30
+    while route(state, "status", "--task-id", first["task_id"])[1]["status"] != "DISPATCHED":
+        assert time.monotonic() < deadline
+        time.sleep(0.2)
+    commit_change(project, {"README.md": "a newer base\n"})
+    code, second = route(state, "submit", stdin=request(project, key="gw-2"))
+    assert code == 0, second
+    assert wait_finished(state, first["task_id"])["status"] == "COMPLETED"
