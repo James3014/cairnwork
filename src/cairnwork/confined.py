@@ -82,7 +82,7 @@ def sweep_marked(var: str, value: str, *, skip_group: int = -1) -> int:
         pid_text, pgid_text, rest = fields
         if int(pgid_text) == skip_group:
             continue
-        if marker in rest and int(pid_text) != os.getpid():
+        if marker in rest.split() and int(pid_text) != os.getpid():
             try:
                 os.kill(int(pid_text), signal.SIGKILL)
                 found += 1

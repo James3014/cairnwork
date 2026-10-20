@@ -180,3 +180,30 @@ def test_one_bad_record_does_not_stop_the_others(project, tmp_path, monkeypatch)
     decisions, _ = settle(tmp_path)
     reasons = sorted(d.reason.split(":")[0] for d in decisions)
     assert reasons == ["INTERRUPTED_BEFORE_DISPATCH", "RECOVERY_ERROR"]
+
+
+def test_sweep_matches_the_whole_marker_only():
+    import secrets
+
+    from cairnwork.confined import sweep_marked
+
+    value = "a" + secrets.token_hex(8)
+    longer = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={**os.environ, "CW_SWEEP_TEST": value + "0"},
+    )
+    exact = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env={**os.environ, "CW_SWEEP_TEST": value},
+    )
+    try:
+        time.sleep(0.5)
+        assert sweep_marked("CW_SWEEP_TEST", value) == 1
+        time.sleep(0.5)
+        assert exact.poll() is not None
+        assert longer.poll() is None
+    finally:
+        for proc in (longer, exact):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
