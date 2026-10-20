@@ -18,13 +18,16 @@ snapshot.py). The worker must have exited when ``run`` returns.
 
 from __future__ import annotations
 
+import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
 from cairnwork.gitcmd import OID
+from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.snapshot import snapshot_candidate
@@ -41,6 +44,8 @@ from cairnwork.workspace import (
     create_attempt_clone,
     remove_attempt_clone,
 )
+
+FAULT_ENV = "CAIRNWORK_FAULT_AFTER"
 
 
 class TaskRejected(Exception):
@@ -73,6 +78,13 @@ class TaskSpec:
 
 
 class Worker(Protocol):
+    """Edits the clone at workdir and returns when done.
+
+    A worker that starts processes must give each one the environment variable
+    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so that restart
+    recovery can find and stop them if Cairnwork dies mid-run (AgyWorker does).
+    """
+
     def run(self, workdir: Path, task: TaskSpec) -> None: ...
 
 
@@ -120,31 +132,56 @@ def _clean_relative_path(path: object) -> bool:
 
 
 def run_task(
-    task: TaskSpec, *, ledger: OwnershipLedger, notary: Notary, worker: Worker, run_root: Path
+    task: TaskSpec,
+    *,
+    ledger: OwnershipLedger,
+    notary: Notary,
+    journal: Journal,
+    worker: Worker,
+    run_root: Path,
 ) -> TaskResult:
     specs = check_task(task)
-    bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
-    record = bound.record
-    if bound.duplicate:
-        return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
-    attempt_id = f"a{secrets.token_hex(8)}"
-    ledger.set_status(record.task_id, "DISPATCHED")
-    result = TaskResult(record.task_id, attempt_id, "FAILED")
-    try:
-        _attempt(
-            task, specs, record.task_id, record.request_digest, notary, worker, run_root, result
-        )
-    except Exception as exc:  # noqa: BLE001 - recorded as an infrastructure failure, never success
-        result.verified = False
-        result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
-    finally:
-        ledger.set_status(record.task_id, "COMPLETED" if result.verified else "FAILED")
-        result.status = "COMPLETED" if result.verified else "FAILED"
-    return result
+    with runlock.held(ledger.path, exclusive=False):
+        bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
+        record = bound.record
+        if bound.duplicate:
+            return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
+        attempt_id = f"a{secrets.token_hex(8)}"
+        steps = _Steps(journal, record.task_id, attempt_id)
+        steps.reach("DISPATCHED", str(Path(run_root).resolve()))
+        ledger.set_status(record.task_id, "DISPATCHED")
+        result = TaskResult(record.task_id, attempt_id, "FAILED")
+        try:
+            _attempt(task, specs, record.request_digest, notary, worker, run_root, result, steps)
+        except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
+            result.verified = False
+            result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
+        finally:
+            result.status = "COMPLETED" if result.verified else "FAILED"
+            steps.reach("FINISHED", result.status)
+            ledger.set_status(record.task_id, result.status)
+        return result
 
 
-def _attempt(task, specs, task_id, digest, notary, worker, run_root, result) -> None:
+@dataclass(frozen=True)
+class _Steps:
+    """Journal each phase before doing it; CAIRNWORK_FAULT_AFTER=<phase> kills the process
+    right after that journal write (crash drills only; a crash never yields success)."""
+
+    journal: Journal
+    task_id: str
+    attempt_id: str
+
+    def reach(self, phase: str, detail: str = "") -> None:
+        self.journal.record(self.task_id, self.attempt_id, phase, detail)
+        if os.environ.get(FAULT_ENV) == phase:
+            os._exit(137)
+
+
+def _attempt(task, specs, digest, notary, worker, run_root, result, steps) -> None:
+    task_id = steps.task_id
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
+    steps.reach("WORKER_STARTED")
     try:
         try:
             worker.run(attempt.path, task)
@@ -159,8 +196,15 @@ def _attempt(task, specs, task_id, digest, notary, worker, run_root, result) -> 
             result.reason = str(exc)
             return
         result.candidate_commit = candidate.candidate_commit
+        steps.reach("CANDIDATE", candidate.candidate_commit)
+        steps.reach("VERIFYING")
         runs = run_verifiers(
-            task.repo, candidate.candidate_commit, specs, run_root, f"{result.attempt_id}-v"
+            task.repo,
+            candidate.candidate_commit,
+            specs,
+            run_root,
+            f"{result.attempt_id}-v",
+            attempt_id=result.attempt_id,
         )
         result.logs = [str(run.log_path) for run in runs]
         spec = AcceptanceSpec(
@@ -170,6 +214,7 @@ def _attempt(task, specs, task_id, digest, notary, worker, run_root, result) -> 
             task.allowed_files,
             task.allow_deletions,
         )
+        steps.reach("NOTARIZING")
         verdict = notary.notarize(
             task_id,
             result.attempt_id,

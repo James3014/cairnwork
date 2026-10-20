@@ -98,7 +98,7 @@ def _probe(policy: str) -> int | None:
 def sbpl_path(path: Path | str) -> str:
     """The real path, checked so it cannot break out of an SBPL string."""
     real = os.path.realpath(path)
-    if not _SAFE.match(real):
+    if not _SAFE.fullmatch(real):  # match() + '$' would accept a trailing newline
         raise SandboxError(f"path {real!r} has characters not allowed in a profile")
     return real
 
