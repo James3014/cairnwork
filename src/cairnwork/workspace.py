@@ -94,6 +94,7 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
         except GitCommandError:  # e.g. a candidate only reachable from refs/cairnwork/
             run_git(path, "fetch", "--quiet", "--no-tags", str(repo), base_commit)
         run_git(path, "checkout", "--quiet", "--detach", base_commit)
+        _restrict_to_base_history(path, base_commit)
         head = run_git(path, "rev-parse", "HEAD").strip()
         refs_before = _guarded_refs(repo, attempt_id)
     except (GitCommandError, OSError) as exc:
@@ -105,6 +106,35 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
     if head != base_commit or differences:
         raise WorkspaceError(f"{path} is not a clean checkout of {base_commit}")
     return Attempt(attempt_id, base_commit, path, refs_before)
+
+
+def _restrict_to_base_history(path: Path, base_commit: str) -> None:
+    """Leave the worker only base's history. ``git clone`` copies every object and keeps
+    a branch at the source tip, so when base is not that tip a worker can read a later
+    "answer" commit — or a tag or blob with the answer — with ``git log``/``git show``
+    /``git cat-file`` (preserved behavior #11). Delete every ref, expire reflogs, and drop
+    unreachable objects (``gc.bigPackThreshold=0`` so a large pack is not kept), then fail
+    closed if ANY object — commit, tree, blob or tag — outside base's history survives.
+    The gc runs with the operator's global/system config ignored, so a configured
+    ``gc.recentObjectsHook`` command cannot run. The detached HEAD keeps base reachable,
+    so the fetch-back in ``collect_candidate`` still works."""
+    for ref in run_git(path, "for-each-ref", "--format=%(refname)").splitlines():
+        run_git(path, "update-ref", "-d", ref)
+    run_git(path, "reflog", "expire", "--expire=now", "--all", isolate_config=True)
+    run_git(
+        path, "-c", "gc.bigPackThreshold=0", "gc", "--prune=now", "--quiet", isolate_config=True
+    )
+    # --no-object-names so a historical path (which git does not escape, and which
+    # splitlines() would split on \v / U+2028, or which may not be UTF-8) cannot break
+    # parsing; both sides are then one object id per line.
+    reachable = set(
+        run_git(path, "rev-list", "--objects", "--no-object-names", base_commit).split()
+    )
+    present = run_git(
+        path, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"
+    ).split()
+    if set(present) - reachable:
+        raise WorkspaceError(f"{path} still holds objects outside base history")
 
 
 def remove_attempt_clone(root: Path, attempt_id: str) -> None:

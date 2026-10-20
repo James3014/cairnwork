@@ -39,11 +39,23 @@ class GitCommandError(Exception):
         super().__init__(f"{self.code}: {detail}")
 
 
-def run_git(repo: Path, *args: str, index_file: Path | None = None) -> str:
-    """Run git in repo; index_file points git at a private index (GIT_INDEX_FILE)."""
+def run_git(
+    repo: Path, *args: str, index_file: Path | None = None, isolate_config: bool = False
+) -> str:
+    """Run git in repo; index_file points git at a private index (GIT_INDEX_FILE).
+
+    isolate_config ignores the operator's global and system git config for this call
+    (``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_SYSTEM`` → /dev/null). Stripping GIT_* does not
+    stop git reading ``~/.gitconfig``/``/etc/gitconfig``, where a setting such as
+    ``gc.recentObjectsHook`` runs a command during a prune — which ``core.hooksPath``
+    does not cover. Use it for maintenance commands (gc, prune) on a worker's clone.
+    """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if index_file is not None:
         env["GIT_INDEX_FILE"] = str(index_file)
+    if isolate_config:
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
     try:
         done = subprocess.run(  # noqa: S603 - fixed git argv, no shell
             ["git", *_SAFE_OPTIONS, "-C", str(repo), *args],  # noqa: S607
