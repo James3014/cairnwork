@@ -25,6 +25,7 @@ import re
 import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -63,6 +64,7 @@ PROTECTED_PATHS = (
     "scripts/ops/trusted_*",
     "scripts/ops/external_intelligence*",
     "scripts/ops/eia_nightly*",
+    "scripts/ops/com.nexus.eia-nightly*",
     "pytest.ini",
     "setup.cfg",
     "tox.ini",
@@ -77,6 +79,7 @@ PROTECTED_NAMES = (
     "makefile",
     ".pre-commit-config*",
 )
+_LATEST = datetime.max.replace(tzinfo=UTC)
 TRUSTED_ACTORS = frozenset({"James3014", "james3014-nexus-agent[bot]"})
 
 
@@ -122,6 +125,9 @@ def parse_task_block(body: str) -> IssueTask:
     commands = raw.get("verification")
     if not isinstance(commands, list) or not 0 < len(commands) <= 8:
         raise IssueRefused("TASK_VERIFICATION_INVALID")
+    ids = raw.get("capability_ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i for i in ids):
+        raise IssueRefused("TASK_CAPABILITY_IDS_INVALID")
     summary = raw.get("summary", "")
     if not isinstance(summary, str):
         raise IssueRefused("TASK_SUMMARY_INVALID")
@@ -197,12 +203,14 @@ def queue_trusted(
     labeled = [e for e in rows if e.get("event") == "labeled" and e.get("label") == label]
     if not labeled:
         return "QUEUE_LABEL_EVENT_MISSING"
-    last = max(labeled, key=lambda e: str(e.get("at") or ""))
+    last = max(labeled, key=lambda e: _when(e.get("at")))
     if last.get("actor") not in trusted:
         return "QUEUE_LABELED_BY_UNTRUSTED"
-    since = str(last.get("at") or "")
-    for e in rows:
-        if e.get("event") == "renamed" and str(e.get("at") or "") > since:
+    since = _when(last.get("at"))
+    if since == _LATEST:
+        return "QUEUE_LABEL_TIME_UNREADABLE"
+    for e in rows:  # same-second changes count as after the label (conservative)
+        if e.get("event") == "renamed" and _when(e.get("at")) >= since:
             if e.get("actor") not in trusted:
                 return "TITLE_EDITED_BY_UNTRUSTED"
     if _gql_login(author) not in trusted:
@@ -212,12 +220,18 @@ def queue_trusted(
     if not isinstance(nodes, list) or type(total) is not int or total > len(nodes):
         return "EDIT_HISTORY_INCOMPLETE"
     for node in nodes:
-        if (
-            str(node.get("editedAt") or "") > since
-            and _gql_login(node.get("editor")) not in trusted
-        ):
+        if _when(node.get("editedAt")) >= since and _gql_login(node.get("editor")) not in trusted:
             return "BODY_EDITED_BY_UNTRUSTED"
     return ""
+
+
+def _when(value: Any) -> datetime:
+    """A GitHub timestamp; anything unreadable sorts as 'latest' (fails closed)."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return _LATEST
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _gql_login(actor: Any) -> str | None:

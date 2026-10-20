@@ -48,6 +48,7 @@ def test_a_good_block_parses():
         ),
         (body({**GOOD, "verification": ["python3 -m pytest -q"]}), "TASK_VERIFICATION_UNSUPPORTED"),
         (body(extra="```eia-contract\n{}\n```"), "TASK_BODY_HAS_FOREIGN_CONTRACT"),
+        (body({**GOOD, "capability_ids": []}), "TASK_CAPABILITY_IDS_INVALID"),
     ],
 )
 def test_refused_blocks(text, code):
@@ -86,6 +87,15 @@ def test_trusted_queue():
             "BODY_EDITED_BY_UNTRUSTED",
         ),
         ({"total": 5}, "EDIT_HISTORY_INCOMPLETE"),
+        (
+            {"nodes": [{"editedAt": "2026-10-20T07:00:00Z", "editor": STRANGER}]},
+            "BODY_EDITED_BY_UNTRUSTED",
+        ),
+        ({"events": ({**LABELED, "at": "garbage"},)}, "QUEUE_LABEL_TIME_UNREADABLE"),
+        (
+            {"nodes": [{"editedAt": "not-a-time", "editor": STRANGER}]},
+            "BODY_EDITED_BY_UNTRUSTED",
+        ),
         (
             {
                 "events": (

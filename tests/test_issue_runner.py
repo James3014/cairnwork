@@ -39,6 +39,16 @@ class FakeGitHub(runner.GitHub):
     def relabel(self, number, add, remove):
         self.labels[number] = (self.labels[number] - {remove}) | {add}
 
+    def find_pr(self, branch):
+        return next(
+            (
+                f"https://example.invalid/pr/{i + 1}"
+                for i, pr in enumerate(self.prs)
+                if pr[0] == branch
+            ),
+            "",
+        )
+
     def draft_pr(self, branch, title, body):
         self.prs.append((branch, title, body))
         return f"https://example.invalid/pr/{len(self.prs)}"
@@ -70,8 +80,11 @@ def test_a_trusted_issue_is_taken_once(setup):
     assert first[0]["duplicate"] is False and len(setup["started"]) == 1
     assert github.labels[7] == {runner.RUNNING} and len(github.comments) == 1
     github.labels[7] = {runner.QUEUE}  # e.g. the relabel had failed: the next pass retries
+    commit_change(setup["origin"].parent / "clone", {"other.txt": "main moved\n"})
+    github.bodies[7] = {**github.bodies[7], "title": "fix x (edited title)"}
     again = runner.take(setup["intake"], github, setup["clone"])
-    assert again[0]["duplicate"] is True and again[0]["task_id"] == first[0]["task_id"]
+    assert again[0]["already"] is True and again[0]["task_id"] == first[0]["task_id"]
+    assert github.labels[7] == {runner.RUNNING}
     assert len(setup["started"]) == 1 and len(github.comments) == 1
     base = git(setup["clone"], "rev-parse", "origin/main")
     status = setup["intake"].status(task_id=first[0]["task_id"])
@@ -88,30 +101,25 @@ def test_untrusted_or_malformed_issues_are_not_taken(setup):
     bad = FakeGitHub([issue(block={**BLOCK, "allowed_files": ["pyproject.toml"]})])
     out = runner.take(setup["intake"], bad, setup["clone"])
     assert "TASK_ALLOWED_FILES_PROTECTED" in out[0]["refused"]
-    assert setup["started"] == [] and bad.labels[7] == {runner.QUEUE}
+    assert setup["started"] == [] and bad.labels[7] == {runner.NEEDS_FIX}
+    assert len(bad.comments) == 1
+    tests_listed = FakeGitHub([issue(block={**BLOCK, "allowed_files": ["tests/test_calc.py"]})])
+    out = runner.take(setup["intake"], tests_listed, setup["clone"])
+    assert "PROTECTED_VERIFIER_INPUT" in out[0]["refused"]
 
 
 def test_a_verified_task_becomes_a_draft_pr(setup, monkeypatch):
     github = FakeGitHub([issue()])
     taken = runner.take(setup["intake"], github, setup["clone"])[0]
     commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n"})
-    monkeypatch.setattr(
-        Intake,
-        "status",
-        lambda self, **kw: {
-            "task_id": taken["task_id"],
-            "status": "COMPLETED",
-            "core_verified": True,
-            "attempt_id": "a1",
-            "candidate_commit": commit,
-            "detail": "",
-        },
-    )
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, commit))
     monkeypatch.setattr(runner, "_git", _git_without_credentials)
     out = runner.settle(setup["intake"], github, setup["clone"])
     assert out[0]["pr"].startswith("https://")
     branch, title, body = github.prs[0]
-    assert branch == "cairnwork/7-a1" and "Refs #7" in body and "NEXUS_CORE_ISSUE: 7" in body
+    assert (
+        branch == f"cairnwork/7-a{'1' * 16}" and "Refs #7" in body and "NEXUS_CORE_ISSUE: 7" in body
+    )
     assert "Closes" not in body and "KEEP_OPEN" in body
     pushed = subprocess.run(
         ["git", "-C", str(setup["origin"]), "rev-parse", f"refs/heads/{branch}"],
@@ -171,3 +179,88 @@ def test_completed_without_core_verification_opens_no_pr(setup, monkeypatch):
     )
     runner.settle(setup["intake"], github, setup["clone"])
     assert github.prs == [] and github.labels[7] == {runner.FAILED_LABEL}
+
+
+def _completed(setup, taken, commit):
+    return lambda self, **kw: {
+        "task_id": taken["task_id"],
+        "status": "COMPLETED",
+        "core_verified": True,
+        "attempt_id": "a" + "1" * 16,
+        "candidate_commit": commit,
+        "detail": "",
+    }
+
+
+def test_a_candidate_outside_the_allowed_files_is_not_pushed(setup, monkeypatch):
+    github = FakeGitHub([issue()])
+    taken = runner.take(setup["intake"], github, setup["clone"])[0]
+    commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n", "src/other.py": "y\n"})
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    out = runner.settle(setup["intake"], github, setup["clone"])
+    assert "outside the Issue's allowed_files" in out[0]["error"] and github.prs == []
+
+
+def test_settle_after_a_partial_failure_reuses_the_pr(setup, monkeypatch):
+    github = FakeGitHub([issue()])
+    taken = runner.take(setup["intake"], github, setup["clone"])[0]
+    commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n"})
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    github.prs.append((f"cairnwork/7-a{'1' * 16}", "t", "b"))  # opened by a pass that then died
+    out = runner.settle(setup["intake"], github, setup["clone"])
+    assert out[0]["pr"] == "https://example.invalid/pr/1" and len(github.prs) == 1
+
+
+def test_a_strange_attempt_id_is_never_pushed(setup, monkeypatch):
+    github = FakeGitHub([issue()])
+    taken = runner.take(setup["intake"], github, setup["clone"])[0]
+    commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n"})
+    bad = _completed(setup, taken, commit)
+    monkeypatch.setattr(
+        Intake, "status", lambda self, **kw: {**bad(self), "attempt_id": "x:refs/heads/main"}
+    )
+    out = runner.settle(setup["intake"], github, setup["clone"])
+    assert "unexpected attempt" in out[0]["error"] and github.prs == []
+
+
+def test_a_running_issue_without_a_record_is_an_error_not_a_guess(setup):
+    github = FakeGitHub([issue()])
+    github.labels[7] = {runner.RUNNING}
+    out = runner.settle(setup["intake"], github, setup["clone"])
+    assert "no Cairnwork task recorded" in out[0]["error"]
+
+
+def test_a_drained_intake_leaves_the_issue_queued_silently(setup):
+    setup["intake"].set_accepting(False)
+    github = FakeGitHub([issue()])
+    assert runner.take(setup["intake"], github, setup["clone"]) == [
+        {"issue": 7, "skipped": "NOT_ACCEPTING"}
+    ]
+    assert github.labels[7] == {runner.QUEUE} and github.comments == []
+
+
+def test_only_one_pass_runs_at_a_time(setup, capsys):
+    import fcntl
+
+    setup["intake"].prepare()
+    fd = os.open(setup["intake"].state / "issues.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        code = runner.main(
+            [
+                "--state",
+                str(setup["intake"].state),
+                "--repo",
+                "James3014/demo",
+                "--clone",
+                str(setup["clone"]),
+                "--gh",
+                "/bin/false",
+                "run-once",
+            ]
+        )
+    finally:
+        os.close(fd)
+    assert code == 2 and "BUSY" in capsys.readouterr().out
