@@ -125,19 +125,21 @@ def test_a_test_commit_must_sit_on_the_base(project, tmp_path):
 
 
 class _Run:
+    """A stand-in VerifierRun: ``failing`` names the test modules whose case failed; the
+    trusted report_guard outcomes are keyed by node id (``tests/<file>.py::t``)."""
+
+    _MODULE_FILE = {
+        "tests.test_regression": "tests/test_regression.py",
+        "tests.test_other": "tests/test_other.py",
+    }
+
     def __init__(self, tmp_path, name, code, failing=()):
-        private = tmp_path / name
-        (private / "run").mkdir(parents=True)
-        cases = "".join(
-            f'<testcase classname="{c}" name="t">'
-            + ("<failure message='x'/>" if c in failing else "")
-            + "</testcase>"
-            for c in ("tests.test_regression", "tests.test_other")
-        )
-        (private / "run" / "junit.xml").write_text(
-            f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
-        )
-        self.log_path, self.returncode = private / "verifier.log", code
+        self.log_path = tmp_path / name / "verifier.log"
+        self.returncode = code
+        self.outcomes = {
+            f"{path}::t": ("failed" if module in failing else "passed")
+            for module, path in self._MODULE_FILE.items()
+        }
 
 
 PATHS = ("tests/test_regression.py",)
@@ -200,8 +202,5 @@ def test_a_retry_with_the_same_test_commit_is_refused(project, tmp_path):
     assert not hasattr(worker, "saw_test")  # refused before any worker started
 
 
-def test_an_oversized_report_does_not_count(tmp_path):
-    run = _Run(tmp_path, "big", 1, {"tests.test_regression"})
-    report = run.log_path.parent / "run" / "junit.xml"
-    report.write_text(report.read_text() + "<!--" + "x" * (5 << 20) + "-->")
-    assert not dt.failed_on_base([run], PATHS)
+# an oversized or forged verdict file is rejected by report_guard.read_verdict
+# (see tests/test_report_guard.py); failed_on_base works on the trusted outcomes.

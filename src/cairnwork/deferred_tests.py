@@ -21,9 +21,7 @@ with network access could still look for a public test branch.
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from xml.etree import ElementTree  # noqa: S405 - JUnit from our own verifier run, size-capped
 
-from cairnwork.confined import MAX_REPORT_BYTES
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.workspace import ATTEMPT_REF_PREFIX
 
@@ -99,23 +97,15 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
 
 
 def failed_on_base(runs, paths: tuple[str, ...]) -> bool:
-    """Tests with teeth: a test case from the deferred test files failed (JUnit), and
-    no verifier broke in another way (exit codes other than 0 and 1)."""
+    """Tests with teeth: a test case from the deferred test files failed (the verifier's
+    trusted result, report_guard), and no verifier broke in another way (exit codes other
+    than 0 and 1)."""
     if any(run.returncode not in (0, 1) for run in runs):
         return False
-    modules = {p[:-3].replace("/", ".") for p in paths if p.endswith(".py")}
+    test_files = set(paths)
     for run in runs:
-        report = Path(run.log_path).parent / "run" / "junit.xml"
-        try:
-            if report.stat().st_size > MAX_REPORT_BYTES:
-                continue
-            cases = ElementTree.parse(report).getroot().iter("testcase")
-        except (OSError, ElementTree.ParseError):
-            continue
-        for case in cases:
-            owner = case.get("classname") or ""
-            failed = case.find("failure") is not None
-            if failed and any(owner == m or owner.startswith(m + ".") for m in modules):
+        for nodeid, outcome in run.outcomes.items():
+            if outcome == "failed" and nodeid.split("::", 1)[0] in test_files:
                 return True
     return False
 

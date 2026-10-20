@@ -53,15 +53,13 @@ import os
 import re
 import secrets
 import shutil
-import stat
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from xml.etree import ElementTree
 
-from cairnwork import confined, pytest_config, sandbox
-from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
+from cairnwork import confined, pytest_config, report_guard, sandbox
+from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
 from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
@@ -106,6 +104,7 @@ class VerifierRun:
     mutated: tuple[str, ...]
     log_path: Path
     observation: VerifierObservation
+    outcomes: dict[str, str]
 
 
 def parse_verifier(verifier_id: str, argv: list[str]) -> VerifierSpec:
@@ -230,6 +229,13 @@ def protected_verifier_inputs(paths: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
+def _remove_scratch(dirs, account) -> None:
+    for scratch in dirs:
+        if account is not None:
+            account.remove(scratch)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def _run_one(
     repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings
 ) -> VerifierRun:
@@ -241,7 +247,7 @@ def _run_one(
         private / "pytest.ini",
         private / "profile.sb",
     )
-    run_dir, home, tmp, report, env = _prepare_run(private, ini, ini_text)
+    run_dir, home, tmp, env, verdict_path, verdict_nonce = _prepare_run(private, ini, ini_text)
     if account is not None:
         account.share_run(private, ini, run_dir, home, tmp)
     if attempt_id:
@@ -261,13 +267,14 @@ def _run_one(
         "-o",
         "addopts=",
         *settings.args(plugins),
-        f"--junitxml={report}",
+        "-p",
+        report_guard.MODULE,
         *spec.targets,
     ]
     profile = None
     if sandbox.available():
         profile = sandbox.build_profile(
-            read_roots=(*pytest_config.interpreter_roots(python), ini),
+            read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
             write_roots=(checkout, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
@@ -278,21 +285,18 @@ def _run_one(
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
     mutated = tuple(tree_differences(repo, candidate_commit, checkout))
-    ran = profile is not None and _report_shows_passing_tests(report)
-    too_big = log_path.stat().st_size > MAX_LOG_BYTES
+    verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
+    ran = profile is not None and verdict.ran
     passed = (
         profile is not None
         and returncode == 0
         and not timed_out
         and not mutated
         and ran
-        and not too_big
+        and log_path.stat().st_size <= MAX_LOG_BYTES
         and survivors == 0
     )
-    for scratch in (home, tmp):
-        if account is not None:
-            account.remove(scratch)
-        shutil.rmtree(scratch, ignore_errors=True)
+    _remove_scratch((home, tmp), account)
     digest = _record_digest(
         candidate_commit=candidate_commit,
         verifier_id=spec.verifier_id,
@@ -309,7 +313,9 @@ def _run_one(
     observation = VerifierObservation(
         spec.verifier_id, f"{private.name}/verifier.log", f"sha256:{digest}", passed
     )
-    return VerifierRun(spec, returncode, timed_out, mutated, log_path, observation)
+    return VerifierRun(
+        spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes
+    )
 
 
 def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
@@ -335,6 +341,10 @@ def _prepare_run(private: Path, ini: Path, ini_text: bytes):
     home, tmp = run_dir / "home", run_dir / "tmp"
     for directory in (run_dir, home, tmp):
         directory.mkdir()
+    guard = private / "guard"
+    guard.mkdir()
+    report_guard.install_plugin(guard)  # the trusted plugin, read-only to the sandbox
+    guard.chmod(0o750)
     _write_new(ini, ini_text)
     env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
     env.update(
@@ -343,9 +353,13 @@ def _prepare_run(private: Path, ini: Path, ini_text: bytes):
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONNOUSERSITE="1",
         PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONPATH=str(guard),
     )
     env[RUN_TOKEN_VAR] = secrets.token_hex(16)
-    return run_dir, home, tmp, run_dir / "junit.xml", env
+    verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
+    env[report_guard.PATH_ENV] = str(verdict_path)
+    env[report_guard.NONCE_ENV] = verdict_nonce
+    return run_dir, home, tmp, env, verdict_path, verdict_nonce
 
 
 def _record_digest(**fields) -> str:
@@ -358,36 +372,6 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _report_shows_passing_tests(report: Path) -> bool:
-    """The JUnit report must exist and show at least one test run, none failed or skipped all."""
-    try:
-        fd = os.open(report, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            return False
-        with os.fdopen(fd, "rb") as handle:
-            data = handle.read(MAX_REPORT_BYTES + 1)
-        if len(data) > MAX_REPORT_BYTES:
-            return False
-        root = ElementTree.fromstring(data)  # noqa: S314 - size-capped, our own report path
-    except (OSError, ElementTree.ParseError):
-        return False
-    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
-    totals = {key: 0 for key in ("tests", "failures", "errors", "skipped")}
-    try:
-        for suite in suites:
-            for key in totals:
-                totals[key] += int(suite.get(key, "0"))
-    except ValueError:
-        return False
-    return (
-        totals["tests"] > 0
-        and totals["failures"] == 0
-        and totals["errors"] == 0
-        and totals["skipped"] == 0
-    )
 
 
 def _write_new(path: Path, data: bytes) -> None:
