@@ -49,7 +49,7 @@
 - verifier 的 sandbox：已用 macOS Seatbelt 封裝，預設全部拒絕，禁止連網，只能讀系統、Python 和 checkout，只能寫 checkout 和這次執行的目錄。缺少 sandbox-exec 時直接判失敗。每一種攻擊都有見證測試（`tests/test_sandbox.py`），macOS CI 一定會實際執行，不能跳過。**還沒解決的**：
   - 候選程式碼和 pytest 在同一個程序裡，仍然可以偽造報告。判決已經不再讀候選可寫的
     `junit.xml`，改由受信任的 pytest plugin 在 `sessionfinish` 寫一份帶 nonce 的紀錄
-    （`src/cairnwork/report_guard.py`，#21），這擋掉了「讀 argv 的 junit 路徑寫假檔」這條，但
+    （`src/cairnwork/report_guard.py`，PR #21，保留行為 #14），這擋掉了「讀 argv 的 junit 路徑寫假檔」這條，但
     **是部分緩解，不是邊界**：候選讀得到執行環境裡的 nonce，仍可以寫一份相符的紀錄再結束。
     對「跑任意候選碼、看測試過不過」這個模型，in-process 的候選沒有拿不到的秘密，容器也只隔離
     主機（容器內仍可偽造），所以**技術上無法讓判決不可偽造**。因此 verifier 的通過是**證據，
