@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from cairnwork.black_box_judge import MAX_RESULT_BYTES, _read_results
+from experimental.black_box_judge.judge import MAX_RESULT_BYTES, _read_results
 
 
 def _read_without_hanging(path, timeout=5.0):
