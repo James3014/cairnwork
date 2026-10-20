@@ -144,7 +144,7 @@ def test_child_cannot_touch_its_own_log_ini_or_profile(project, tmp_path):
     assert result.observation.passed, result.log_path.read_text()
 
 
-@pytest.mark.parametrize("bad", ['/tmp/a"b', "/tmp/a(b", "/tmp/a\\\\b", "/tmp/a\nb", "/tmp/é"])
+@pytest.mark.parametrize("bad", ['/tmp/a"b', "/tmp/a(b", "/tmp/a\\\\b", "/tmp/a\nb", "/tmp/é", "/tmp/a\n"])
 def test_profile_paths_cannot_rewrite_the_policy(bad):
     with pytest.raises(sandbox.SandboxError):
         sandbox.sbpl_path(bad)

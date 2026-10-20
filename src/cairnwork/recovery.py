@@ -71,7 +71,7 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root) -> Decis
         return Decision(record.task_id, "", record.status, "FAILED", "INTERRUPTED_BEFORE_DISPATCH")
     attempt_id = entries[-1].attempt_id
     phases = [e for e in entries if e.attempt_id == attempt_id]
-    killed = sweep_marked(ATTEMPT_ENV, attempt_id)
+    killed = sweep_marked(ATTEMPT_ENV, attempt_id)  # SWEEP_UNAVAILABLE (-1): not checked
     dispatched = [e.detail for e in phases if e.phase == "DISPATCHED" and e.detail]
     _remove_leftovers(Path(dispatched[-1]) if dispatched else Path(run_root), attempt_id)
     candidates = [e.detail for e in phases if e.phase == "CANDIDATE"]

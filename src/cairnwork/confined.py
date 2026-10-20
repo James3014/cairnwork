@@ -11,6 +11,7 @@ import os
 import resource
 import signal
 import subprocess
+import sys
 import threading
 
 RUN_TOKEN_VAR = "CAIRNWORK_VERIFIER_RUN"
@@ -53,18 +54,42 @@ def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
 
 
 def _sweep_survivors(token: str, group: int) -> int:
-    return sweep_marked(RUN_TOKEN_VAR, token, skip_group=group)
+    found = sweep_marked(RUN_TOKEN_VAR, token, skip_group=group)
+    return 1 if found == SWEEP_UNAVAILABLE else found  # unknown counts as a survivor
+
+
+SWEEP_UNAVAILABLE = -1
 
 
 def sweep_marked(var: str, value: str, *, skip_group: int = -1) -> int:
-    """Kill processes from this run that escaped the process group (e.g. via setsid).
+    """Kill processes whose environment holds var=value (same user only); return how many.
 
-    They are found by the run token in their environment (ps -E, same user only).
-    Members of the original group were just sent SIGKILL and are not counted. A
-    process that clears its environment is not found; only a separate uid stops that.
-    If the process list cannot be read, the run counts as having a survivor.
+    Used for processes that escaped a run's process group (e.g. via setsid) and for a
+    dead run's workers. Members of skip_group were just sent SIGKILL and are not
+    counted. A process that clears its environment is not found; only a separate
+    uid stops that. Returns SWEEP_UNAVAILABLE if the process environments cannot be
+    read (callers must treat that as "may still be running", never as "none").
     """
     marker = f"{var}={value}"
+    processes = _processes_with_environment()
+    if processes is None:
+        return SWEEP_UNAVAILABLE
+    found = 0
+    for pid, pgid, environment in processes:
+        if pgid == skip_group or pid == os.getpid() or marker not in environment:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            found += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+    return found
+
+
+def _processes_with_environment():
+    """[(pid, pgid, set of 'NAME=value' tokens)] or None if it cannot be read."""
+    if sys.platform.startswith("linux"):
+        return _linux_processes()
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv
             ["/bin/ps", "-axwwE", "-o", "pid=,pgid=,command="],
@@ -74,25 +99,32 @@ def sweep_marked(var: str, value: str, *, skip_group: int = -1) -> int:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return 1
-    listing = done.stdout
-    if done.returncode != 0 or not listing.strip():
-        return 1  # an unreadable process list counts as a survivor (fail closed)
-    found = 0
-    for line in listing.splitlines():
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    rows = []
+    for line in done.stdout.splitlines():
         fields = line.split(None, 2)
-        if len(fields) < 3 or not (fields[0].isdigit() and fields[1].isdigit()):
-            continue
-        pid_text, pgid_text, rest = fields
-        if int(pgid_text) == skip_group:
-            continue
-        if marker in rest.split() and int(pid_text) != os.getpid():
-            try:
-                os.kill(int(pid_text), signal.SIGKILL)
-                found += 1
-            except (ProcessLookupError, PermissionError):
-                pass
-    return found
+        if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+            rows.append((int(fields[0]), int(fields[1]), set(fields[2].split())))
+    return rows
+
+
+def _linux_processes():
+    rows = []
+    try:
+        entries = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return None
+    for name in entries:
+        try:
+            with open(f"/proc/{name}/environ", "rb") as handle:
+                environment = handle.read().decode("utf-8", "replace").split("\0")
+            pgid = os.getpgid(int(name))
+        except (OSError, ProcessLookupError):
+            continue  # gone, or another user's process
+        rows.append((int(name), pgid, set(environment)))
+    return rows
 
 
 def _copy_capped(source, target) -> None:
