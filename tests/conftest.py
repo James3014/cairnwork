@@ -44,7 +44,17 @@ def pytest_collection_modifyitems(config, items):
     import os
 
     from cairnwork import sandbox
+    from cairnwork.verifier_account import VerifierAccount
 
+    if not VerifierAccount().available():
+        if os.environ.get("CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT") == "1":
+            raise pytest.UsageError(
+                "CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT=1 but the account is unusable"
+            )
+        skip_account = pytest.mark.skip(reason="needs the cairnwork-verifier account")
+        for item in items:
+            if "verifier_account" in item.keywords:
+                item.add_marker(skip_account)
     if sandbox.available():
         return
     if os.environ.get("CAIRNWORK_REQUIRE_SANDBOX") == "1":

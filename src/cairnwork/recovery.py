@@ -26,6 +26,7 @@ from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger, OwnershipRecord
+from cairnwork.verifier_account import VerifierAccount
 from cairnwork.workspace import WorkspaceError, remove_attempt_clone
 
 
@@ -40,11 +41,19 @@ class Decision:
 
 
 def recover(
-    *, ledger: OwnershipLedger, notary: Notary, journal: Journal, run_root: Path
+    *,
+    ledger: OwnershipLedger,
+    notary: Notary,
+    journal: Journal,
+    run_root: Path,
+    verifier_account: VerifierAccount | None = None,
 ) -> list[Decision]:
     """Settle every BOUND or DISPATCHED task. Raises RunLockBusy if a run is active."""
     decisions = []
     with runlock.held(ledger.path, exclusive=True):
+        if verifier_account is not None:
+            with verifier_account.exclusive():
+                verifier_account.require_idle()  # a dead run's verifier ran as that account
         for record in ledger.in_flight():
             try:
                 decisions.append(_settle(record, ledger, notary, journal, run_root))

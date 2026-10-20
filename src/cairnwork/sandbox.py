@@ -15,7 +15,7 @@ nexus/research/2026-10-19-layer1-policy-sandbox-L1):
 
 Known gap: a confined process can still read the arguments and environment of
 other processes run by the same user (sysctl KERN_PROCARGS2); no Seatbelt rule
-tried blocked it. Only running under a separate uid does.
+tried blocked it. Running under a separate uid does: see verifier_account.py.
 
 File metadata (stat) is readable everywhere: Python cannot start without it.
 That leaks names, sizes and times, not contents. Seatbelt is a macOS tool
@@ -35,7 +35,7 @@ from pathlib import Path
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _SAFE = re.compile(r"^/[A-Za-z0-9 _./+@~-]*$")
 SYSTEM_READ_SUBPATHS = ("/usr/lib", "/usr/share", "/System/Library", "/dev")
-SYSTEM_READ_LITERALS = ("/", "/private/etc/localtime", "/private/etc/passwd")
+SYSTEM_READ_LITERALS = ("/", "/private/etc/localtime", "/private/etc/passwd", "/usr/bin/env")
 DEVICE_WRITES = ("/dev/null", "/dev/tty", "/dev/dtracehelper")
 CREDENTIAL_HOME_PATHS = (
     ".ssh",

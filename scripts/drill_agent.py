@@ -33,6 +33,7 @@ from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
 from cairnwork.recovery import recover
+from cairnwork.verifier_account import VerifierAccount
 from cairnwork.workers.agy import AgyWorker
 
 FILES = {
@@ -50,6 +51,11 @@ FILES = {
     ),
 }
 VERIFY = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_stats.py")),)
+
+# Run verifiers as the dedicated account when it is set up (Issue #9).
+ACCOUNT = VerifierAccount() if VerifierAccount().available() else None
+if ACCOUNT is None:
+    print("WARNING: verifier account not set up; verifiers run as the owner", file=sys.stderr)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -104,8 +110,12 @@ def run(work: Path, allowed: tuple[str, ...], model: str) -> dict:
         journal=journal,
         worker=AgyWorker(model=model),
         run_root=work / "runs",
+        verifier_account=ACCOUNT,
     )
-    return {k: v for k, v in result.__dict__.items() if k != "logs"}
+    return {
+        **{k: v for k, v in result.__dict__.items() if k != "logs"},
+        "verifier_account": ACCOUNT is not None,
+    }
 
 
 def agy_processes(attempt: str) -> list[int]:
@@ -130,7 +140,13 @@ def restart(work: Path, model: str) -> dict:
     child.wait()
     decisions, left = [], []
     try:
-        decisions = recover(ledger=ledger, notary=notary, journal=journal, run_root=work / "runs")
+        decisions = recover(
+            ledger=ledger,
+            notary=notary,
+            journal=journal,
+            run_root=work / "runs",
+            verifier_account=ACCOUNT,
+        )
         time.sleep(2)
         left = agy_processes(attempt) if attempt else []
     finally:

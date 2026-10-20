@@ -30,7 +30,9 @@
 
 第 2 次（同一天，加上 `--sandbox`，也就是現行的 worker 設定）：狀態 `COMPLETED`，Core 判定 `VERIFIED`，task_id 為 `task-de18074413e04dfa80436aa801908ff3`，候選 commit 為 `391eeda4e93045088a64d2b8a3af7345741d27fc`，改動是同一行。
 
-這只是一個很簡單的題目、跑了兩次，只能證明整條主線接通了，不能拿來說明 agent 的能力或成功率。
+第 3 次（同一天，verifier 改由專屬帳號 `cairnwork-verifier` 執行，Issue #9）：狀態 `COMPLETED`，Core 判定 `VERIFIED`，task_id 為 `task-36099f01493a4394827714c9d44f930a`，候選 commit 為 `a38948324ec59a9bb00ce22da201c8ff939d003c`，改動是同一行。verifier 寫出的 `junit.xml` 擁有者是 `cairnwork-verifier`，證明 pytest 不是以擁有者身分執行。證據：`docs/drills/2026-10-20-verifier-account.json`。
+
+這只是一個很簡單的題目、跑了三次，只能證明整條主線接通了，不能拿來說明 agent 的能力或成功率。
 
 ## Agy worker 權限實測 2026-10-20
 
