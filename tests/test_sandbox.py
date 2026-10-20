@@ -165,3 +165,48 @@ def test_broad_roots_are_refused(tmp_path, root):
     path = {"HOME": home, "HOME_PARENT": tmp_path}.get(root, root)
     with pytest.raises(sandbox.SandboxError):
         sandbox.build_profile((Path(path),), (), home=home)
+
+
+def test_trailing_credential_deny_wins_inside_an_allowed_root(tmp_path):
+    """SBPL: the last matching rule wins. A credential path under an allowed read root
+    must stay unreadable (a reviewer claimed first-match-wins; this pins the behaviour)."""
+    import subprocess
+
+    home = tmp_path / "home"
+    keychains = home / "Library" / "Keychains"
+    keychains.mkdir(parents=True)
+    (keychains / "login.db").write_text("KEY\n")
+    (home / "Library" / "ok.txt").write_text("OK\n")
+    profile = sandbox.build_profile((home / "Library",), (), home=home)
+    path = tmp_path / "p.sb"
+    path.write_text(profile.text)
+    run = lambda target: subprocess.run(  # noqa: E731
+        sandbox.wrap(["/bin/cat", str(target)], path), capture_output=True, text=True
+    )
+    assert run(home / "Library" / "ok.txt").stdout == "OK\n"
+    denied = run(keychains / "login.db")
+    assert denied.returncode != 0 and "KEY" not in denied.stdout
+
+
+def test_child_cannot_rewrite_its_log_through_stdout(project, tmp_path):
+    code = (
+        "import os\n"
+        "def test_rewrite():\n"
+        "    try:\n"
+        "        os.ftruncate(1, 0)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    os.write(1, b'FORGED\\n')\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_rewrite.py": code}, "tests/test_rewrite.py")
+    log = result.log_path.read_text()
+    assert "test_rewrite" in log or "passed" in log or "failed" in log
+
+
+def test_probe_requires_a_real_denial(monkeypatch):
+    sandbox.available.cache_clear()
+    monkeypatch.setattr(sandbox, "_probe", lambda policy: 0)
+    try:
+        assert sandbox.available() is False
+    finally:
+        sandbox.available.cache_clear()

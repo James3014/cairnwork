@@ -69,19 +69,26 @@ class Profile:
 
 @lru_cache(maxsize=1)
 def available() -> bool:
-    """True only if /usr/bin/sandbox-exec exists and really runs a confined command."""
+    """True only if /usr/bin/sandbox-exec runs a permitted command and refuses a denied one."""
     if not os.access(SANDBOX_EXEC, os.X_OK):
         return False
+    allowed = _probe("(version 1) (allow default)")
+    denied = _probe("(version 1) (deny default)")
+    return allowed == 0 and denied not in (None, 0)
+
+
+def _probe(policy: str) -> int | None:
+    """Exit code of /usr/bin/true under policy; a working sandbox must refuse when denied."""
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv
-            [SANDBOX_EXEC, "-p", "(version 1) (allow default)", "/usr/bin/true"],
+            [SANDBOX_EXEC, "-p", policy, "/usr/bin/true"],
             capture_output=True,
             timeout=10,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
+        return None
+    return done.returncode
 
 
 def sbpl_path(path: Path | str) -> str:

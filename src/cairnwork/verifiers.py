@@ -48,6 +48,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -279,19 +280,22 @@ def _interpreter_roots(python: str) -> tuple[Path, ...]:
 
 
 def _execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool]:
-    """Run in a new process group with output streamed to log_path; kill the group after."""
+    """Run in a new process group; the parent copies output into log_path (the child
+    never holds the log's file descriptor); kill the group afterwards."""
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as log:
         process = subprocess.Popen(  # noqa: S603 - argv built from an allow-listed spec, no shell
             argv,
             cwd=cwd,
             env=env,
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             preexec_fn=_limit_file_size,  # noqa: PLW1509 - only setrlimit, no locks
         )
+        copier = threading.Thread(target=_copy_capped, args=(process.stdout, log), daemon=True)
+        copier.start()
         timed_out = False
         try:
             process.wait(timeout=timeout)
@@ -299,7 +303,18 @@ def _execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool]:
             timed_out = True
         _kill_group(process.pid)
         process.wait()
+        copier.join(timeout=10)  # a descendant that escaped the group may hold the pipe
     return (None if timed_out else process.returncode), timed_out
+
+
+def _copy_capped(source, target) -> None:
+    """Copy at most MAX_LOG_BYTES + 1 bytes (one over the cap marks the log too big)."""
+    written = 0
+    for chunk in iter(lambda: source.read(1 << 16), b""):
+        keep = chunk[: max(0, MAX_LOG_BYTES + 1 - written)]
+        if keep:
+            target.write(keep)
+            written += len(keep)
 
 
 def _limit_file_size() -> None:
