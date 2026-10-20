@@ -85,3 +85,18 @@
 2026-10-20 實際執行一次，使用 verifier 帳號，所有預期都成立（`passed: true`），A 為 COMPLETED、Core VERIFIED。
 
 **這不等於回退演練通過。** 這個腳本只涵蓋 Cairnwork 這一端。完整的回退演練還需要 Gateway 端：Nexus-new PR #2804 和部署器的那張 PR 合併並部署之後，才能驗證開關切換、已轉送任務仍查得到、以及沒有任何任務在兩個系統都跑。在那之前，上方表格的「回退」仍維持「還不能做」。
+
+## Nexus-new 測試經 Cairnwork verifier 執行 2026-10-20
+
+腳本：`uv run python scripts/drill_target_verifier.py <乾淨的 Nexus-new clone> <venv 的 python>`。clone 是另外從 GitHub 拉的（不是任何人在用的工作目錄），venv 用 `scripts/setup_target_venv.sh <clone> nexus-new 3.12` 依 Nexus-new 的 `uv.lock` 建立。base 是當時的 origin/main（`05c6a8c1d4659e51ae4ac63835e13df454b4b8dc`），測試檔是 `tests/services/test_federated_lessons.py`（7 個測試，含 async 測試，會 import `nexus`）。四個候選版本都以 `cairnwork-verifier` 帳號、在 Seatbelt 裡執行：
+
+| 候選 | 內容 | 預期 | 結果 |
+|---|---|---|---|
+| pass | 被測模組加一行註解 | 通過 | 通過（7 passed） |
+| broken | 被測模組改壞一行（schema 版本比對） | 不通過 | 不通過（2 failed） |
+| regression_candidate_ini | 同樣的錯誤，再加上候選版本自己的 `pytest.ini`，用 `--deselect` 跳過會失敗的測試 | 不通過 | 不通過（2 failed）：`run_verifiers` 沒有採用候選版本的設定。這只是回歸檢查：真正的任務在更早的階段就會拒絕（`pytest.ini` 是受保護的輸入） |
+| no_venv | 同 pass，但用帳號原本只有 pytest 的 Python | 不通過 | 拒絕執行：base 設了 `asyncio_mode`，這個 Python 沒有 pytest-asyncio（`PYTEST_CONFIG_ERROR`） |
+
+產生的 verifier ini 只有 base 的 `pytest.ini` 裡允許的鍵（`testpaths`、`python_*`、`norecursedirs`、`asyncio_mode`、`filterwarnings`），`addopts` 被丟掉，只保留其中的 `--import-mode=importlib`（Nexus-new 的 addopts 裡沒有 `-W` 或 strict 選項）；plugin 以 `-p` 明確載入 pytest-asyncio、pytest-timeout、anyio。實際執行的 pytest 參數記在 JSON 的 `pytest_argv`。證據：`docs/drills/2026-10-20-nexus-new-verifier.json`。
+
+這只證明「一個 Nexus-new 測試檔可以在 Cairnwork 的 verifier 裡正確地過與不過」。候選版本是演練腳本自己做的 commit，不是 agent 交出的修改，也沒有經過 Core 公證；還沒有跑過真正的 Nexus-new Issue。只讀 repo 根目錄的設定檔；需要網路、外部服務或 HOME 裡快取的測試，在 sandbox 裡仍然會失敗。

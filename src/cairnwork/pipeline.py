@@ -142,16 +142,16 @@ def run_task(
     worker: Worker,
     run_root: Path,
     verifier_account: VerifierAccount | None = None,
+    verifier_python: str | None = None,
 ) -> TaskResult:
     specs = check_task(task)
+    verifying = (verifier_account, verifier_python)
     with runlock.held(ledger.path, exclusive=False):
         bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
         record = bound.record
         if bound.duplicate:
             return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
-        return _execute(
-            task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
-        )
+        return _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying)
 
 
 def run_bound_task(
@@ -164,10 +164,12 @@ def run_bound_task(
     worker: Worker,
     run_root: Path,
     verifier_account: VerifierAccount | None = None,
+    verifier_python: str | None = None,
 ) -> TaskResult:
     """Run a task bound earlier (intake.submit). Its request must be the one bound;
     a task that is no longer BOUND (cancelled, or already run) is not run again."""
     specs = check_task(task)
+    verifying = (verifier_account, verifier_python)
     with runlock.held(ledger.path, exclusive=False):
         record = ledger.get(task_id=task_id)
         same = record.idempotency_key == task.idempotency_key and (
@@ -177,14 +179,10 @@ def run_bound_task(
             raise TaskRejected("REQUEST_MISMATCH", f"{task_id} was bound to another request")
         if record.status != "BOUND":
             return TaskResult(task_id, "", record.status, reason="NOT_BOUND")
-        return _execute(
-            task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
-        )
+        return _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying)
 
 
-def _execute(
-    task, specs, record, ledger, notary, journal, worker, run_root, verifier_account
-) -> TaskResult:
+def _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying):
     """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
     attempt_id = f"a{secrets.token_hex(8)}"
     steps = _Steps(journal, record.task_id, attempt_id)
@@ -201,7 +199,7 @@ def _execute(
             run_root,
             result,
             steps,
-            verifier_account,
+            verifying,
         )
     except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
         result.verified = False
@@ -228,9 +226,8 @@ class _Steps:
             os._exit(137)
 
 
-def _attempt(
-    task, specs, digest, notary, worker, run_root, result, steps, verifier_account
-) -> None:
+def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
+    """verifying = (verifier account or None, verifier Python or None)."""
     task_id = steps.task_id
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
@@ -257,7 +254,9 @@ def _attempt(
             run_root,
             f"{result.attempt_id}-v",
             attempt_id=result.attempt_id,
-            account=verifier_account,
+            account=verifying[0],
+            python=verifying[1],
+            base_commit=task.base_commit,
         )
         result.logs = [str(run.log_path) for run in runs]
         spec = AcceptanceSpec(

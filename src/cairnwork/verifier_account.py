@@ -55,9 +55,9 @@ class VerifierAccount:
     def python(self) -> str:
         return str(self.root / "venv" / "bin" / "python")
 
-    def available(self) -> bool:
+    def available(self, python: str | None = None) -> bool:
         """The account is a separate, non-root user, sudo works without a password,
-        and the shared Python runs pytest as that user.
+        and the shared Python (or ``python``, a target's own) runs pytest as that user.
 
         It starts a process as the account, so call it while holding exclusive().
         """
@@ -67,7 +67,7 @@ class VerifierAccount:
             return False
         if uid in (0, os.getuid()):
             return False  # kill -9 -1 as root or as the owner would be destructive
-        probe = self.wrap([self.python, "-P", "-c", "import pytest"], None)
+        probe = self.wrap([python or self.python, "-P", "-c", "import pytest"], None)
         try:
             done = subprocess.run(  # noqa: S603 - fixed argv
                 probe, capture_output=True, timeout=60, check=False, cwd=self.root

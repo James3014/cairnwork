@@ -16,7 +16,7 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 | `accept`／`drain` | 打開／關閉接新任務（**預設是關閉**） | `{"accepting": bool}` |
 | `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1 | `{"decisions": [...]}` |
 
-所有指令都要加 `--state <目錄>`。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。呼叫端的 umask 不影響結果（umask 077 也可以，已實測）：verifier 帳號需要的讀取權限由 Cairnwork 自己設定。第一次正式 `accept` 請用全新的 state 目錄（請求摘要從這一版起包含 repo 路徑，舊目錄裡的綁定會對不上）。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。
+所有指令都要加 `--state <目錄>`。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。呼叫端的 umask 不影響結果（umask 077 也可以，已實測）：verifier 帳號需要的讀取權限由 Cairnwork 自己設定。第一次正式 `accept` 請用全新的 state 目錄（請求摘要從這一版起包含 repo 路徑，舊目錄裡的綁定會對不上）。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`、`verifier_python`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。目標 repo 的測試需要它自己的依賴時，用 `scripts/setup_target_venv.sh <乾淨 clone> <名稱> [Python 版本]` 依目標的 `uv.lock` 建 `/Users/Shared/cairnwork/venvs/<名稱>`，再把 `verifier_python` 設成那個 venv 的 `bin/python`（絕對路徑）。一個 state 目錄只有一個 `verifier_python`，所以一個 state 目錄只服務一個目標 repo；要接第二個 repo，就另開一個 state 目錄。pytest 設定一律取自任務的 base commit，不看候選版本（`src/cairnwork/pytest_config.py`）。
 
 **Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`BAD_CONFIG`、`BAD_STATE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`、`DuplicateLogicalTask`）；3 查不到這個任務（`UNKNOWN_TASK`）；1 其他錯誤。
 

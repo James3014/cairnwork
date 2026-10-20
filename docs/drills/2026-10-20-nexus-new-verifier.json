@@ -1,0 +1,130 @@
+{
+  "base_commit": "05c6a8c1d4659e51ae4ac63835e13df454b4b8dc",
+  "cases": {
+    "broken": {
+      "candidate_commit": "34f09329f751e2b8c6269f8e0b106c6533f39877",
+      "expected_pass": false,
+      "mutated": [],
+      "observation_hash": "sha256:30f0f1f1f09becbad9e421048197304e803a4e7762ef4dea72536dc03142af4b",
+      "passed": false,
+      "pytest_argv": [
+        "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+        "-P",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-c",
+        "<run root>/drill583c9daa-v0.h288ia94/pytest.ini",
+        "--rootdir=<run root>/drill583c9daa-v0",
+        "--confcutdir=<run root>/drill583c9daa-v0",
+        "-o",
+        "addopts=",
+        "--import-mode=importlib",
+        "-p",
+        "pytest_asyncio.plugin",
+        "-p",
+        "pytest_timeout",
+        "-p",
+        "anyio.pytest_plugin",
+        "--junitxml=<run root>/drill583c9daa-v0.h288ia94/run/junit.xml",
+        "tests/services/test_federated_lessons.py"
+      ],
+      "pytest_summary": [
+        "2 failed, 5 passed, 1 warning in 0.12s"
+      ],
+      "python": "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+      "returncode": 1,
+      "verifier_ini": "# base config: pytest.ini\n# dropped: addopts\n[pytest]\ntestpaths = tests\npython_files = test_*.py\npython_classes = Test*\npython_functions = test_*\nnorecursedirs = benchmarks worktrees scripts tests/archive .venv .git\nasyncio_mode = auto\nfilterwarnings = \n    ignore::DeprecationWarning:lancedb.*\n    ignore::DeprecationWarning:pydantic.*\n    ignore::DeprecationWarning:anyio.*\n    ignore::DeprecationWarning:sentence_transformers.*\n    ignore::ResourceWarning:asyncio.*\npythonpath = <run root>/drill583c9daa-v0\n"
+    },
+    "no_venv": {
+      "candidate_commit": "f56f1e13569bba798e160901e6686bc11c5c011f",
+      "executed": false,
+      "expected_pass": false,
+      "passed": false,
+      "python": "/Users/Shared/cairnwork/venv/bin/python",
+      "refused": "PYTEST_CONFIG_ERROR: the base config sets asyncio_mode, but pytest_asyncio is not installed in the verifier's Python"
+    },
+    "pass": {
+      "candidate_commit": "f56f1e13569bba798e160901e6686bc11c5c011f",
+      "expected_pass": true,
+      "mutated": [],
+      "observation_hash": "sha256:b34929a80a71889d7803be838bcdf337b7025591653c5993d80a18e17035c591",
+      "passed": true,
+      "pytest_argv": [
+        "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+        "-P",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-c",
+        "<run root>/drill05f7780c-v0.tgxgny9i/pytest.ini",
+        "--rootdir=<run root>/drill05f7780c-v0",
+        "--confcutdir=<run root>/drill05f7780c-v0",
+        "-o",
+        "addopts=",
+        "--import-mode=importlib",
+        "-p",
+        "pytest_asyncio.plugin",
+        "-p",
+        "pytest_timeout",
+        "-p",
+        "anyio.pytest_plugin",
+        "--junitxml=<run root>/drill05f7780c-v0.tgxgny9i/run/junit.xml",
+        "tests/services/test_federated_lessons.py"
+      ],
+      "pytest_summary": [
+        "7 passed, 1 warning in 0.18s"
+      ],
+      "python": "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+      "returncode": 0,
+      "verifier_ini": "# base config: pytest.ini\n# dropped: addopts\n[pytest]\ntestpaths = tests\npython_files = test_*.py\npython_classes = Test*\npython_functions = test_*\nnorecursedirs = benchmarks worktrees scripts tests/archive .venv .git\nasyncio_mode = auto\nfilterwarnings = \n    ignore::DeprecationWarning:lancedb.*\n    ignore::DeprecationWarning:pydantic.*\n    ignore::DeprecationWarning:anyio.*\n    ignore::DeprecationWarning:sentence_transformers.*\n    ignore::ResourceWarning:asyncio.*\npythonpath = <run root>/drill05f7780c-v0\n"
+    },
+    "regression_candidate_ini": {
+      "candidate_commit": "f4432bd6978da92000bea551d8b516163a34a169",
+      "expected_pass": false,
+      "mutated": [],
+      "observation_hash": "sha256:d63d8ced5f4cdfe4368cc322739b4a0ec0e64699b727ff07033d09af63dd07a4",
+      "passed": false,
+      "pytest_argv": [
+        "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+        "-P",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-c",
+        "<run root>/drill40bfa528-v0.mr9kjmlo/pytest.ini",
+        "--rootdir=<run root>/drill40bfa528-v0",
+        "--confcutdir=<run root>/drill40bfa528-v0",
+        "-o",
+        "addopts=",
+        "--import-mode=importlib",
+        "-p",
+        "pytest_asyncio.plugin",
+        "-p",
+        "pytest_timeout",
+        "-p",
+        "anyio.pytest_plugin",
+        "--junitxml=<run root>/drill40bfa528-v0.mr9kjmlo/run/junit.xml",
+        "tests/services/test_federated_lessons.py"
+      ],
+      "pytest_summary": [
+        "2 failed, 5 passed, 1 warning in 0.12s"
+      ],
+      "python": "/Users/Shared/cairnwork/venvs/nexus-new/bin/python",
+      "returncode": 1,
+      "verifier_ini": "# base config: pytest.ini\n# dropped: addopts\n[pytest]\ntestpaths = tests\npython_files = test_*.py\npython_classes = Test*\npython_functions = test_*\nnorecursedirs = benchmarks worktrees scripts tests/archive .venv .git\nasyncio_mode = auto\nfilterwarnings = \n    ignore::DeprecationWarning:lancedb.*\n    ignore::DeprecationWarning:pydantic.*\n    ignore::DeprecationWarning:anyio.*\n    ignore::DeprecationWarning:sentence_transformers.*\n    ignore::ResourceWarning:asyncio.*\npythonpath = <run root>/drill40bfa528-v0\n"
+    }
+  },
+  "date": "2026-10-20",
+  "note": "candidates are drill commits made in Cairnwork's own Nexus-new clone, not tasks run by an agent; the Core notary is not involved; regression_candidate_ini only checks run_verifiers, a real task refuses a candidate pytest.ini earlier",
+  "passed": true,
+  "target": "James3014/Nexus-new",
+  "test_file": "tests/services/test_federated_lessons.py",
+  "verifier_account": "cairnwork-verifier"
+}

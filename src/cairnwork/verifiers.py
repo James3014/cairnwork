@@ -11,10 +11,11 @@ bytecode and the pytest cache disabled) and a timeout. A verifier passes only
 if it exits 0 and leaves the checkout identical to the candidate tree; a
 verifier that writes into the checkout fails. The pytest run must also leave a
 JUnit report showing at least one test run and none failed, errored, skipped or
-xfailed. pytest's configuration is pinned to a Cairnwork-owned empty ini with
-rootdir and confcutdir at the checkout, so no ini in the candidate or a parent
-directory applies, and plugin autoloading is off. Output streams to a log file
-with a size cap, the run's process group is killed afterwards, and logs and
+xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with rootdir
+and confcutdir at the checkout, so no ini in the candidate or a parent directory
+applies, and plugin autoloading is off; the ini holds only allow-listed keys from
+the task's base commit and plugins load by explicit -p (pytest_config.py). Output
+streams to a log file with a size cap, the run's process group is killed afterwards, and logs and
 reports live in a private directory, created with O_EXCL|O_NOFOLLOW. A process
 that starts its own session escapes the group kill; only a sandbox stops that.
 The observation hash binds the candidate commit, verifier id, full argv, exit
@@ -41,8 +42,7 @@ pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
 pytest configuration and root-level modules out of the files a candidate may
 change (``protected_verifier_inputs``), but that is not enough on its own:
 candidate source code also runs inside the pytest process and can forge a
-result. A pass here is evidence, not proof, until verifiers run in a sandbox. Running verifiers in a
-sandbox is tracked in docs/PRESERVED_BEHAVIORS.md (open question under #14).
+result.
 """
 
 from __future__ import annotations
@@ -54,15 +54,13 @@ import re
 import secrets
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from xml.etree import ElementTree
 
-from cairnwork import confined, sandbox
+from cairnwork import confined, pytest_config, sandbox
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
@@ -138,21 +136,24 @@ def run_verifiers(
     run_root: Path,
     run_id: str,
     *,
-    python: str = sys.executable,
+    python: str | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     attempt_id: str = "",
     account: VerifierAccount | None = None,
+    base_commit: str | None = None,
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
 
     If a checkout cannot be created the error propagates and no observation is
     returned (fail closed). With an account, verifiers run as that dedicated user
-    (verifier_account.py), in its run root and with its Python, one at a time.
+    (verifier_account.py), in its run root and with its Python (or ``python``), one at a
+    time. With base_commit, pytest settings come from that commit (pytest_config.py).
     """
+    settings = pytest_config.base_settings(repo, base_commit)
     if account is not None:
-        run_root, python = account.run_root, account.python
+        run_root, python = account.run_root, python or account.python
         with account.exclusive():
-            if not account.available():
+            if not account.available(python):
                 raise VerifierAccountError(f"account {account.user} is not usable")
             account.require_idle()
             return _run_all(
@@ -165,14 +166,25 @@ def run_verifiers(
                 timeout,
                 attempt_id,
                 account,
+                settings,
             )
+    python = python or sys.executable
     return _run_all(
-        repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, None
+        repo,
+        candidate_commit,
+        specs,
+        run_root,
+        run_id,
+        python,
+        timeout,
+        attempt_id,
+        None,
+        settings,
     )
 
 
 def _run_all(
-    repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, account
+    repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, account, settings
 ) -> tuple[VerifierRun, ...]:
     if not os.path.isabs(python):
         raise VerifierRejected(f"python must be an absolute path, got {python!r}")
@@ -188,7 +200,15 @@ def _run_all(
         try:
             runs.append(
                 _run_one(
-                    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account
+                    repo,
+                    candidate_commit,
+                    spec,
+                    checkout,
+                    python,
+                    timeout,
+                    attempt_id,
+                    account,
+                    settings,
                 )
             )
         finally:
@@ -211,15 +231,17 @@ def protected_verifier_inputs(paths: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _run_one(
-    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account
+    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings
 ) -> VerifierRun:
+    plugins = pytest_config.installed_plugins(python)
+    ini_text = settings.ini_text(checkout, plugins)
     private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent))
     log_path, ini, profile_path = (
         private / "verifier.log",
         private / "pytest.ini",
         private / "profile.sb",
     )
-    run_dir, home, tmp, report, env = _prepare_run(private, ini)
+    run_dir, home, tmp, report, env = _prepare_run(private, ini, ini_text)
     if account is not None:
         account.share_run(private, ini, run_dir, home, tmp)
     if attempt_id:
@@ -238,13 +260,14 @@ def _run_one(
         f"--confcutdir={checkout}",
         "-o",
         "addopts=",
+        *settings.args(plugins),
         f"--junitxml={report}",
         *spec.targets,
     ]
     profile = None
     if sandbox.available():
         profile = sandbox.build_profile(
-            read_roots=(*_interpreter_roots(python), ini),
+            read_roots=(*pytest_config.interpreter_roots(python), ini),
             write_roots=(checkout, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
@@ -274,6 +297,7 @@ def _run_one(
         candidate_commit=candidate_commit,
         verifier_id=spec.verifier_id,
         argv=argv,
+        pytest_ini_sha256=hashlib.sha256(ini_text).hexdigest(),
         sandbox_profile_sha256=profile.sha256 if profile else None,
         returncode=returncode,
         timed_out=timed_out,
@@ -304,14 +328,14 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
     return returncode, timed_out, survivors
 
 
-def _prepare_run(private: Path, ini: Path):
+def _prepare_run(private: Path, ini: Path, ini_text: bytes):
     """Create the per-run directory (the only place besides the checkout the child may
     write), its HOME and TMPDIR, and the scrubbed environment."""
     run_dir = private / "run"
     home, tmp = run_dir / "home", run_dir / "tmp"
     for directory in (run_dir, home, tmp):
         directory.mkdir()
-    _write_new(ini, b"[pytest]\n")
+    _write_new(ini, ini_text)
     env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
     env.update(
         HOME=str(home),
@@ -326,27 +350,6 @@ def _prepare_run(private: Path, ini: Path):
 
 def _record_digest(**fields) -> str:
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
-
-
-@lru_cache(maxsize=8)
-def _interpreter_roots(python: str) -> tuple[Path, ...]:
-    """Directories the interpreter needs to read: its prefixes and its real location."""
-    done = subprocess.run(  # noqa: S603 - trusted interpreter path chosen by Cairnwork
-        [
-            python,
-            "-I",
-            "-c",
-            "import json, sys; print(json.dumps([sys.prefix, sys.base_prefix,"
-            " sys.exec_prefix, sys.base_exec_prefix]))",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
-    )
-    roots = {Path(p) for p in json.loads(done.stdout)}
-    roots.add(Path(os.path.realpath(shutil.which(python) or python)).parent)
-    return tuple(sorted(roots))
 
 
 def _file_sha256(path: Path) -> str:

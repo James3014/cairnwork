@@ -101,6 +101,7 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         worker=AgyWorker(model=config["model"], agy=config["agy"]),
         run_root=intake.run_root,
         verifier_account=intake.verifier_account(),
+        verifier_python=config["verifier_python"],
     )
     return {k: v for k, v in result.__dict__.items() if k != "logs"}
 
