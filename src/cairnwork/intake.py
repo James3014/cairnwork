@@ -5,7 +5,7 @@ fixes here, through the ``cairnwork-route`` command (route.py). Everything lives
 in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
-    config.json        {"model", "agy", "verifier_account"} for the runner
+    config.json        {"model", "agy", "verifier_account", "verifier_python"} for the runner
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -53,7 +53,14 @@ FIELDS = frozenset(
     }
 )
 _spawn = subprocess.Popen  # replaced in tests
-DEFAULT_CONFIG = {"model": "gemini-3.8-flash-high", "agy": "agy", "verifier_account": True}
+# verifier_python: the target repository's own interpreter (scripts/setup_target_venv.sh),
+# an absolute path; None runs verifiers with the account's (or Cairnwork's) Python.
+DEFAULT_CONFIG = {
+    "model": "gemini-3.8-flash-high",
+    "agy": "agy",
+    "verifier_account": True,
+    "verifier_python": None,
+}
 
 
 class IntakeRefused(Exception):
@@ -125,6 +132,9 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
+        python = loaded.get("verifier_python")
+        if python is not None and not (isinstance(python, str) and os.path.isabs(python)):
+            raise IntakeRefused("BAD_CONFIG", "verifier_python must be an absolute path")
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:
