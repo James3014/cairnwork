@@ -196,6 +196,18 @@ class OwnershipLedger:
             raise OwnershipUnknown(str(value))
         return record
 
+    def in_flight(self) -> list[OwnershipRecord]:
+        """Tasks bound or dispatched but not finished (what a crash can leave behind)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM task_ownership WHERE status IN ('BOUND', 'DISPATCHED')"
+                " ORDER BY task_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [OwnershipRecord(*row) for row in rows]
+
     def set_status(self, task_id: str, status: str) -> OwnershipRecord:
         """Move a task along TRANSITIONS; the owner of a task can never change."""
         if status not in TRANSITIONS:

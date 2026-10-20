@@ -17,6 +17,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+ATTEMPT_ENV = "CAIRNWORK_ATTEMPT"  # lets recovery find this worker if Cairnwork dies
+
 PROMPT = """You are fixing a small bug in this repository.
 
 Task: {title}
@@ -68,6 +70,7 @@ class AgyWorker:
             process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                 argv,
                 cwd=workdir,
+                env={**os.environ, ATTEMPT_ENV: workdir.name},
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,

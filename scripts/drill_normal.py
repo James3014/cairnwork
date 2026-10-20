@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
@@ -77,6 +78,7 @@ def main() -> int:
         task,
         ledger=OwnershipLedger(work / "ownership.sqlite"),
         notary=Notary(work / "notary.sqlite"),
+        journal=Journal(work / "journal.sqlite"),
         worker=AgyWorker(model=model),
         run_root=work / "runs",
     )

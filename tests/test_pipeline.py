@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from conftest import commit_change, git
 
+from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskRejected, TaskSpec, run_task
@@ -60,15 +61,20 @@ class CrashWorker:
 
 @pytest.fixture
 def stores(tmp_path):
-    return OwnershipLedger(tmp_path / "own.sqlite"), Notary(tmp_path / "notary.sqlite")
+    return (
+        OwnershipLedger(tmp_path / "own.sqlite"),
+        Notary(tmp_path / "notary.sqlite"),
+        Journal(tmp_path / "journal.sqlite"),
+    )
 
 
 def go(project, stores, tmp_path, worker, **kwargs):
-    ledger, notary = stores
+    ledger, notary, journal = stores
     return run_task(
         task(project, **kwargs),
         ledger=ledger,
         notary=notary,
+        journal=journal,
         worker=worker,
         run_root=tmp_path / "runs",
     )
@@ -156,8 +162,15 @@ def test_infrastructure_errors_end_failed_with_a_reason(project, stores, tmp_pat
 
 
 def test_bad_base_commit_is_rejected_before_binding(project, stores, tmp_path):
-    ledger, notary = stores
+    ledger, notary, journal = stores
     bad = TaskSpec(**{**task(project).__dict__, "base_commit": "HEAD"})
     with pytest.raises(TaskRejected) as info:
-        run_task(bad, ledger=ledger, notary=notary, worker=CrashWorker(), run_root=tmp_path / "r")
+        run_task(
+            bad,
+            ledger=ledger,
+            notary=notary,
+            journal=journal,
+            worker=CrashWorker(),
+            run_root=tmp_path / "r",
+        )
     assert info.value.code == "BAD_BASE"

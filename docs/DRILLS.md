@@ -6,7 +6,7 @@
 |---|---|---|
 | 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
 | 失敗 | 自動測試覆蓋：錯誤修正 → `CORE_FAILED_VERIFICATION`；改到範圍外的檔案 → `DIRTY_TREE`；沒有改動 → `NO_COMMIT`；worker 當掉 → `WORKER_FAILED`。四種結果的任務狀態都是 FAILED（`tests/test_pipeline.py`）。真 agent 的失敗演練還沒跑。 | `tests/test_pipeline.py::test_failures_never_complete` |
-| 重啟 | **未做**：重啟恢復（保留行為 #21）還沒實作 | — |
+| 重啟 | **通過**（自動測試，真的 kill -9）：在 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點各殺一次 Cairnwork 程序，再跑恢復。Core 已經判定通過的補成 COMPLETED，其餘都判 FAILED；worker 中途被殺時，留下的孤兒程序也會被清掉；正在跑的時候不能執行恢復；恢復可以重複執行，結果不變。真 agent 版還沒跑。 | `tests/test_recovery.py` |
 | 回退 | **未做**：線上切換（議會 F 條）還沒開始 | — |
 
 ## 正常演練 2026-10-20

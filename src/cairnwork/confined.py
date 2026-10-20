@@ -52,6 +52,10 @@ def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
 
 
 def _sweep_survivors(token: str, group: int) -> int:
+    return sweep_marked(RUN_TOKEN_VAR, token, skip_group=group)
+
+
+def sweep_marked(var: str, value: str, *, skip_group: int = -1) -> int:
     """Kill processes from this run that escaped the process group (e.g. via setsid).
 
     They are found by the run token in their environment (ps -E, same user only).
@@ -59,7 +63,7 @@ def _sweep_survivors(token: str, group: int) -> int:
     process that clears its environment is not found; only a separate uid stops that.
     If the process list cannot be read, the run counts as having a survivor.
     """
-    marker = f"{RUN_TOKEN_VAR}={token}"
+    marker = f"{var}={value}"
     try:
         listing = subprocess.run(  # noqa: S603 - fixed argv
             ["/bin/ps", "-axwwE", "-o", "pid=,pgid=,command="],
@@ -76,7 +80,7 @@ def _sweep_survivors(token: str, group: int) -> int:
         if len(fields) < 3 or not (fields[0].isdigit() and fields[1].isdigit()):
             continue
         pid_text, pgid_text, rest = fields
-        if int(pgid_text) == group:
+        if int(pgid_text) == skip_group:
             continue
         if marker in rest and int(pid_text) != os.getpid():
             try:
