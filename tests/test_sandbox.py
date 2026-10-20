@@ -307,3 +307,20 @@ def test_xcode_license_plist_only_with_a_full_xcode(monkeypatch, tmp_path, dirs,
     monkeypatch.setattr(sandbox, "developer_dirs", lambda: dirs)
     profile = sandbox.build_profile((), (tmp_path / "w",), home=tmp_path / "home")
     assert (sandbox.XCODE_LICENSE_PLIST in profile.text) is licensed
+
+
+@pytest.mark.sandbox
+def test_plain_python_is_the_verifier_interpreter(project, tmp_path, monkeypatch):
+    """Tests that run plain ``python`` (Nexus-new #2760 pilot) get the verifier's own
+    interpreter, as in an activated venv, even when PATH has no ``python`` at all."""
+    code = (
+        "import shutil, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "def test_python():\n"
+        "    found = shutil.which('python')\n"
+        "    assert found and Path(found).parent == Path(sys.executable).parent\n"
+        "    assert subprocess.run([found, '-c', 'pass']).returncode == 0\n"
+    )
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    result = verify(project, tmp_path, {"tests/test_python.py": code}, "tests/test_python.py")
+    assert result.observation.passed, result.log_path.read_text()
