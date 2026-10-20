@@ -78,6 +78,13 @@ class TaskSpec:
 
 
 class Worker(Protocol):
+    """Edits the clone at workdir and returns when done.
+
+    A worker that starts processes must give each one the environment variable
+    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so that restart
+    recovery can find and stop them if Cairnwork dies mid-run (AgyWorker does).
+    """
+
     def run(self, workdir: Path, task: TaskSpec) -> None: ...
 
 
