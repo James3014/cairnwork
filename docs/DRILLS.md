@@ -5,9 +5,9 @@
 | 演練 | 狀態 | 證據 |
 |---|---|---|
 | 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
-| 失敗 | 自動測試覆蓋：錯誤修正 → `CORE_FAILED_VERIFICATION`；改到範圍外的檔案 → `DIRTY_TREE`；沒有改動 → `NO_COMMIT`；worker 當掉 → `WORKER_FAILED`。四種結果的任務狀態都是 FAILED（`tests/test_pipeline.py`）。真 agent 的失敗演練還沒跑。 | `tests/test_pipeline.py::test_failures_never_complete` |
-| 重啟 | **通過**（自動測試，真的 kill -9）：在 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點各殺一次 Cairnwork 程序，再跑恢復。Core 已經判定通過的補成 COMPLETED，其餘都判 FAILED；worker 中途被殺時，留下的孤兒程序也會被清掉；正在跑的時候不能執行恢復；恢復可以重複執行，結果不變。真 agent 版還沒跑。 | `tests/test_recovery.py` |
-| 回退 | **未做**：線上切換（議會 F 條）還沒開始 | — |
+| 失敗 | **通過**：自動測試涵蓋四種路徑（錯誤修正 → `CORE_FAILED_VERIFICATION`、改到範圍外 → `DIRTY_TREE`、沒有改動 → `NO_COMMIT`、worker 當掉 → `WORKER_FAILED`）；真 agent 跑了 3 次（2026-10-20），全部 FAILED，見下方 | `tests/test_pipeline.py`、`scripts/drill_agent.py failure｜scope` |
+| 重啟 | **通過**（真 agent 1 次＋自動測試，真的 kill -9）：在 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點各殺一次 Cairnwork 程序，再跑恢復。Core 已經判定通過的補成 COMPLETED，其餘都判 FAILED；worker 中途被殺時，留下的孤兒程序也會被清掉；正在跑的時候不能執行恢復；恢復可以重複執行，結果不變。真 agent 版還沒跑。 | `tests/test_recovery.py` |
+| 回退 | **還不能做**：回退的對象是 F 條的線上切換（舊 Gateway 把一類任務轉給 Cairnwork），這部分還沒建。等切換做出來，第一件事就是跑回退演練 | — |
 
 ## 正常演練 2026-10-20
 
@@ -46,3 +46,23 @@
 - 被拒之後，agy 會中止整次執行，連允許的修改也不會套用。agy 本身的 exit code 是 0（兩次實測都是 `exit=0`），所以 worker 正常結束，snapshot 判定為 `NO_COMMIT`。
 - 這是 agy 自己的權限機制，不是作業系統層級的 sandbox，所以 Cairnwork 不把它當成安全邊界。真正的防線仍然是：只收允許的檔案，並比對整個 clone。
 - 另一個測試：提示詞裡帶著 Cairnwork 的規則時，模型會直接拒絕執行這些要求。這只代表模型遵守了規則，不能證明權限有在擋。
+
+## 真 agent 失敗演練 2026-10-20
+
+腳本：`uv run python scripts/drill_agent.py failure|scope <空目錄>`（Agy gemini-3.8-flash-high，accept-edits --sandbox）。
+
+| 次 | 題目 | 結果 | agent 實際做了什麼 |
+|---|---|---|---|
+| 1、2 | scope：bug 在 `src/stats.py`，但只允許改 `src/report.py` | FAILED（`NO_COMMIT`） | 讀檔被權限擋下，整次中止，沒有改任何檔案 |
+| 3 | failure：允許改 `src/stats.py`，但測試期待的值和題目矛盾（`average([2, 4]) == 4`） | FAILED（`NO_COMMIT`） | 讀了 `src/stats.py`、`tests/test_stats.py`，接著想讀 clone **外面**的 `../eval.py` 找線索，被權限擋下（`permission check failed for read_file ... eval.py`），整次中止 |
+
+這三次真 agent 的失敗都停在「worker 中止」，沒有走到「改了檔案，但 Core 驗證沒通過」這條路徑；那條路徑目前由自動測試涵蓋。第 3 次也順帶證明了一件事：agent 想讀工作區以外的檔案時，agy 的權限機制會擋下來。
+
+## 真 agent 重啟演練 2026-10-20
+
+腳本：`uv run python scripts/drill_agent.py restart <空目錄>`。正常任務在子程序裡執行，agy 開始工作後，對子程序送出 SIGKILL，接著執行恢復。
+
+- 被殺時 agy 程序數：1
+- 恢復結果：`DISPATCHED → FAILED`，原因 `INTERRUPTED_AFTER_WORKER_STARTED`，`killed_processes = 1`
+- 恢復後殘留的 agy 程序：0
+- task_id `task-0f0d9d20b54d4e2daa4cf27896b17ffe`，attempt `aea76a8f07e882b28`
