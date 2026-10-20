@@ -94,6 +94,10 @@ verifier 只負責產生證據。一個任務是否真的完成，信任來自 v
 現況：試點停在 **L0 + L3**。函式級 L2 是便宜且近期可行的強化（不必等服務化），優先序與是否採用
 由整合負責人定。推演、議會審查與取捨見 knowledge `nexus/research/2026-10-20-forgeable-test-report.md`。
 
-試點實測（#2769，第一次）：worker（agy headless）不能跑測試、盲改，修好了新測試卻弄壞 5 個舊測試，
-被 verifier + Core 正確擋下（`FAILED_VERIFICATION`）。這證明 L0 對「誠實但能力不足」的 worker
-有用；它擋不住的是**刻意**偽造判決的候選，那屬於 L2 的範疇。
+試點實測（#2769，首次）：兩次都 `FAILED_VERIFICATION`，但**不是 worker 的能力問題**——查明是
+Cairnwork verifier 自己的環境問題（sandbox 擋了 `/usr/bin/git`，xcrun shim 讀不到
+`libxcrun.dylib`），讓那 5 個測試在**未修改的 main** 上也失敗；再加上 teeth 檢查過寬，把這些環境
+失敗也算成「測試在 base 失敗」。worker 第二次的修正，其實與在沙箱外驗證過能讓 19 個測試全過的修法
+一致。兩個缺陷由整合負責人修復中。**教訓：verifier 失敗必須先排除環境因素**（在未修改的 base 上跑
+一次對照），否則會把環境 bug 誤判成 worker 或候選的問題——這也提醒，上面各級防線都假設 verifier
+本身是對的。
