@@ -2,6 +2,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from cairnwork import report_guard
 from cairnwork.confined import MAX_REPORT_BYTES
 
@@ -154,3 +156,23 @@ def test_os_exit_before_sessionfinish_leaves_no_record(tmp_path):
     )
     assert (tmp_path / "junit.xml").exists()  # the forged report exists on disk
     assert not report_guard.read_verdict(verdict, NONCE).ran  # but no trusted record -> not a pass
+
+
+@pytest.mark.parametrize("bad", [[["x"]], 123, {"a": 1}, "str", None])
+def test_a_malformed_collected_fails_closed_not_crashes(tmp_path, bad):
+    """A candidate controls the file; a bad shape must fail closed, never raise (crash)."""
+    path = _write(tmp_path, {"nonce": NONCE, "collected": bad, "outcomes": {}})
+    assert report_guard.read_verdict(path, NONCE).ran is False
+
+
+def test_a_non_dict_outcomes_fails_closed(tmp_path):
+    path = _write(tmp_path, {"nonce": NONCE, "collected": ["a"], "outcomes": [1, 2]})
+    assert report_guard.read_verdict(path, NONCE).ran is False
+
+
+def test_a_symlinked_verdict_is_not_followed(tmp_path):
+    target = tmp_path / "real.json"
+    target.write_text(json.dumps({"nonce": NONCE, "collected": ["a"], "outcomes": {"a": "passed"}}))
+    link = tmp_path / "verdict.json"
+    link.symlink_to(target)
+    assert report_guard.read_verdict(link, NONCE).ran is False  # O_NOFOLLOW refuses the symlink

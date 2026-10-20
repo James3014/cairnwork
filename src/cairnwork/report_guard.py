@@ -14,12 +14,15 @@ loads even when cairnwork is not importable from inside the sandbox (an editable
 a 0700 home the verifier account cannot traverse); that directory is read-only to the sandbox,
 so the candidate cannot replace it.
 
-Limitation: the plugin runs in the same process as the candidate, so a candidate that reads the
-nonce from the environment could still write a forged record to the verdict file before exiting.
-Closing that needs a verdict channel outside the process (a subprocess per test, or an external
-observer); until then this raises the cost of forgery from "write the file named in argv" to
-"forge the plugin's record", and defeats the two demonstrated attacks (a forged JUnit and
-``os._exit``).
+What this does and does not do. It removes the old trivial attack (read ``--junitxml`` from
+argv, write a passing report) and makes the verdict reflect what pytest itself collected and
+ran. It defeats a candidate that only writes a forged JUnit (now ignored) or only calls
+``os._exit`` without writing a record. It does NOT stop a candidate that reads the nonce and
+path from the environment, writes a matching record and exits — reading the nonce from the
+environment is no harder than reading the old argv path, so this is partial mitigation, not a
+boundary. A real boundary needs the verdict produced outside the candidate's process (a
+subprocess per test, or an external observer), tracked as Tier-3 in the report-forgery
+research (knowledge nexus/research/2026-10-20-forgeable-test-report.md).
 """
 
 from __future__ import annotations
@@ -98,8 +101,9 @@ def read_verdict(path: Path, nonce: str) -> Verdict:
     results are ``passed``. Outcomes are returned whenever the nonce matches (even when not all
     passed) so failed_on_base can see a test that failed."""
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read(MAX_REPORT_BYTES + 1)  # a candidate-writable file; cap the read
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # a candidate-controlled path; no symlink
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(MAX_REPORT_BYTES + 1)  # cap the read
         if len(raw) > MAX_REPORT_BYTES:
             return Verdict(False, {})
         data = json.loads(raw)
@@ -107,13 +111,17 @@ def read_verdict(path: Path, nonce: str) -> Verdict:
         return Verdict(False, {})
     if not isinstance(data, dict) or data.get("nonce") != nonce:
         return Verdict(False, {})
-    collected = set(data.get("collected") or [])
-    outcomes = data.get("outcomes") or {}
-    if not isinstance(outcomes, dict):
+    collected = data.get("collected")
+    outcomes = data.get("outcomes")
+    # fail closed on any malformed shape (a candidate controls the file): no unhashable node
+    # ids, no non-dict outcomes — otherwise set()/membership would raise and crash the parent.
+    if not isinstance(collected, list) or not all(isinstance(node, str) for node in collected):
+        return Verdict(False, {})
+    if not isinstance(outcomes, dict) or not all(isinstance(node, str) for node in outcomes):
         return Verdict(False, {})
     ran = (
         bool(collected)
-        and set(outcomes) == collected
+        and set(outcomes) == set(collected)
         and all(outcome == "passed" for outcome in outcomes.values())
     )
     return Verdict(ran, outcomes)
