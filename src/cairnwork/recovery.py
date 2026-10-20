@@ -122,7 +122,9 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
     (root / f"{attempt_id}.tests.index").unlink(missing_ok=True)
     for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
         if private.is_dir() and not private.is_symlink():
-            shutil.rmtree(private / "run", ignore_errors=True)
+            # a base-test run is not Core evidence and would show the tests: all of it goes
+            keep_log = f"{attempt_id}-v-" in private.name
+            shutil.rmtree(private / "run" if keep_log else private, ignore_errors=True)
     names = [attempt_id] + sorted(
         p.name for p in root.glob(f"{attempt_id}-[vb]-v*") if p.is_dir() and "." not in p.name
     )
