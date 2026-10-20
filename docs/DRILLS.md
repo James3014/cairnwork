@@ -72,3 +72,16 @@
 - 恢復後殘留的 agy：0
 
 第 1 次執行（舊判定條件）結果相同，但只留下了螢幕輸出。
+
+## 回退演練：Cairnwork 端腳本 2026-10-20
+
+腳本：`uv run python scripts/drill_rollback.py <空目錄> [model]`（預設 `gemini-3.8-flash-high`，真的 agy）。透過 `cairnwork-route` 指令走一遍 `docs/GATEWAY_ROUTE.md` 切換與回退順序裡 Cairnwork 這一半，每一步都印出並記錄，結果寫進 `docs/drills/<日期>-rollback-cairnwork-side.json`。頂層 `passed` 只有在每一項預期都成立時才是 true，並記錄有沒有使用 verifier 帳號。
+
+1. 全新的 0700 state 目錄，影子模式 `check`：`would_accept` 為 false，而且沒有建立任何檔案。
+2. `accept`，交件 A（`drill_normal.py` 的 `stats.py` 小 bug），等到狀態是 DISPATCHED，A 還在跑時執行 `drain`。
+3. drain 之後：新冪等鍵回 `NOT_ACCEPTING`（exit 2）；重送 A 拿回同一個 task id、`duplicate` 為 true；A 執行中 `in-flight` 計數至少 1。
+4. 等 A 結束：必須在 Cairnwork 內結束（COMPLETED，或 FAILED 並有原因），attempt 編號與 drain 時相同（沒有重跑）；`in-flight` 為 0；`recover` exit 0 且沒有任何決定；再重送一次 A 仍是同一個任務。
+
+2026-10-20 實際執行一次，使用 verifier 帳號，所有預期都成立（`passed: true`），A 為 COMPLETED、Core VERIFIED。
+
+**這不等於回退演練通過。** 這個腳本只涵蓋 Cairnwork 這一端。完整的回退演練還需要 Gateway 端：Nexus-new PR #2804 和部署器的那張 PR 合併並部署之後，才能驗證開關切換、已轉送任務仍查得到、以及沒有任何任務在兩個系統都跑。在那之前，上方表格的「回退」仍維持「還不能做」。

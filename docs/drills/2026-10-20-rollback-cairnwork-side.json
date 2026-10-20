@@ -1,0 +1,146 @@
+{
+  "date": "2026-10-20",
+  "model": "gemini-3.8-flash-high",
+  "passed": true,
+  "scope": "Cairnwork side only; Gateway switch, forwarding and deployer gate not exercised",
+  "steps": [
+    {
+      "exit": 0,
+      "expected": "exit 0, would_accept false, state dir still empty",
+      "ok": true,
+      "output": {
+        "would_accept": false
+      },
+      "state_files_after": [],
+      "step": "1 shadow check"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, accepting true",
+      "ok": true,
+      "output": {
+        "accepting": true
+      },
+      "step": "2a accept"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, duplicate false",
+      "ok": true,
+      "output": {
+        "duplicate": false,
+        "status": "BOUND",
+        "task_id": "task-0f2567a455ee4c1ea27106e7350e2e97"
+      },
+      "step": "2b submit A"
+    },
+    {
+      "expected": "status DISPATCHED before drain",
+      "ok": true,
+      "status": {
+        "attempt_id": "aa4027f61934abede",
+        "candidate_commit": "",
+        "core_verified": false,
+        "detail": "",
+        "idempotency_key": "rollback-a",
+        "owner": "cairnwork",
+        "phase": "WORKER_STARTED",
+        "status": "DISPATCHED",
+        "task_id": "task-0f2567a455ee4c1ea27106e7350e2e97"
+      },
+      "step": "2c A dispatched"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, accepting false",
+      "ok": true,
+      "output": {
+        "accepting": false
+      },
+      "step": "2d drain while A runs"
+    },
+    {
+      "exit": 2,
+      "expected": "exit 2, NOT_ACCEPTING",
+      "ok": true,
+      "output": {
+        "detail": "Cairnwork takes no new tasks",
+        "error": "NOT_ACCEPTING"
+      },
+      "step": "3a new key after drain"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, same task id, duplicate true",
+      "ok": true,
+      "output": {
+        "duplicate": true,
+        "status": "DISPATCHED",
+        "task_id": "task-0f2567a455ee4c1ea27106e7350e2e97"
+      },
+      "step": "3b resend of A after drain"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, count >= 1, A listed, accepting false",
+      "ok": true,
+      "output": {
+        "accepting": false,
+        "count": 1,
+        "task_ids": [
+          "task-0f2567a455ee4c1ea27106e7350e2e97"
+        ]
+      },
+      "step": "3c in-flight while A runs"
+    },
+    {
+      "attempt_when_dispatched": "aa4027f61934abede",
+      "expected": "COMPLETED, or FAILED with a reason; same attempt as when drained",
+      "ok": true,
+      "status": {
+        "attempt_id": "aa4027f61934abede",
+        "candidate_commit": "b4a09203cea75874a67069efa3953aa34ccf8dd1",
+        "core_verified": true,
+        "detail": "COMPLETED",
+        "idempotency_key": "rollback-a",
+        "owner": "cairnwork",
+        "phase": "FINISHED",
+        "status": "COMPLETED",
+        "task_id": "task-0f2567a455ee4c1ea27106e7350e2e97"
+      },
+      "step": "4a A finishes in Cairnwork"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, count 0",
+      "ok": true,
+      "output": {
+        "accepting": false,
+        "count": 0,
+        "task_ids": []
+      },
+      "step": "4b in-flight after A"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, no decisions",
+      "ok": true,
+      "output": {
+        "decisions": []
+      },
+      "step": "4c recover"
+    },
+    {
+      "exit": 0,
+      "expected": "exit 0, same task id, duplicate true (no re-run)",
+      "ok": true,
+      "output": {
+        "duplicate": true,
+        "status": "COMPLETED",
+        "task_id": "task-0f2567a455ee4c1ea27106e7350e2e97"
+      },
+      "step": "4d resend after finish"
+    }
+  ],
+  "verifier_account_used": true
+}
