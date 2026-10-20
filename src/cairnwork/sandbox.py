@@ -13,6 +13,10 @@ nexus/research/2026-10-19-layer1-policy-sandbox-L1):
   and checked for characters that could rewrite the policy;
 - ``/dev/null`` must be writable or pytest dies with INTERNALERROR.
 
+Known gap: a confined process can still read the arguments and environment of
+other processes run by the same user (sysctl KERN_PROCARGS2); no Seatbelt rule
+tried blocked it. Only running under a separate uid does.
+
 File metadata (stat) is readable everywhere: Python cannot start without it.
 That leaks names, sizes and times, not contents. Seatbelt is a macOS tool
 Apple documents as legacy; it confines, it is not a portable production sandbox.
@@ -134,7 +138,22 @@ def build_profile(
     return Profile("\n".join(lines) + "\n")
 
 
-_TOO_BROAD = ("/", "/Users", "/private", "/private/var", "/private/tmp", "/var", "/tmp")
+_TOO_BROAD = (
+    "/",
+    "/Users",
+    "/Users/Shared",
+    "/private",
+    "/private/var",
+    "/private/var/folders",
+    "/var",
+    "/var/folders",
+    "/private/tmp",
+    "/tmp",
+    "/opt",
+    "/opt/homebrew",
+    "/usr",
+    "/usr/local",
+)
 
 
 def _require_narrow(root: str, real_home: str) -> None:

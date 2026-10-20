@@ -27,6 +27,14 @@ verifier fails (no unconfined fallback). Logs, the pytest ini and the profile
 live outside what the child may write. The candidate's code still runs in the
 same process as pytest, so it can forge the report inside the per-run
 directory; a pass is evidence, not proof.
+
+Known gap: Seatbelt does not stop a sandboxed process from reading other
+processes' arguments and environment (sysctl KERN_PROCARGS2) when they run as
+the same user, so tokens in other processes' environments are readable and could
+be printed into the verifier log. Until verifiers run under a dedicated uid,
+never pass raw verifier logs to a worker or a model. A process that leaves the
+run's process group is killed if it still carries the run token in its
+environment; one that clears its environment escapes the sweep.
 Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
 pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
 pytest configuration and root-level modules out of the files a candidate may
@@ -42,19 +50,19 @@ import hashlib
 import json
 import os
 import re
-import resource
+import secrets
 import shutil
-import signal
+import stat
 import subprocess
 import sys
 import tempfile
-import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from xml.etree import ElementTree
 
-from cairnwork import sandbox
+from cairnwork import confined, sandbox
+from cairnwork.confined import MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
 from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
@@ -75,8 +83,6 @@ _PROTECTED_NAMES = frozenset(
         "usercustomize.py",
     }
 )
-MAX_LOG_BYTES = 4 << 20
-MAX_REPORT_BYTES = 4 << 20
 
 
 class VerifierRejected(Exception):
@@ -138,6 +144,8 @@ def run_verifiers(
     If a checkout cannot be created the error propagates and no observation is
     returned (fail closed).
     """
+    if not os.path.isabs(python):
+        raise VerifierRejected(f"python must be an absolute path, got {python!r}")
     ids = [spec.verifier_id for spec in specs]
     if len(ids) != len(set(ids)):
         raise VerifierRejected(f"duplicate verifier ids in {ids}")
@@ -199,12 +207,12 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
             write_roots=(checkout, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
-        returncode, timed_out = _execute(
+        returncode, timed_out, survivors = confined.execute(
             sandbox.wrap(argv, profile_path), checkout, env, timeout, log_path
         )
     else:
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
-        returncode, timed_out = None, False
+        returncode, timed_out, survivors = None, False, 0
     mutated = tuple(tree_differences(repo, candidate_commit, checkout))
     ran = profile is not None and _report_shows_passing_tests(report)
     too_big = log_path.stat().st_size > MAX_LOG_BYTES
@@ -215,6 +223,7 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
         and not mutated
         and ran
         and not too_big
+        and survivors == 0
     )
     shutil.rmtree(home, ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
@@ -227,6 +236,7 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
         timed_out=timed_out,
         mutated=mutated,
         tests_passed=ran,
+        survivors=survivors,
         log_sha256=_file_sha256(log_path),
     )
     observation = VerifierObservation(
@@ -251,6 +261,7 @@ def _prepare_run(private: Path, ini: Path):
         PYTHONNOUSERSITE="1",
         PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
     )
+    env[RUN_TOKEN_VAR] = secrets.token_hex(16)
     return run_dir, home, tmp, run_dir / "junit.xml", env
 
 
@@ -279,50 +290,6 @@ def _interpreter_roots(python: str) -> tuple[Path, ...]:
     return tuple(sorted(roots))
 
 
-def _execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool]:
-    """Run in a new process group; the parent copies output into log_path (the child
-    never holds the log's file descriptor); kill the group afterwards."""
-    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as log:
-        process = subprocess.Popen(  # noqa: S603 - argv built from an allow-listed spec, no shell
-            argv,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            preexec_fn=_limit_file_size,  # noqa: PLW1509 - only setrlimit, no locks
-        )
-        copier = threading.Thread(target=_copy_capped, args=(process.stdout, log), daemon=True)
-        copier.start()
-        timed_out = False
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        _kill_group(process.pid)
-        process.wait()
-        copier.join(timeout=10)  # a descendant that escaped the group may hold the pipe
-    return (None if timed_out else process.returncode), timed_out
-
-
-def _copy_capped(source, target) -> None:
-    """Copy at most MAX_LOG_BYTES + 1 bytes (one over the cap marks the log too big)."""
-    written = 0
-    for chunk in iter(lambda: source.read(1 << 16), b""):
-        keep = chunk[: max(0, MAX_LOG_BYTES + 1 - written)]
-        if keep:
-            target.write(keep)
-            written += len(keep)
-
-
-def _limit_file_size() -> None:
-    """In the child: no file it writes (log, report, scratch) may exceed the caps."""
-    limit = MAX_LOG_BYTES + MAX_REPORT_BYTES
-    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-
-
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -331,17 +298,13 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _kill_group(pgid: int) -> None:
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass  # the group is already gone
-
-
 def _report_shows_passing_tests(report: Path) -> bool:
     """The JUnit report must exist and show at least one test run, none failed or skipped all."""
     try:
-        fd = os.open(report, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(report, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return False
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(MAX_REPORT_BYTES + 1)
         if len(data) > MAX_REPORT_BYTES:

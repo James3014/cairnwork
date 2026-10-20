@@ -14,8 +14,6 @@ from conftest import commit_change, git
 from cairnwork import sandbox
 from cairnwork.verifiers import parse_verifier, run_verifiers
 
-pytestmark = pytest.mark.sandbox
-
 
 @pytest.fixture
 def project(repo):
@@ -39,6 +37,7 @@ def verify(project, tmp_path, files, target):
     return runs[0]
 
 
+@pytest.mark.sandbox
 def test_real_pytest_passes_inside_the_sandbox(project, tmp_path):
     result = verify(project, tmp_path, {}, "tests/test_ok.py")
     assert result.observation.passed, result.log_path.read_text()
@@ -50,6 +49,7 @@ def attack(code):
     )
 
 
+@pytest.mark.sandbox
 @pytest.mark.parametrize(
     "name,code",
     [
@@ -130,6 +130,7 @@ def test_without_sandbox_nothing_runs_and_the_verifier_fails(project, tmp_path, 
     assert "unavailable" in result.log_path.read_text()
 
 
+@pytest.mark.sandbox
 def test_child_cannot_touch_its_own_log_ini_or_profile(project, tmp_path):
     code = (
         "import pathlib, pytest\n"
@@ -167,6 +168,7 @@ def test_broad_roots_are_refused(tmp_path, root):
         sandbox.build_profile((Path(path),), (), home=home)
 
 
+@pytest.mark.sandbox
 def test_trailing_credential_deny_wins_inside_an_allowed_root(tmp_path):
     """SBPL: the last matching rule wins. A credential path under an allowed read root
     must stay unreadable (a reviewer claimed first-match-wins; this pins the behaviour)."""
@@ -188,6 +190,7 @@ def test_trailing_credential_deny_wins_inside_an_allowed_root(tmp_path):
     assert denied.returncode != 0 and "KEY" not in denied.stdout
 
 
+@pytest.mark.sandbox
 def test_child_cannot_rewrite_its_log_through_stdout(project, tmp_path):
     code = (
         "import os\n"
@@ -210,3 +213,30 @@ def test_probe_requires_a_real_denial(monkeypatch):
         assert sandbox.available() is False
     finally:
         sandbox.available.cache_clear()
+
+
+@pytest.mark.sandbox
+def test_process_that_leaves_the_group_is_killed_and_fails_the_run(project, tmp_path):
+    marker = tmp_path / "late"
+    child = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('x')"
+    code = (
+        "import subprocess, sys\n"
+        "def test_spawn():\n"
+        f"    subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_daemon.py": code}, "tests/test_daemon.py")
+    assert not result.observation.passed
+    import time
+
+    time.sleep(4)
+    assert not marker.exists()
+
+
+def test_python_must_be_an_absolute_path(project, tmp_path):
+    from cairnwork.verifiers import VerifierRejected
+
+    spec = parse_verifier("pytest", ["python3", "-m", "pytest", "tests/test_ok.py"])
+    with pytest.raises(VerifierRejected):
+        run_verifiers(
+            project, git(project, "rev-parse", "HEAD"), (spec,), tmp_path, "r1", python="python3"
+        )
