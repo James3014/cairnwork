@@ -169,6 +169,7 @@ def test_in_flight_of_a_missing_state_dir_is_an_error(tmp_path):
 def test_recover_that_cannot_settle_a_task_does_not_exit_0(intake, repo, capsys):
     from cairnwork.route import main
 
+    (intake.state / "config.json").write_text('{"verifier_account": false}')  # Linux CI
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # dispatched, but no journal
     os.close(FakePopen.held.pop())
