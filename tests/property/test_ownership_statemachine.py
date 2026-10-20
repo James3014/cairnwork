@@ -24,16 +24,29 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 from hypothesis.strategies import sampled_from
 
 from cairnwork.ownership import (
-    INACTIVE_STATUSES,
     OWNERS,
-    TRANSITIONS,
     DuplicateLogicalTask,
+    InvalidOwnershipValue,
+    InvalidStatusTransition,
     KeyReusedWithDifferentRequest,
     OwnerMismatch,
     OwnershipLedger,
     OwnershipUnknown,
     request_digest,
 )
+
+# Written by hand here, NOT imported from ownership.py: importing the transition table would make
+# the test use the code under test as its own oracle, so a wrong table (e.g. a CANCELLED -> BOUND
+# move reviving a cancelled task) could never be caught. Keep this in sync deliberately.
+ALLOWED = {
+    "BOUND": {"DISPATCHED", "FAILED", "CANCELLED", "SUPERSEDED"},
+    "DISPATCHED": {"COMPLETED", "FAILED", "CANCELLED"},
+    "FAILED": {"SUPERSEDED"},
+    "COMPLETED": set(),
+    "CANCELLED": set(),
+    "SUPERSEDED": set(),
+}
+INACTIVE = {"SUPERSEDED", "CANCELLED"}
 
 # Small pools so collisions (the interesting cases) happen often.
 KEYS = ["k0", "k1", "k2", "k3"]
@@ -44,11 +57,11 @@ REQUESTS = [
     {"title": "fix b", "allowed_files": ["src/b.py"]},
     {"title": "fix a", "allowed_files": ["src/a.py"], "note": "variant"},
 ]
-STATUSES = sorted(TRANSITIONS)
+STATUSES = sorted(ALLOWED)
 
 
 def _active(status: str) -> bool:
-    return status not in INACTIVE_STATUSES
+    return status not in INACTIVE
 
 
 class OwnershipModel(RuleBasedStateMachine):
@@ -127,10 +140,10 @@ class OwnershipModel(RuleBasedStateMachine):
         task_id = task_ids[pick % len(task_ids)]
         row = self.by_key[self.by_task[task_id]]
         current = row["status"]
-        legal = status in TRANSITIONS.get(current, frozenset())
+        legal = status in ALLOWED.get(current, set())
         try:
             updated = self.ledger.set_status(task_id, status)
-        except Exception:  # noqa: BLE001 - we assert on legality below
+        except (InvalidStatusTransition, InvalidOwnershipValue):
             assert not legal, f"I3: legal move {current}->{status} must not raise"
             return
         assert legal, f"I3: illegal move {current}->{status} must have raised"
@@ -149,21 +162,40 @@ class OwnershipModel(RuleBasedStateMachine):
 
     @rule(task_id=sampled_from(["nope-1", "nope-2"]))
     def unknown_never_guesses(self, task_id):
+        for lookup in (self.ledger.get, self.ledger.route):
+            try:
+                lookup(task_id=task_id)
+            except OwnershipUnknown:
+                continue
+            raise AssertionError("I5: unknown task must raise OwnershipUnknown, not guess")
+
+    @precondition(lambda self: bool(self.by_task))
+    @rule(pick=sampled_from(range(8)))
+    def compare_and_set_refuses_a_wrong_expected_from(self, pick):
+        task_id = sorted(self.by_task)[pick % len(self.by_task)]
+        row = self.by_key[self.by_task[task_id]]
+        wrong = next(s for s in STATUSES if s != row["status"])
         try:
-            self.ledger.get(task_id=task_id)
-        except OwnershipUnknown:
-            return
-        raise AssertionError("I5: unknown task must raise OwnershipUnknown, not guess")
+            self.ledger.set_status(task_id, "DISPATCHED", expected_from=wrong)
+        except InvalidStatusTransition:
+            return  # compare-and-set refuses: the task is not in `wrong`
+        raise AssertionError("I-CAS: expected_from mismatch must refuse the move")
 
     # ----- invariants ----------------------------------------------------
     @invariant()
-    def one_active_per_card(self):
-        active_cards = [r["card"] for r in self.by_key.values() if _active(r["status"])]
-        assert len(active_cards) == len(set(active_cards)), "I1 broken in model"
-        # and in the ledger itself
-        for card in set(active_cards):
-            live = [r for r in self.by_key.values() if r["card"] == card and _active(r["status"])]
-            assert len(live) == 1
+    def ledger_matches_model_and_one_active_per_card(self):
+        # read every known task FROM THE LEDGER (not the model) so a divergent database is caught
+        active_per_card: dict[str, int] = {}
+        for row in self.by_key.values():
+            got = self.ledger.get(task_id=row["task_id"])
+            assert got.owner == row["owner"], "I2: owner changed in the ledger"
+            assert got.status == row["status"], "ledger status diverged from the model"
+            assert got.card_hash == row["card"], "ledger card diverged from the model"
+            if _active(got.status):
+                active_per_card[got.card_hash] = active_per_card.get(got.card_hash, 0) + 1
+        assert all(n == 1 for n in active_per_card.values()), (
+            "I1: a card has >1 active in the ledger"
+        )
 
     @invariant()
     def in_flight_matches(self):
