@@ -244,13 +244,15 @@ def test_python_must_be_an_absolute_path(project, tmp_path):
         )
 
 
+@pytest.mark.sandbox
 def test_tests_can_run_git(project, tmp_path):
     """/usr/bin/git is an xcrun shim that loads its tools from the developer directory;
-    a test that runs git must work inside the sandbox (Nexus-new #2769 pilot)."""
+    a test that runs git must work inside the sandbox (Nexus-new #2769 pilot). The shim
+    is named outright: a Homebrew git earlier on PATH is not what this is about."""
     code = (
         "import subprocess\n"
         "def test_git(tmp_path):\n"
-        "    for argv in (['git', '--version'], ['git', 'init', '-q']):\n"
+        "    for argv in (['/usr/bin/git', '--version'], ['/usr/bin/git', 'init', '-q']):\n"
         "        done = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)\n"
         "        assert done.returncode == 0, done.stderr\n"
     )
