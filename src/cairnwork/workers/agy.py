@@ -6,9 +6,13 @@ clone as its working directory. What that actually allows was probed on
 trusts the worker: it snapshots only the allowed files and rejects any other
 change in the clone.
 The agy process runs in its own process group, which is killed afterwards. It
-gets only the environment it needs (it signs in from files under HOME; checked
-2026-10-20), so no token in Cairnwork's environment reaches the model. Its output
-is copied into the log by the parent, capped like a verifier log.
+gets only the environment it needs: it signs in from files under HOME (checked
+2026-10-20), plus locale, config dirs, CA bundles and proxies. Other variables in
+Cairnwork's environment do not reach it; proxy URLs may carry credentials, and
+agy can read anything under HOME, so this narrows exposure, it is no boundary.
+Its output is copied into the log by the parent, capped like a verifier log; a
+process it started outside its group is killed if it still carries the attempt
+marker, and one that still holds the output afterwards fails the run.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork.confined import ATTEMPT_ENV, copy_capped
+from cairnwork.confined import ATTEMPT_ENV, copy_capped, sweep_marked
 
 ENV_KEEP = (
     "HOME",
@@ -33,6 +37,15 @@ ENV_KEEP = (
     "LC_ALL",
     "LC_CTYPE",
     "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "ALL_PROXY",
+    "all_proxy",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",
@@ -90,29 +103,42 @@ class AgyWorker:
         fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         env = {key: os.environ[key] for key in ENV_KEEP if key in os.environ}
         env[ATTEMPT_ENV] = workdir.name
-        with os.fdopen(fd, "wb") as log:
-            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                argv,
-                cwd=workdir,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
-            copier.start()
-            try:
-                process.wait(timeout=self.timeout_seconds + 60)
-            except subprocess.TimeoutExpired as exc:
-                raise AgyWorkerError("agy timed out") from exc
-            finally:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                process.wait()
-                copier.join(timeout=10)
+        log = os.fdopen(fd, "wb")
+        process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            argv,
+            cwd=workdir,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
+        copier.start()
+        held = True
+        try:
+            process.wait(timeout=self.timeout_seconds + 60)
+        except subprocess.TimeoutExpired as exc:
+            raise AgyWorkerError("agy timed out") from exc
+        finally:
+            held = _stop(process, copier, workdir.name)
+            if not held:  # else the copier still reads: leave both open rather than hang
                 process.stdout.close()
+                log.close()
+        if held:
+            raise AgyWorkerError("a process agy started outlived it and holds its output")
         if process.returncode != 0:
             raise AgyWorkerError(f"agy exited {process.returncode}; log {log_path}")
+
+
+def _stop(process, copier, attempt: str) -> bool:
+    """Kill agy's group and anything it started outside it that still carries the
+    attempt marker; return True if something still holds agy's output pipe."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is already gone
+    process.wait()
+    sweep_marked(ATTEMPT_ENV, attempt, skip_group=process.pid)
+    copier.join(timeout=10)
+    return copier.is_alive()

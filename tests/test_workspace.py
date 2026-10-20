@@ -396,3 +396,11 @@ def test_attempt_id_with_a_trailing_newline_is_refused(tmp_path):
 
     with pytest.raises(WorkspaceError, match="must match"):
         remove_attempt_clone(tmp_path, "a1\n")
+
+
+def test_attempt_base_with_a_trailing_newline_is_refused(repo, tmp_path):
+    from cairnwork.workspace import WorkspaceError, create_attempt_clone
+
+    base = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(WorkspaceError, match="40-hex"):
+        create_attempt_clone(repo, base + "\n", tmp_path / "runs", "a1")

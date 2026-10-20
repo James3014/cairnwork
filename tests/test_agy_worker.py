@@ -3,10 +3,13 @@
 import json
 import os
 import sys
+import time
 from types import SimpleNamespace
 
+import pytest
+
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES
-from cairnwork.workers.agy import AgyWorker
+from cairnwork.workers.agy import AgyWorker, AgyWorkerError
 
 TASK = SimpleNamespace(title="t", instructions="i", allowed_files=("a.py",))
 
@@ -37,3 +40,34 @@ def test_agy_log_is_capped(tmp_path):
     workdir.mkdir()
     AgyWorker(agy=agy).run(workdir, TASK)
     assert (tmp_path / "attempt2.agy.log").stat().st_size == MAX_LOG_BYTES + 1
+
+
+def test_a_marked_process_agy_leaves_behind_is_killed(tmp_path):
+    agy = fake_agy(
+        tmp_path,
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " start_new_session=True)\n"
+        "print('started', flush=True)",
+    )
+    workdir = tmp_path / "attempt3"
+    workdir.mkdir()
+    started = time.monotonic()
+    AgyWorker(agy=agy).run(workdir, TASK)
+    assert time.monotonic() - started < 30
+
+
+def test_an_unmarked_process_holding_the_output_fails_the_run(tmp_path):
+    agy = fake_agy(
+        tmp_path,
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'],"
+        " start_new_session=True, env={})\n"
+        "print('started', flush=True)",
+    )
+    workdir = tmp_path / "attempt4"
+    workdir.mkdir()
+    started = time.monotonic()
+    with pytest.raises(AgyWorkerError, match="holds its output"):
+        AgyWorker(agy=agy).run(workdir, TASK)
+    assert time.monotonic() - started < 30
