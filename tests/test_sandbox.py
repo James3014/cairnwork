@@ -256,3 +256,20 @@ def test_tests_can_run_git(project, tmp_path):
     )
     result = verify(project, tmp_path, {"tests/test_git.py": code}, "tests/test_git.py")
     assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        ("/Library/Developer/CommandLineTools", True),
+        ("/Applications/Xcode.app/Contents/Developer", True),
+        ("/Applications/Xcode_16.4.app/Contents/Developer", True),
+        ("/Library/Developer", False),
+        ("/Library/Developer/CoreSimulator", False),
+        ("/Applications/XcodeEvil", False),
+        ("/Applications/Xcode.app/Contents", False),
+        ("/tmp", False),
+    ],
+)
+def test_only_standard_developer_dirs_are_readable(path, allowed):
+    assert bool(sandbox._DEVELOPER_DIR.fullmatch(path)) is allowed

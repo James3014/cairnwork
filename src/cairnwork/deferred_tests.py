@@ -100,7 +100,13 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
 def new_tests(repo: Path, base: str, test_commit: str, paths: tuple[str, ...]) -> frozenset[str]:
     """Node ids (``path::name`` or ``path::Class::name``) of the test functions the test
     commit adds or changes: only these may count as teeth, not tests in the same file
-    that already failed on the base for another reason (e.g. the environment)."""
+    that already failed on the base for another reason (e.g. the environment).
+
+    Top-level ``test*`` functions and ``test*`` methods of top-level ``Test*`` classes,
+    compared by AST (decorators included, line numbers not). Not seen: tests changed only
+    through a fixture, helper or module constant, nested or inherited test classes,
+    TestCase subclasses not named Test*, custom python_functions/python_classes. Such a
+    test commit is refused (no teeth found), never wrongly accepted."""
     found = set()
     for path in paths:
         if not path.endswith(".py"):
@@ -117,9 +123,11 @@ def _test_functions(repo: Path, blob: str) -> dict[str, str]:
         source = run_git(repo, "show", blob)
     except GitCommandError:
         return {}  # a new file
+    except UnicodeDecodeError as exc:
+        raise TestCommitRejected("TEST_COMMIT_UNPARSABLE", f"{blob} is not UTF-8") from exc
     try:
         tree = ast.parse(source)
-    except SyntaxError as exc:
+    except (SyntaxError, ValueError) as exc:
         raise TestCommitRejected("TEST_COMMIT_UNPARSABLE", blob) from exc
     functions: dict[str, str] = {}
     defs = (ast.FunctionDef, ast.AsyncFunctionDef)

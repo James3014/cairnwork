@@ -245,6 +245,7 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
     base whose test cases really fail there. Returns their paths."""
     ensure_test_commit(task.repo, task.test_commit)
     paths = test_paths(task.repo, task.base_commit, task.test_commit)
+    targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse
     runs = run_verifiers(
         task.repo,
         task.test_commit,
@@ -256,7 +257,7 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
         python=verifying[1],
         base_commit=task.base_commit,
     )
-    teeth = failed_on_base(runs, new_tests(task.repo, task.base_commit, task.test_commit, paths))
+    teeth = failed_on_base(runs, targets)
     for run in runs:  # not evidence for Core; would show the tests to later workers
         shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
     if not teeth:

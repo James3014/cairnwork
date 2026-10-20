@@ -103,6 +103,12 @@ def sbpl_path(path: Path | str) -> str:
     return real
 
 
+# Only the two standard places: the Command Line Tools, or an Xcode app bundle.
+_DEVELOPER_DIR = re.compile(
+    r"/Library/Developer/CommandLineTools|/Applications/Xcode[A-Za-z0-9._-]*\.app/Contents/Developer"
+)
+
+
 @lru_cache(maxsize=1)
 def developer_dirs() -> tuple[str, ...]:
     """The active developer directory (read-only): /usr/bin/git and friends are xcrun
@@ -115,8 +121,7 @@ def developer_dirs() -> tuple[str, ...]:
     except (OSError, subprocess.SubprocessError):
         return ()
     real = os.path.realpath(done.stdout.strip()) if done.returncode == 0 else ""
-    allowed = ("/Library/Developer/", "/Applications/Xcode")
-    if not real.startswith(allowed) or not os.path.isdir(real) or not _SAFE.fullmatch(real):
+    if not _DEVELOPER_DIR.fullmatch(real) or not os.path.isdir(real):
         return ()
     return (real,)
 

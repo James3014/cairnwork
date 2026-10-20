@@ -247,3 +247,10 @@ def test_new_tests_are_the_added_or_changed_test_functions(project):
         "tests/test_regression.py::TestThing::test_m",
         "tests/test_fresh.py::test_fresh",  # in a new file
     }
+
+
+def test_an_unparsable_test_commit_is_refused_before_any_base_run(project, tmp_path):
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": "def test_x(:\n"})
+    result = run(project, tmp_path, base, test_commit, SeeingWorker(FIX))
+    assert "TEST_COMMIT_UNPARSABLE" in result.reason
+    assert list((tmp_path / "state" / "runs").glob("*-b-v*")) == []  # never ran, no logs
