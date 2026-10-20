@@ -47,7 +47,27 @@
 ## 還沒決定的
 
 - verifier 的 sandbox：已用 macOS Seatbelt 封裝，預設全部拒絕，禁止連網，只能讀系統、Python 和 checkout，只能寫 checkout 和這次執行的目錄。缺少 sandbox-exec 時直接判失敗。每一種攻擊都有見證測試（`tests/test_sandbox.py`），macOS CI 一定會實際執行，不能跳過。**還沒解決的**：
-  - 候選程式碼和 pytest 在同一個程序裡，仍然可以偽造報告。
+  - 候選程式碼和 pytest 在同一個程序裡，仍然可以偽造報告。判決已經不再讀候選可寫的
+    `junit.xml`，改由受信任的 pytest plugin 在 `sessionfinish` 寫一份帶 nonce 的紀錄
+    （`src/cairnwork/report_guard.py`，#21），這擋掉了「讀 argv 的 junit 路徑寫假檔」這條，但
+    **是部分緩解，不是邊界**：候選讀得到執行環境裡的 nonce，仍可以寫一份相符的紀錄再結束。
+    對「跑任意候選碼、看測試過不過」這個模型，in-process 的候選沒有拿不到的秘密，容器也只隔離
+    主機（容器內仍可偽造），所以**技術上無法讓判決不可偽造**。因此 verifier 的通過是**證據，
+    不是完成的證明**。
+
+## 完成的信任不在 verifier
+
+verifier 只負責產生證據。一個任務是否真的完成，信任來自 verifier 以外、分層的機制，任何一個都不宣稱單獨足夠：
+
+- **Core VERIFIED 綁定確切候選 commit**（#16）：沒有這顆章不算完成。
+- **獨立審查**：另一個不同模型家族的審查者，實際寫 probe 重現，不只讀碼。
+- **線上見證 / canary**：在真實入口觀察，而不是只看離線的 verifier 報告。
+- **真實使用**：對外接口（`cairnwork-route` / Issue intake）的實際流量。
+- **在 Cairnwork 自己的 A/B 贏過裸骨幹**：試點成敗以此為準，不看功能數或 PR 數。
+
+可選的後續強化（非目標是「關門」，而是縮小偽造的範圍）：每個測試跑在自己的子程序，限制一個測試
+污染其他測試（T3a）；把整場關進即用即棄容器只隔離主機（T3b），對目前非對抗性的 worker 不划算。
+推演與取捨見 knowledge `nexus/research/2026-10-20-forgeable-test-report.md`。
   - sandbox 裡的程式可以用 sysctl `KERN_PROCARGS2` 讀到同一個使用者底下其他程序的參數和環境變數，裡面可能有 token。Seatbelt 規則擋不住。**已用專屬帳號解決（Issue #9）**：傳入 `VerifierAccount` 時，verifier 以 `cairnwork-verifier` 身分執行，macOS 不允許跨使用者讀取這些參數，見證測試在 `tests/test_verifier_account.py`。沒有傳入帳號時（例如 Linux）缺口仍在，所以 verifier 的 log 一律不交給 worker 或模型。
   - 自己開新 session、又清掉環境變數的子程序：帳號模式下，執行結束後會以該帳號執行 `kill -9 -1` 清掉它的所有程序，有任何殘留就判失敗；沒有帳號時仍然躲得過清除。帳號模式一次只能跑一個 verifier（獨占鎖）。每次開跑前，也會先確認該帳號底下沒有任何程序。
   - 專屬帳號保護的是擁有者不被 verifier 讀取，反方向不成立：sudoers 允許擁有者以該帳號執行任意 profile 的 sandbox-exec，所以任何以擁有者身分執行的程序，都能以該帳號執行程式碼。該帳號本身沒有任何特權，不能用來提升權限。
