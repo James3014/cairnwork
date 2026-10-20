@@ -10,6 +10,8 @@ from cairnwork.verifiers import VerifierRejected, parse_verifier, run_verifiers
 
 PYTEST = ["python3", "-m", "pytest"]
 
+pytestmark = pytest.mark.sandbox
+
 
 @pytest.mark.parametrize(
     "argv",

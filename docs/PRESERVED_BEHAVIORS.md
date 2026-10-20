@@ -46,5 +46,5 @@
 
 ## 還沒決定的
 
-- verifier 的 sandbox：第一版已清掉繼承的環境變數、HOME／TMPDIR 放在執行目錄、在 candidate 的全新 clone 上跑；**但候選程式碼仍直接在主機上執行**（可連網、可讀使用者檔案）。接線上任務前必須放進 sandbox（例如 macOS sandbox-exec 或容器）。
+- verifier 的 sandbox：已用 macOS Seatbelt 封裝，預設全部拒絕，禁止連網，只能讀系統、Python 和 checkout，只能寫 checkout 和這次執行的目錄。缺少 sandbox-exec 時直接判失敗。每一種攻擊都有見證測試（`tests/test_sandbox.py`），macOS CI 一定會實際執行，不能跳過。**還沒解決的**：候選程式碼和 pytest 在同一個程序裡，仍然可以偽造報告；Seatbelt 只能用在 macOS，不是可以移植的正式 sandbox。
 - Gateway 怎麼把一類任務轉給 Cairnwork：介面和認證由部署器負責人和整合負責人另外訂，F 條的「先驗證、晚切換」照做。

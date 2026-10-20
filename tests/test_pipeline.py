@@ -9,6 +9,8 @@ from cairnwork.pipeline import TaskRejected, TaskSpec, run_task
 
 VERIFY = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_calc.py")),)
 
+pytestmark = pytest.mark.sandbox
+
 
 @pytest.fixture
 def project(repo):

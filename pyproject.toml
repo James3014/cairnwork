@@ -25,6 +25,7 @@ packages = ["src/cairnwork"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["sandbox: needs real macOS sandbox-exec (skipped elsewhere unless required)"]
 
 [tool.ruff]
 line-length = 100

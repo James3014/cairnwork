@@ -36,3 +36,20 @@ def commit_change(repo, files=None, delete=(), rename=None, message="candidate")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", message)
     return git(repo, "rev-parse", "HEAD")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Tests marked 'sandbox' need real macOS Seatbelt. CAIRNWORK_REQUIRE_SANDBOX=1 (the
+    macOS CI job) makes a missing sandbox an error; elsewhere those tests are skipped."""
+    import os
+
+    from cairnwork import sandbox
+
+    if sandbox.available():
+        return
+    if os.environ.get("CAIRNWORK_REQUIRE_SANDBOX") == "1":
+        raise pytest.UsageError("CAIRNWORK_REQUIRE_SANDBOX=1 but sandbox-exec is unavailable")
+    skip = pytest.mark.skip(reason="needs macOS sandbox-exec")
+    for item in items:
+        if "sandbox" in item.keywords:
+            item.add_marker(skip)
