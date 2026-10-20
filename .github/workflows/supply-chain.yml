@@ -1,0 +1,29 @@
+name: Supply chain
+
+# Audit the locked dependency set against the PyPI advisory database (pip-audit).
+# nexus-certify is a git dependency (James's own nexus-core, reviewed in-repo, not a
+# PyPI package) and cannot be hashed or looked up, so it is excluded from the audit.
+# A new, non-required check.
+on:
+  pull_request:
+    paths: ["uv.lock", "pyproject.toml", ".github/workflows/supply-chain.yml"]
+  push:
+    branches: [main]
+    paths: ["uv.lock", "pyproject.toml"]
+  schedule:
+    - cron: "17 5 * * *"  # daily, to catch newly disclosed CVEs in pinned deps
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Export the locked PyPI dependencies
+        run: uv export --frozen --no-emit-project --no-emit-package nexus-certify --no-hashes -o requirements.txt
+      - name: Audit against the advisory database
+        run: uvx pip-audit -r requirements.txt --strict
