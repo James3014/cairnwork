@@ -7,17 +7,23 @@ verifiers run as ``cairnwork-verifier`` (created by scripts/setup_verifier_user.
     sudo -n -u cairnwork-verifier -- /usr/bin/sandbox-exec -f <profile>
          /usr/bin/env -i <scrubbed environment> <python> -P -m pytest ...
 
-The sudoers rule allows only sandbox-exec, kill and rm as that account. Because
-every verifier process belongs to that account, cleanup is simple and complete:
-after each run ``kill -9 -1`` as the account ends all of them, including anything
-that started its own session. That is only safe if one verifier runs at a time,
-so runs take an exclusive lock on the account's run root.
+The sudoers rule lets the owner run sandbox-exec, kill and rm as that account.
+sandbox-exec takes any profile, so in effect any process running as the owner can
+run code as the account, unsandboxed: the account protects the owner from the
+verifier, not the other way round. The account has no privileges of its own.
+
+Every verifier process belongs to that account, so after each run ``kill -9 -1``
+as the account ends all of them, including anything that started its own
+session; any process found then fails the run. That is only safe if one verifier
+runs at a time, so runs hold an exclusive lock, and each locked section starts by
+making sure the account runs nothing.
 """
 
 from __future__ import annotations
 
 import fcntl
 import os
+import pwd
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -50,15 +56,25 @@ class VerifierAccount:
         return str(self.root / "venv" / "bin" / "python")
 
     def available(self) -> bool:
-        """The account exists, sudo works without a password, and the shared Python runs."""
-        probe = self.wrap(["/usr/bin/true"], None)
+        """The account is a separate, non-root user, sudo works without a password,
+        and the shared Python runs pytest as that user.
+
+        It starts a process as the account, so call it while holding exclusive().
+        """
+        try:
+            uid = pwd.getpwnam(self.user).pw_uid
+        except KeyError:
+            return False
+        if uid in (0, os.getuid()):
+            return False  # kill -9 -1 as root or as the owner would be destructive
+        probe = self.wrap([self.python, "-P", "-c", "import pytest"], None)
         try:
             done = subprocess.run(  # noqa: S603 - fixed argv
-                probe, capture_output=True, timeout=20, check=False, cwd=self.root
+                probe, capture_output=True, timeout=60, check=False, cwd=self.root
             )
         except (OSError, subprocess.SubprocessError):
             return False
-        return done.returncode == 0 and os.access(self.python, os.F_OK)
+        return done.returncode == 0
 
     def wrap(self, argv: list[str], profile: Path | None, env: dict[str, str] | None = None):
         """sudo -> sandbox-exec -> env -i -> argv (profile None: an allow-all probe)."""
@@ -74,7 +90,7 @@ class VerifierAccount:
         """How many processes the account is running (-1: cannot tell)."""
         try:
             done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", "-U", self.user, "-o", "pid="],
+                ["/bin/ps", "-x", "-U", self.user, "-o", "pid="],
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -82,8 +98,8 @@ class VerifierAccount:
             )
         except (OSError, subprocess.SubprocessError):
             return -1
-        if done.returncode not in (0, 1):  # ps exits 1 when no process matched
-            return -1
+        if done.returncode not in (0, 1) or done.stderr.strip():  # 1: nothing matched
+            return -1  # e.g. an unknown user, which ps also reports with exit 1
         return len(done.stdout.split())
 
     def reap(self) -> int:
@@ -92,19 +108,37 @@ class VerifierAccount:
         Unknown counts, or a process that outlived the kill, count as one more, so a
         caller never mistakes "cannot tell" for "nothing escaped".
         """
-        before = self.count()
-        left = self.kill_all()
+        try:
+            before = self.count()
+            left = self.kill_all()
+        except (OSError, subprocess.SubprocessError):
+            return 1
         return max(before, 0) + (1 if before < 0 or left != 0 else 0)
 
-    def kill_all(self) -> int:
-        """SIGKILL every process of the account; return how many are left (-1: unknown)."""
-        subprocess.run(  # noqa: S603 - fixed argv
-            [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
-            capture_output=True,
-            timeout=20,
-            check=False,
-        )
-        return self.count()
+    def kill_all(self, attempts: int = 5) -> int:
+        """SIGKILL every process of the account; return how many are left (-1: unknown).
+
+        Repeated a few times: a process that forks while the signal is delivered
+        can leave a child behind.
+        """
+        left = -1
+        for _ in range(attempts):
+            subprocess.run(  # noqa: S603 - fixed argv
+                [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            left = self.count()
+            if left == 0:
+                break
+        return left
+
+    def require_idle(self) -> None:
+        """Before a locked section: end anything a dead or failed run left behind."""
+        left = self.kill_all()
+        if left != 0:
+            raise VerifierAccountError(f"account {self.user} still runs processes ({left})")
 
     def remove(self, path: Path) -> None:
         """Remove files the account created (the owner cannot), only inside its run root."""
@@ -120,7 +154,10 @@ class VerifierAccount:
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
-        """One verifier at a time: kill_all() would otherwise end another run's processes."""
+        """One verifier at a time: kill_all() would otherwise end another run's processes.
+
+        Not reentrant: flock locks per open file, so a nested call blocks forever.
+        """
         fd = os.open(self.root / ".verifier.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)

@@ -49,6 +49,7 @@
 - verifier 的 sandbox：已用 macOS Seatbelt 封裝，預設全部拒絕，禁止連網，只能讀系統、Python 和 checkout，只能寫 checkout 和這次執行的目錄。缺少 sandbox-exec 時直接判失敗。每一種攻擊都有見證測試（`tests/test_sandbox.py`），macOS CI 一定會實際執行，不能跳過。**還沒解決的**：
   - 候選程式碼和 pytest 在同一個程序裡，仍然可以偽造報告。
   - sandbox 裡的程式可以用 sysctl `KERN_PROCARGS2` 讀到同一個使用者底下其他程序的參數和環境變數，裡面可能有 token。Seatbelt 規則擋不住。**已用專屬帳號解決（Issue #9）**：傳入 `VerifierAccount` 時，verifier 以 `cairnwork-verifier` 身分執行，macOS 不允許跨使用者讀取這些參數，見證測試在 `tests/test_verifier_account.py`。沒有傳入帳號時（例如 Linux）缺口仍在，所以 verifier 的 log 一律不交給 worker 或模型。
-  - 自己開新 session、又清掉環境變數的子程序：帳號模式下，執行結束後會以該帳號執行 `kill -9 -1` 清掉它的所有程序，有任何殘留就判失敗；沒有帳號時仍然躲得過清除。帳號模式一次只能跑一個 verifier（獨占鎖）。
+  - 自己開新 session、又清掉環境變數的子程序：帳號模式下，執行結束後會以該帳號執行 `kill -9 -1` 清掉它的所有程序，有任何殘留就判失敗；沒有帳號時仍然躲得過清除。帳號模式一次只能跑一個 verifier（獨占鎖）。每次開跑前，也會先確認該帳號底下沒有任何程序。
+  - 專屬帳號保護的是擁有者不被 verifier 讀取，反方向不成立：sudoers 允許擁有者以該帳號執行任意 profile 的 sandbox-exec，所以任何以擁有者身分執行的程序，都能以該帳號執行程式碼。該帳號本身沒有任何特權，不能用來提升權限。
   - Seatbelt 只能用在 macOS，不是可以移植的正式 sandbox。
 - Gateway 怎麼把一類任務轉給 Cairnwork：介面和認證由部署器負責人和整合負責人另外訂，F 條的「先驗證、晚切換」照做。

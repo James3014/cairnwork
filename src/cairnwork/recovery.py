@@ -53,7 +53,7 @@ def recover(
     with runlock.held(ledger.path, exclusive=True):
         if verifier_account is not None:
             with verifier_account.exclusive():
-                verifier_account.kill_all()  # a dead run's verifier runs as that account
+                verifier_account.require_idle()  # a dead run's verifier ran as that account
         for record in ledger.in_flight():
             try:
                 decisions.append(_settle(record, ledger, notary, journal, run_root))

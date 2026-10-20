@@ -41,6 +41,8 @@ FILES = {
 
 # Run verifiers as the dedicated account when it is set up (Issue #9).
 ACCOUNT = VerifierAccount() if VerifierAccount().available() else None
+if ACCOUNT is None:
+    print("WARNING: verifier account not set up; verifiers run as the owner", file=sys.stderr)
 
 
 def git(repo: Path, *args: str) -> str:

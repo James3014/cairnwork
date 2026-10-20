@@ -47,9 +47,11 @@ def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, b
             timed_out = True
         # Another account's processes: the owner cannot signal them; reap() kills them
         # all and says how many were running (the main one, if it timed out, included).
-        escaped = reap() if reap is not None else 0
-        _kill_group(process.pid)
-        process.wait()
+        try:
+            escaped = reap() if reap is not None else 0
+        finally:
+            _kill_group(process.pid)
+            process.wait()
         survivors = _sweep_survivors(token, process.pid) + escaped
         copier.join(timeout=10)  # a descendant that escaped the group may hold the pipe
         process.stdout.close()

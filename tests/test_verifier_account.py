@@ -97,17 +97,34 @@ def test_owner_process_arguments_are_not_readable(project, monkeypatch):
     assert result.observation.passed, result.log_path.read_text()
 
 
-def test_owner_home_is_not_readable(project, monkeypatch):
-    monkeypatch.setenv("CW_HOME_FILE", os.path.expanduser("~/.zshrc"))
+def test_owner_only_files_are_not_readable_where_the_sandbox_allows_reading(project, monkeypatch):
+    # The shared venv is inside the sandbox's read roots, so only the uid can stop a read.
+    tag = os.urandom(4).hex()
+    private = ACCOUNT.root / "venv" / f"cw-owner-only-{tag}"
+    shared = ACCOUNT.root / "venv" / f"cw-group-{tag}"
+    for path, mode in ((private, 0o600), (shared, 0o640)):
+        path.write_text("x")
+        os.chmod(path, mode)
+    monkeypatch.setenv("CW_PRIVATE", str(private))
+    monkeypatch.setenv("CW_SHARED", str(shared))
     code = (
         "import os, pytest\n"
-        "def test_home():\n"
+        "def test_read():\n"
+        "    assert open(os.environ['CW_SHARED']).read() == 'x'\n"
         "    with pytest.raises(PermissionError):\n"
-        "        open(os.environ['CW_HOME_FILE']).read()\n"
+        "        open(os.environ['CW_PRIVATE']).read()\n"
     )
-    result = verify(
-        project, {"tests/test_home.py": code}, "tests/test_home.py", monkeypatch, ("CW_HOME_FILE",)
-    )
+    try:
+        result = verify(
+            project,
+            {"tests/test_read.py": code},
+            "tests/test_read.py",
+            monkeypatch,
+            ("CW_PRIVATE", "CW_SHARED"),
+        )
+    finally:
+        private.unlink()
+        shared.unlink()
     assert result.observation.passed, result.log_path.read_text()
 
 
@@ -171,3 +188,28 @@ def test_recovery_kills_what_a_dead_run_left_as_the_account(tmp_path):
     )
     assert ACCOUNT.count() == 0
     orphan.wait(timeout=10)
+
+
+def test_a_left_over_process_is_ended_before_the_next_run(project):
+    orphan = subprocess.Popen(
+        ACCOUNT.wrap([ACCOUNT.python, "-P", "-c", "import time; time.sleep(60)"], None),
+        cwd=ACCOUNT.root,
+        start_new_session=True,
+    )
+    for _ in range(50):
+        if ACCOUNT.count() > 0:
+            break
+        time.sleep(0.1)
+    result = verify(project, None, "tests/test_ok.py")
+    assert result.observation.passed, result.log_path.read_text()  # not blamed on this run
+    assert orphan.wait(timeout=10) != 0
+
+
+def test_the_owner_itself_is_not_a_usable_account():
+    import pwd
+
+    assert not VerifierAccount(user=pwd.getpwuid(os.getuid()).pw_name).available()
+
+
+def test_an_unknown_account_count_is_unknown_not_zero():
+    assert VerifierAccount(user="cairnwork-no-such-user").count() == -1

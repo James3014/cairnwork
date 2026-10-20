@@ -31,9 +31,9 @@ directory; a pass is evidence, not proof.
 Known gap: Seatbelt does not stop a sandboxed process from reading other
 processes' arguments and environment (sysctl KERN_PROCARGS2) when they run as
 the same user, so tokens in other processes' environments are readable and could
-be printed into the verifier log. Passing a VerifierAccount closes that (the
-verifier runs as another uid) and kills every process the account still runs
-after each verifier, so nothing escapes. Without one, a process that leaves the
+be printed into the verifier log. A VerifierAccount closes that (another uid);
+any process the account still runs after a verifier is killed and fails the run,
+and none may run before the next one. Without one, a process that leaves the
 run's process group is killed only if it still carries the run token in its
 environment. Either way, never pass raw verifier logs to a worker or a model.
 Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
@@ -150,10 +150,11 @@ def run_verifiers(
     (verifier_account.py), in its run root and with its Python, one at a time.
     """
     if account is not None:
-        if not account.available():
-            raise VerifierAccountError(f"account {account.user} is not usable")
         run_root, python = account.run_root, account.python
         with account.exclusive():
+            if not account.available():
+                raise VerifierAccountError(f"account {account.user} is not usable")
+            account.require_idle()
             return _run_all(
                 repo,
                 candidate_commit,
