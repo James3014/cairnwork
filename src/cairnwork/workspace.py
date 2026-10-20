@@ -111,21 +111,27 @@ def create_attempt_clone(repo: Path, base_commit: str, root: Path, attempt_id: s
 def _restrict_to_base_history(path: Path, base_commit: str) -> None:
     """Leave the worker only base's history. ``git clone`` copies every object and keeps
     a branch at the source tip, so when base is not that tip a worker can read a later
-    "answer" commit with ``git log``/``git show`` (preserved behavior #11). Delete every
-    ref, expire reflogs, drop unreachable objects, and fail closed if any commit outside
-    base's history survives. The detached HEAD keeps base reachable, so the fetch-back in
-    ``collect_candidate`` still works."""
+    "answer" commit — or a tag or blob with the answer — with ``git log``/``git show``
+    /``git cat-file`` (preserved behavior #11). Delete every ref, expire reflogs, and drop
+    unreachable objects (``gc.bigPackThreshold=0`` so a large pack is not kept), then fail
+    closed if ANY object — commit, tree, blob or tag — outside base's history survives.
+    The gc runs with the operator's global/system config ignored, so a configured
+    ``gc.recentObjectsHook`` command cannot run. The detached HEAD keeps base reachable,
+    so the fetch-back in ``collect_candidate`` still works."""
     for ref in run_git(path, "for-each-ref", "--format=%(refname)").splitlines():
         run_git(path, "update-ref", "-d", ref)
-    run_git(path, "reflog", "expire", "--expire=now", "--all")
-    run_git(path, "gc", "--prune=now", "--quiet")
-    history = set(run_git(path, "rev-list", base_commit).split())
-    objects = run_git(
-        path, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)"
+    run_git(path, "reflog", "expire", "--expire=now", "--all", isolate_config=True)
+    run_git(
+        path, "-c", "gc.bigPackThreshold=0", "gc", "--prune=now", "--quiet", isolate_config=True
     )
-    commits = {line.split()[1] for line in objects.splitlines() if line.startswith("commit ")}
-    if commits - history:
-        raise WorkspaceError(f"{path} still holds commits outside base history")
+    reachable = {
+        line.split()[0] for line in run_git(path, "rev-list", "--objects", base_commit).splitlines()
+    }
+    present = run_git(
+        path, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"
+    ).split()
+    if set(present) - reachable:
+        raise WorkspaceError(f"{path} still holds objects outside base history")
 
 
 def remove_attempt_clone(root: Path, attempt_id: str) -> None:
