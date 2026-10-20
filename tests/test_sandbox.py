@@ -242,3 +242,17 @@ def test_python_must_be_an_absolute_path(project, tmp_path):
         run_verifiers(
             project, git(project, "rev-parse", "HEAD"), (spec,), tmp_path, "r1", python="python3"
         )
+
+
+def test_tests_can_run_git(project, tmp_path):
+    """/usr/bin/git is an xcrun shim that loads its tools from the developer directory;
+    a test that runs git must work inside the sandbox (Nexus-new #2769 pilot)."""
+    code = (
+        "import subprocess\n"
+        "def test_git(tmp_path):\n"
+        "    for argv in (['git', '--version'], ['git', 'init', '-q']):\n"
+        "        done = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)\n"
+        "        assert done.returncode == 0, done.stderr\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_git.py": code}, "tests/test_git.py")
+    assert result.observation.passed, result.log_path.read_text()

@@ -103,6 +103,24 @@ def sbpl_path(path: Path | str) -> str:
     return real
 
 
+@lru_cache(maxsize=1)
+def developer_dirs() -> tuple[str, ...]:
+    """The active developer directory (read-only): /usr/bin/git and friends are xcrun
+    shims that load their tools from it, so without it no test can run git."""
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10,
+            check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    real = os.path.realpath(done.stdout.strip()) if done.returncode == 0 else ""
+    allowed = ("/Library/Developer/", "/Applications/Xcode")
+    if not real.startswith(allowed) or not os.path.isdir(real) or not _SAFE.fullmatch(real):
+        return ()
+    return (real,)
+
+
 def build_profile(
     read_roots: tuple[Path, ...], write_roots: tuple[Path, ...], home: Path | None = None
 ) -> Profile:
@@ -124,6 +142,7 @@ def build_profile(
         "(allow file-read*",
         *[f'  (subpath "{p}")' for p in SYSTEM_READ_SUBPATHS],
         *[f'  (literal "{p}")' for p in SYSTEM_READ_LITERALS],
+        *[f'  (subpath "{p}")' for p in developer_dirs()],
         *[f"  {rule}" for rule in reads],
         ")",
         "(allow file-write*",

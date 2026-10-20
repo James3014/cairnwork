@@ -142,19 +142,19 @@ class _Run:
         }
 
 
-PATHS = ("tests/test_regression.py",)
+TARGETS = frozenset({"tests/test_regression.py::t"})  # the new test of the test commit
 
 
 def test_teeth_need_a_failing_case_from_the_deferred_files(tmp_path):
-    assert dt.failed_on_base([_Run(tmp_path, "a", 1, {"tests.test_regression"})], PATHS)
+    assert dt.failed_on_base([_Run(tmp_path, "a", 1, {"tests.test_regression"})], TARGETS)
     # another file failing does not count, even with exit 1
-    assert not dt.failed_on_base([_Run(tmp_path, "b", 1, {"tests.test_other"})], PATHS)
+    assert not dt.failed_on_base([_Run(tmp_path, "b", 1, {"tests.test_other"})], TARGETS)
     # passing everywhere, or a verifier breaking otherwise, does not count
-    assert not dt.failed_on_base([_Run(tmp_path, "c", 0)], PATHS)
+    assert not dt.failed_on_base([_Run(tmp_path, "c", 0)], TARGETS)
     assert not dt.failed_on_base(
-        [_Run(tmp_path, "d", 1, {"tests.test_regression"}), _Run(tmp_path, "e", 2)], PATHS
+        [_Run(tmp_path, "d", 1, {"tests.test_regression"}), _Run(tmp_path, "e", 2)], TARGETS
     )
-    assert not dt.failed_on_base([_Run(tmp_path, "f", None)], PATHS)
+    assert not dt.failed_on_base([_Run(tmp_path, "f", None)], TARGETS)
 
 
 class ScanningWorker(EditWorker):
@@ -204,3 +204,46 @@ def test_a_retry_with_the_same_test_commit_is_refused(project, tmp_path):
 
 # an oversized or forged verdict file is rejected by report_guard.read_verdict
 # (see tests/test_report_guard.py); failed_on_base works on the trusted outcomes.
+
+
+def test_teeth_count_only_the_new_tests_and_ignore_parameters(tmp_path):
+    run = _Run(tmp_path, "p", 1)
+    run.outcomes = {
+        "tests/test_regression.py::t_old": "failed",  # failed on the base already (env)
+        "tests/test_regression.py::t[case-1]": "failed",
+    }
+    assert dt.failed_on_base([run], TARGETS)
+    run.outcomes = {"tests/test_regression.py::t_old": "failed"}
+    assert not dt.failed_on_base([run], TARGETS)
+
+
+SAME = "def test_same():\n    pass\n"
+
+
+def test_new_tests_are_the_added_or_changed_test_functions(project):
+    git(project, "checkout", "-q", "-b", "base-tests")
+    commit_change(
+        project,
+        {"tests/test_regression.py": "def test_old():\n    assert 1\n\n" + SAME},
+    )
+    base = git(project, "rev-parse", "HEAD")
+    test_commit = commit_change(
+        project,
+        {
+            "tests/test_regression.py": (
+                "def test_old():\n    assert 2\n\n" + SAME + "\n"
+                "def test_new():\n    pass\n\n"
+                "class TestThing:\n    def test_m(self):\n        pass\n"
+            ),
+            "tests/test_fresh.py": "def test_fresh():\n    pass\n",
+        },
+    )
+    found = dt.new_tests(
+        project, base, test_commit, ("tests/test_regression.py", "tests/test_fresh.py")
+    )
+    assert found == {
+        "tests/test_regression.py::test_old",  # changed
+        "tests/test_regression.py::test_new",  # added
+        "tests/test_regression.py::TestThing::test_m",
+        "tests/test_fresh.py::test_fresh",  # in a new file
+    }

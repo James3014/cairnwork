@@ -33,6 +33,7 @@ from cairnwork.deferred_tests import (
     failed_on_base,
     lay_tests_over,
     never_seen,
+    new_tests,
     test_paths,
 )
 from cairnwork.gitcmd import OID
@@ -255,7 +256,7 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
         python=verifying[1],
         base_commit=task.base_commit,
     )
-    teeth = failed_on_base(runs, paths)
+    teeth = failed_on_base(runs, new_tests(task.repo, task.base_commit, task.test_commit, paths))
     for run in runs:  # not evidence for Core; would show the tests to later workers
         shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
     if not teeth:
