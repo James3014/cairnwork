@@ -83,7 +83,7 @@ def test_run_git_isolate_config_ignores_operator_global_config(repo, tmp_path, m
 def test_restriction_handles_unusual_historical_filenames(repo, tmp_path):
     """A path in base's history that contains a Unicode line separator (U+2028) must not
     break the object-closure parse; --no-object-names keeps parsing on object ids only."""
-    weird = "dir/a b.txt"  # valid filename bytes; U+2028 is a splitlines() separator
+    weird = "dir/a  b.txt"  # valid filename bytes; U+2028 is a splitlines() separator
     (repo / "dir").mkdir()
     (repo / weird).write_text("gone\n")
     git(repo, "add", "-A")
