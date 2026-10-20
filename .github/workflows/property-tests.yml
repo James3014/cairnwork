@@ -1,0 +1,22 @@
+name: Property tests
+
+# Hypothesis state-machine tests for the core invariants (ownership ledger, ...).
+# A new, non-required check (per integration owner); mutmut runs on demand, not here.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hypothesis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - run: uv run python -m pytest tests/property -q
