@@ -213,3 +213,12 @@ def test_the_owner_itself_is_not_a_usable_account():
 
 def test_an_unknown_account_count_is_unknown_not_zero():
     assert VerifierAccount(user="cairnwork-no-such-user").count() == -1
+
+
+def test_a_strict_caller_umask_does_not_break_the_account_run(project):
+    old = os.umask(0o077)  # e.g. a Gateway service started with umask 077
+    try:
+        result = verify(project, None, "tests/test_ok.py")
+    finally:
+        os.umask(old)
+    assert result.observation.passed, result.log_path.read_text()

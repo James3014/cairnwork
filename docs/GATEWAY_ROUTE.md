@@ -14,11 +14,16 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 | `cancel --task-id ID` | 只能取消還沒開始的任務；已經在跑的會跑完 | `{"task_id", "status": "CANCELLED"}` |
 | `in-flight` | 給部署器的靜止閘門用 | `{"accepting", "count", "task_ids"}` |
 | `accept`／`drain` | 打開／關閉接新任務（**預設是關閉**） | `{"accepting": bool}` |
-| `recover` | 重開機後執行，處理中斷的任務，不會重跑；有執行程序還在跑時會拒絕 | `{"decisions": [...]}` |
+| `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1 | `{"decisions": [...]}` |
 
-所有指令都要加 `--state <目錄>`。目錄只有擁有者能讀寫，存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`，預設使用專屬 verifier 帳號）。
+所有指令都要加 `--state <目錄>`。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。不要用 umask 077 啟動 Cairnwork：verifier 帳號需要讀取 checkout。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。
 
-**Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`）；3 查不到這個任務（`UNKNOWN_TASK`）；1 其他錯誤。**1 和 3 一律當作「不知道」**，不可以當作失敗而改派給別的系統。
+**Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`BAD_CONFIG`、`BAD_STATE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`、`DuplicateLogicalTask`）；3 查不到這個任務（`UNKNOWN_TASK`）；1 其他錯誤。
+
+- **只有 `NOT_ACCEPTING` 代表「沒有收下，原系統可以接手」**。其他任何回答之後，都不可以把這筆任務交給別的系統。
+- 1 和 3 一律當作「不知道」，不是「失敗」。
+- 判斷任務完成只看 `status == "COMPLETED"`。`core_verified` 只是補充資訊。
+- `check` 只檢查請求格式，不檢查 repo 或 base commit 是否存在，所以 `would_accept: true` 之後的 `submit` 仍然可能失敗。
 
 **請求格式**（封閉格式，多一個欄位或少一個欄位都會拒絕）：
 
@@ -35,14 +40,19 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 
 **保證**：
 
-- 綁定（冪等鍵、請求摘要、所屬系統 `cairnwork`、task_id）是一筆原子的 SQLite 交易，而且在開始執行之前完成。
+- 綁定（冪等鍵、請求摘要（含 repo 路徑）、所屬系統 `cairnwork`、task_id）是一筆原子的 SQLite 交易，而且在開始執行之前完成。
+- 「是否接受新任務」的檢查和綁定在同一把 intake 鎖裡進行，`drain` 也要拿這把鎖。所以 `drain` 一回傳，之前已經通過檢查的交件都已經綁定完成，並且算進 `in-flight`；之後的交件一律拒絕。
+- 取消是 compare-and-set：只有在任務仍是 BOUND 時才會成功。執行程序先開始的話，取消會被拒絕，任務照常跑完。
 - 交件時持有 run lock，再把它交給背景執行程序，所以從綁定到執行結束，復原都不能插手。執行程序死掉時，kernel 會放掉鎖，之後由 `recover` 判定 FAILED，不會重跑。
 - 只有 Core 對這個候選 commit 判定 VERIFIED，任務才算 COMPLETED。
 
 **見證**：
 
 - 自動測試：`tests/test_route.py`（透過子程序實際呼叫指令，搭配真的 Core）、`tests/test_intake.py`（鎖交接、取消、請求不符）。
-- 真實執行：2026-10-20 用真的 agy，verifier 以專屬帳號執行。從交件到 COMPLETED 花 35 秒，Core VERIFIED。關閉接新任務（drain）後重送，拿回的是同一個任務，在途任務數為 0。見 `docs/drills/2026-10-20-route.json`。
+- 真實執行（2026-10-20，兩次；真的 agy，verifier 以專屬帳號執行）：
+  - 第 1 次從交件到 COMPLETED 花 35 秒，Core VERIFIED。drain 後重送，拿回的是同一個任務，在途任務數為 0。
+  - 第 2 次在審查修正之後執行，呼叫端 umask 設為 077，花 29 秒，Core VERIFIED。drain 後用新的冪等鍵交件，回 `NOT_ACCEPTING`。
+  - 見 `docs/drills/2026-10-20-route.json`。
 
 ## Gateway 這一端（還沒做；由 Gateway／部署器負責人決定誰改）
 
@@ -54,6 +64,7 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 3. **失敗時不換系統**：
    - `submit` 回 `NOT_ACCEPTING` 時，這筆任務還沒綁定，照舊走原系統。這是回退後的正常路徑，不算換系統重跑。
    - 一旦拿到 Cairnwork 的 task_id，之後任何錯誤都只回報，不得再交給 SelfHostedTaskService。
+   - `submit` 逾時的話，要等那個程序真的結束（必要時 kill 並等它退出），再用同一個冪等鍵重送或查詢。不可以丟下不管就改走原系統：它可能已經綁定了。
 4. **部署器的靜止閘門**：在 `tasks_in_flight` 的探測裡加上 `cairnwork-route in-flight`。`count > 0`、或指令出錯，都視為「有在途任務」（fail closed）。部署器的程式碼是受保護路徑，要另開一張 PR。
 5. **環境變數**：Cairnwork 開關、`cairnwork-route` 的絕對路徑、state 目錄這三個，要加進部署器和 `mcp_gateway_durable.py` 的白名單。
 6. **影子階段**：開關有第三個值「影子」，只呼叫 `check` 並記錄結果，不轉送任何任務（F 條：影子驗證不得產生外部副作用）。

@@ -2,8 +2,10 @@
 
 Every command prints one JSON object on stdout. Exit codes: 0 done; 2 refused
 (``{"error": code, "detail": ...}``: not accepting, bad request, not cancellable,
-recovery busy); 3 unknown task (the caller must stop, not guess another owner);
-1 anything else (treat as "unknown", never as success).
+recovery busy, key reused, card already active); 3 unknown task; 1 anything else,
+including a recovery that could not settle every task. Only NOT_ACCEPTING means
+"not taken, the old system may run it"; after any other answer the caller must
+not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
 
     cairnwork-route --state DIR check < request.json   # shadow mode: validate only
     cairnwork-route --state DIR submit < request.json
@@ -23,7 +25,12 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
-from cairnwork.ownership import OwnershipError, OwnershipUnknown
+from cairnwork.ownership import (
+    DuplicateLogicalTask,
+    KeyReusedWithDifferentRequest,
+    OwnerMismatch,
+    OwnershipUnknown,
+)
 from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
@@ -43,11 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except RunLockBusy as exc:
         return _emit({"error": exc.code, "detail": "a runner is still working"}, 2)
-    except OwnershipError as exc:
+    except (KeyReusedWithDifferentRequest, DuplicateLogicalTask, OwnerMismatch) as exc:
         return _emit({"error": type(exc).__name__, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
-    return _emit(result, 0)
+    stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
+    return _emit(result, 1 if stuck else 0)
 
 
 def _dispatch(intake: Intake, args) -> Any:

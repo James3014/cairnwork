@@ -69,6 +69,7 @@ class TaskSpec:
 
     def request(self) -> dict:
         return {
+            "repo": str(self.repo),
             "title": self.title,
             "instructions": self.instructions,
             "base_commit": self.base_commit,

@@ -152,6 +152,25 @@ class VerifierAccount:
             check=False,
         )
 
+    @staticmethod
+    def share_run(private: Path, ini: Path, run_dir: Path, home: Path, tmp: Path) -> None:
+        """Let the account (group cairnwork) enter the run dir and read the ini, and
+        write only its run/ scratch. The log stays owner-only."""
+        os.chmod(private, 0o750)
+        os.chmod(ini, 0o640)
+        for directory in (run_dir, home, tmp):
+            os.chmod(directory, 0o2770)
+
+    @staticmethod
+    def grant_read(root: Path) -> None:
+        """Let the account read, never write, a checkout, whatever the umask was."""
+        for top, dirs, files in os.walk(root):
+            for name, bits in [(d, 0o050) for d in dirs] + [(f, 0o040) for f in files]:
+                path = os.path.join(top, name)
+                if not os.path.islink(path):
+                    os.chmod(path, os.stat(path).st_mode | bits)
+        os.chmod(root, os.stat(root).st_mode | 0o050)
+
     @contextmanager
     def exclusive(self) -> Iterator[None]:
         """One verifier at a time: kill_all() would otherwise end another run's processes.

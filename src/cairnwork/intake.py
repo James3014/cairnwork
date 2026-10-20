@@ -21,10 +21,14 @@ nothing is re-run in another system.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +36,7 @@ from typing import Any
 from cairnwork import runlock
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import OwnershipLedger, OwnershipUnknown
+from cairnwork.ownership import InvalidStatusTransition, OwnershipLedger, OwnershipUnknown
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.verifier_account import VerifierAccount
 
@@ -130,23 +134,49 @@ class Intake:
         return (self.state / "ACCEPTING").exists()
 
     def set_accepting(self, on: bool) -> None:
+        """Under the intake lock: once drain returns, no submit that checked the flag
+        before it can still bind (each submit holds the lock from check to bind)."""
+        with self._intake_lock():
+            if on:
+                (self.state / "ACCEPTING").touch(mode=0o600)
+            else:
+                (self.state / "ACCEPTING").unlink(missing_ok=True)
+
+    def prepare(self) -> None:
+        """Create the state directory owner-only, or refuse one anyone else can use."""
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if on:
-            (self.state / "ACCEPTING").touch(mode=0o600)
-        else:
-            (self.state / "ACCEPTING").unlink(missing_ok=True)
+        info = self.state.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise IntakeRefused("BAD_STATE", f"{self.state} is not a directory owned by us")
+        if info.st_mode & 0o077:
+            raise IntakeRefused("BAD_STATE", f"{self.state} must be mode 0700")
+        for name in ("requests", "runs"):
+            (self.state / name).mkdir(mode=0o700, exist_ok=True)
+
+    @contextmanager
+    def _intake_lock(self) -> Iterator[None]:
+        self.prepare()
+        fd = os.open(self.state / "intake.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def submit(self, payload: Any) -> dict[str, Any]:
         task = task_from_payload(payload)
         check_task(task)
+        self.config()  # a bad config is refused here, not left to the runner
+        with self._intake_lock():
+            return self._bind_and_start(task, payload)
+
+    def _bind_and_start(self, task: TaskSpec, payload: dict[str, Any]) -> dict[str, Any]:
         ledger = self.ledger
         if not self.accepting():
             try:
                 ledger.get(idempotency_key=task.idempotency_key)
             except OwnershipUnknown as exc:
                 raise IntakeRefused("NOT_ACCEPTING", "Cairnwork takes no new tasks") from exc
-        for directory in (self.state, self.state / "requests", self.run_root):
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = runlock.shared_fd(ledger.path)
         try:
             bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
@@ -223,13 +253,20 @@ class Intake:
         }
 
     def cancel(self, task_id: str) -> dict[str, Any]:
-        """Only a task that has not started can be cancelled; a running one finishes."""
-        record = self.ledger.get(task_id=task_id)
-        if record.status != "BOUND":
-            raise IntakeRefused("NOT_CANCELLABLE", f"{task_id} is {record.status}")
-        return {"task_id": task_id, "status": self.ledger.set_status(task_id, "CANCELLED").status}
+        """Only a task that has not started can be cancelled; a running one finishes.
+        Compare-and-set: a runner that dispatched first wins, cancel is refused."""
+        ledger = self.ledger
+        ledger.get(task_id=task_id)  # UnknownTask before anything else
+        try:
+            record = ledger.set_status(task_id, "CANCELLED", expected_from="BOUND")
+        except InvalidStatusTransition as exc:
+            raise IntakeRefused("NOT_CANCELLABLE", str(exc)) from exc
+        return {"task_id": task_id, "status": record.status}
 
     def in_flight(self) -> dict[str, Any]:
+        """A missing state directory is an error, not "nothing in flight" (fail closed)."""
+        if not self.state.is_dir():
+            raise IntakeRefused("BAD_STATE", f"{self.state} does not exist")
         records = self.ledger.in_flight() if (self.state / "ownership.sqlite").exists() else []
         return {
             "accepting": self.accepting(),

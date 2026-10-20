@@ -212,8 +212,14 @@ class OwnershipLedger:
             conn.close()
         return [OwnershipRecord(*row) for row in rows]
 
-    def set_status(self, task_id: str, status: str) -> OwnershipRecord:
-        """Move a task along TRANSITIONS; the owner of a task can never change."""
+    def set_status(
+        self, task_id: str, status: str, *, expected_from: str | None = None
+    ) -> OwnershipRecord:
+        """Move a task along TRANSITIONS; the owner of a task can never change.
+
+        expected_from makes it a compare-and-set: the move happens only if the task
+        is in that status in the same transaction (else InvalidStatusTransition).
+        """
         if status not in TRANSITIONS:
             raise InvalidOwnershipValue(f"status {status!r}")
         conn = self._connect()
@@ -222,6 +228,8 @@ class OwnershipLedger:
             current = _select(conn, "task_id", task_id)
             if current is None:
                 raise OwnershipUnknown(task_id)
+            if expected_from is not None and current.status != expected_from:
+                raise InvalidStatusTransition(f"{current.status} is not {expected_from}")
             if status not in TRANSITIONS.get(current.status, frozenset()):
                 raise InvalidStatusTransition(f"{current.status} -> {status}")
             conn.execute(

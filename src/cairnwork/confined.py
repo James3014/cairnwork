@@ -150,6 +150,9 @@ def _kill_group(pgid: int) -> None:
 
 
 def _limit_file_size() -> None:
-    """In the child: no file it writes (log, report, scratch) may exceed the caps."""
+    """In the child: no file it writes (log, report, scratch) may exceed the caps, and
+    the files it creates are group-readable whatever the caller's umask (the report
+    of a verifier that runs as another account must be readable by the owner)."""
+    os.umask(0o022)
     limit = MAX_LOG_BYTES + MAX_REPORT_BYTES
     resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
