@@ -189,19 +189,25 @@ class Intake:
         task = task_from_payload(payload)
         check_task(task)
         mirror = self.config()["mirror"]  # a bad config is refused here, not by the runner
-        if mirror:
-            payload = {**payload, "repo": _mirror_base(Path(mirror), task.repo, task.base_commit)}
+        source = task.repo
+        if mirror:  # the task is bound to Cairnwork's own repository, whatever the caller's
+            if not Path(mirror).is_dir():
+                raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
+            payload = {**payload, "repo": mirror}
             task = task_from_payload(payload)
         with self._intake_lock():
-            return self._bind_and_start(task, payload)
+            return self._bind_and_start(task, payload, source)
 
-    def _bind_and_start(self, task: TaskSpec, payload: dict[str, Any]) -> dict[str, Any]:
+    def _bind_and_start(self, task: TaskSpec, payload: dict[str, Any], source: Path):
         ledger = self.ledger
-        if not self.accepting():
-            try:
-                ledger.get(idempotency_key=task.idempotency_key)
-            except OwnershipUnknown as exc:
-                raise IntakeRefused("NOT_ACCEPTING", "Cairnwork takes no new tasks") from exc
+        try:
+            known = ledger.get(idempotency_key=task.idempotency_key)
+        except OwnershipUnknown:
+            known = None
+        if known is None and not self.accepting():
+            raise IntakeRefused("NOT_ACCEPTING", "Cairnwork takes no new tasks")
+        if known is None and source.resolve() != task.repo.resolve():
+            _mirror_base(task.repo, source, task.base_commit)  # new work only, under the lock
         fd = runlock.shared_fd(ledger.path)
         try:
             bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
@@ -300,13 +306,13 @@ class Intake:
         }
 
 
-def _mirror_base(mirror: Path, source: Path, base: str) -> str:
-    """Fetch base from source into mirror (created bare if missing); only source is read."""
+def _mirror_base(mirror: Path, source: Path, base: str) -> None:
+    """Fetch base from source into the mirror and pin it with a ref (no FETCH_HEAD, so
+    no lock between parallel fetches, and gc cannot drop it). Only source is read."""
     try:
-        if not mirror.exists():
-            run_git(mirror.parent, "init", "--quiet", "--bare", str(mirror))
-        run_git(mirror, "fetch", "--quiet", "--no-tags", str(source), base)
-        run_git(mirror, "cat-file", "-e", f"{base}^{{commit}}")
+        run_git(
+            mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", str(source),
+            f"{base}:refs/cairnwork-bases/{base}",  # outside the guarded refs/cairnwork/
+        )  # fmt: skip
     except GitCommandError as exc:
         raise IntakeRefused("BAD_REQUEST", f"cannot fetch {base} from {source}") from exc
-    return str(mirror)
