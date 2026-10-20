@@ -35,3 +35,7 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
 - CI 只用最小權限（`permissions: contents: read`）。
 - 不在 repo 裡寫主機路徑、內部 IP、帳號 email。
 - 依賴固定版本。升級要用獨立 PR。
+- **verifier 的通過是證據，不是完成的證明。** 候選程式碼和測試跑在同一個程序，技術上無法讓判決
+  不可偽造。一個任務是否真的完成，信任分層在 verifier 以外：Core VERIFIED 綁定確切 commit、
+  獨立審查、線上見證、真實使用、以及在 A/B 贏過裸骨幹。細節見 `docs/PRESERVED_BEHAVIORS.md`
+  的「完成的信任不在 verifier」。
