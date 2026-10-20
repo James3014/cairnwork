@@ -240,7 +240,8 @@ class Intake:
             _spawn(  # noqa: S603 - fixed argv, no shell
                 [
                     sys.executable,
-                    "-m",
+                    "-I",  # no cwd on sys.path, no PYTHON* env: the caller's tree
+                    "-m",  # (e.g. the Gateway's, which has its own `product`) cannot shadow
                     "cairnwork.route",
                     "--state",
                     str(self.state),
@@ -251,6 +252,7 @@ class Intake:
                     str(lock_fd),
                 ],
                 pass_fds=(lock_fd,),
+                cwd=self.state,
                 stdin=subprocess.DEVNULL,
                 stdout=fd,
                 stderr=subprocess.STDOUT,

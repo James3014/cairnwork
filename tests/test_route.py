@@ -56,14 +56,15 @@ def state(tmp_path):
     return path
 
 
-def route(state, *args, stdin=None):
+def route(state, *args, stdin=None, cwd=None):
     done = subprocess.run(
-        [sys.executable, "-m", "cairnwork.route", "--state", str(state), *args],
+        [sys.executable, "-I", "-m", "cairnwork.route", "--state", str(state), *args],
         input=json.dumps(stdin) if stdin is not None else "",
         capture_output=True,
         text=True,
         timeout=120,
         check=False,
+        cwd=cwd,
     )
     return done.returncode, json.loads(done.stdout)
 
@@ -251,3 +252,15 @@ def test_another_submit_pinning_its_base_does_not_upset_a_running_attempt(state,
     code, second = route(state, "submit", stdin=request(project, key="gw-2"))
     assert code == 0, second
     assert wait_finished(state, first["task_id"])["status"] == "COMPLETED"
+
+
+def test_the_runner_ignores_the_callers_working_tree(state, project, tmp_path):
+    """The Gateway calls cairnwork-route from its own tree, which has a `product`
+    package of its own; the runner must not import it (2026-10-20 route witness)."""
+    caller = tmp_path / "caller-tree"
+    (caller / "product").mkdir(parents=True)
+    (caller / "product" / "__init__.py").write_text("raise ImportError('caller tree shadowed')\n")
+    route(state, "accept")
+    code, out = route(state, "submit", stdin=request(project), cwd=caller)
+    assert code == 0, out
+    assert wait_finished(state, out["task_id"])["status"] == "COMPLETED"
