@@ -124,9 +124,12 @@ def _restrict_to_base_history(path: Path, base_commit: str) -> None:
     run_git(
         path, "-c", "gc.bigPackThreshold=0", "gc", "--prune=now", "--quiet", isolate_config=True
     )
-    reachable = {
-        line.split()[0] for line in run_git(path, "rev-list", "--objects", base_commit).splitlines()
-    }
+    # --no-object-names so a historical path (which git does not escape, and which
+    # splitlines() would split on \v / U+2028, or which may not be UTF-8) cannot break
+    # parsing; both sides are then one object id per line.
+    reachable = set(
+        run_git(path, "rev-list", "--objects", "--no-object-names", base_commit).split()
+    )
     present = run_git(
         path, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)"
     ).split()
