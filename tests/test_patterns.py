@@ -1,6 +1,7 @@
 """Every id or path pattern must match the whole value: "$" alone lets a newline through."""
 
 import pytest
+from conftest import git
 
 from cairnwork.gitcmd import OID
 from cairnwork.notary import _OID
@@ -51,3 +52,18 @@ def test_notary_refuses_an_expected_candidate_with_a_newline(tmp_path):
     assert notary.verdict("task-1", "a1", expected_candidate=GOOD_OID) is None
     with pytest.raises(NotaryInputError):
         notary.verdict("task-1", "a1", expected_candidate=GOOD_OID + "\n")
+
+
+def test_attempt_id_with_a_trailing_newline_is_refused(tmp_path):
+    from cairnwork.workspace import WorkspaceError, remove_attempt_clone
+
+    with pytest.raises(WorkspaceError, match="must match"):
+        remove_attempt_clone(tmp_path, "a1\n")
+
+
+def test_attempt_base_with_a_trailing_newline_is_refused(repo, tmp_path):
+    from cairnwork.workspace import WorkspaceError, create_attempt_clone
+
+    base = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(WorkspaceError, match="40-hex"):
+        create_attempt_clone(repo, base + "\n", tmp_path / "runs", "a1")
