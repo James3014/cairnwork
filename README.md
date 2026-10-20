@@ -46,6 +46,7 @@ README、發布說明、PR 描述只寫已經量到的結果，不寫預期的�
 - `docs/PRESERVED_BEHAVIORS.md`：試點必須保留的必要保障（議會 D 條）。
 - `SECURITY.md`：事故應變。
 - `docs/LESSONS_FROM_NEXUS.md`：Nexus-new 犯過的錯與 Cairnwork 的對應規則（開工前必讀）。
+- `docs/DRILLS.md`：四種演練的實際結果。
 
 ## 開發
 

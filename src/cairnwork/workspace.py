@@ -126,9 +126,23 @@ def collect_candidate(
     allow_deletions: bool = False,
 ) -> Candidate:
     """Fetch the clone's HEAD into repo and accept it, or raise CandidateRejected."""
-    base = attempt.base_commit
-    _require_refs_unchanged(repo, attempt)
+    require_refs_unchanged(repo, attempt)
     head = _fetch_head(repo, attempt)
+    return check_candidate_commit(
+        repo, attempt, head, allowed_files, allow_deletions=allow_deletions
+    )
+
+
+def check_candidate_commit(
+    repo: Path,
+    attempt: Attempt,
+    head: str,
+    allowed_files: tuple[str, ...],
+    *,
+    allow_deletions: bool = False,
+) -> Candidate:
+    """Accept head (already in repo) as the attempt's candidate, or raise CandidateRejected."""
+    base = attempt.base_commit
     if head == base:
         raise CandidateRejected("NO_COMMIT", "the worker made no commit")
     parents = _parents(repo, head)
@@ -188,7 +202,7 @@ def _refs_acceptable(before: dict[str, str], now: dict[str, str]) -> bool:
     return True
 
 
-def _require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
+def require_refs_unchanged(repo: Path, attempt: Attempt) -> None:
     try:
         now = _guarded_refs(repo, attempt.attempt_id)
     except GitCommandError as exc:
