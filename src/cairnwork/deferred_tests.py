@@ -13,19 +13,23 @@ only). The worker never gets it: its attempt clone holds the base. Cairnwork the
    would carry (fix and tests together).
 
 So the worker can neither read nor weaken the tests that judge it (the same idea as
-SWE-bench applying its tests after the model's patch). Where the attempt clone could
-still hold the test commit's objects, see workspace.create_attempt_clone.
+SWE-bench applying its tests after the model's patch), as long as it cannot reach the
+test commit elsewhere: the Issue runner never tells it the commit id, but a worker
+with network access could still look for a public test branch.
 """
 
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from xml.etree import ElementTree  # noqa: S405 - JUnit from our own verifier run, 4 MB cap
 
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.workspace import ATTEMPT_REF_PREFIX
 
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
 _REGULAR = ("100644", "100755")
+# pytest reads these on its own; a test commit carries tests, not configuration.
+_NOT_TEST_FILES = frozenset({"conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml"})
 
 
 class TestCommitRejected(Exception):
@@ -34,30 +38,46 @@ class TestCommitRejected(Exception):
         self.code = code
 
 
-def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
-    """The files the test commit adds or changes; refuse anything but plain test files."""
+def ensure_test_commit(repo: Path, test_commit: str) -> None:
+    """Fetch the test commit into repo only now, after the worker is done: until then
+    nothing on this machine holds the tests (the Issue runner reads its parent via the
+    GitHub API)."""
     if not OID.fullmatch(test_commit):
         raise TestCommitRejected("TEST_COMMIT_INVALID", "not a 40-hex commit id")
     try:
+        run_git(repo, "cat-file", "-e", f"{test_commit}^{{commit}}")
+        return
+    except GitCommandError:
+        pass
+    try:
+        run_git(repo, "fetch", "--quiet", "--no-tags", "origin", test_commit)
+        run_git(repo, "cat-file", "-e", f"{test_commit}^{{commit}}")
+    except GitCommandError as exc:
+        raise TestCommitRejected("TEST_COMMIT_UNREADABLE", str(exc)) from exc
+
+
+def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
+    """The files the test commit adds or changes; refuse anything but plain test files."""
+    try:
         parents = run_git(repo, "rev-list", "--parents", "-n", "1", test_commit).split()
-        changes = run_git(
-            repo, "diff-tree", "-r", "--no-renames", "--no-commit-id", "--raw", base, test_commit
-        ).splitlines()
+        raw = run_git(
+            repo, "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", "--raw",
+            base, test_commit,
+        )  # fmt: skip
     except GitCommandError as exc:
         raise TestCommitRejected("TEST_COMMIT_UNREADABLE", str(exc)) from exc
     if parents[1:] != [base]:
         raise TestCommitRejected("TEST_COMMIT_NOT_ON_BASE", "its only parent must be the base")
+    fields = raw.split("\0")
     paths = []
-    for line in changes:
-        meta, path = line.split("\t", 1)
+    for meta, path in zip(fields[0::2], fields[1::2], strict=False):
         new_mode, status = meta.split()[1], meta.split()[4]
         posix = PurePosixPath(path)
         if (
             status not in ("A", "M")
             or new_mode not in _REGULAR
             or posix.parts[0] != "tests"
-            or ".." in posix.parts
-            or posix.name.casefold() == "conftest.py"
+            or posix.name.casefold() in _NOT_TEST_FILES
         ):
             raise TestCommitRejected("TEST_COMMIT_SCOPE", f"{status} {new_mode} {path}")
         paths.append(path)
@@ -66,10 +86,24 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def failed_on_base(runs) -> bool:
-    """Tests with teeth: at least one verifier failed (exit 1), none broke otherwise."""
-    codes = [run.returncode for run in runs]
-    return 1 in codes and all(code in (0, 1) for code in codes)
+def failed_on_base(runs, paths: tuple[str, ...]) -> bool:
+    """Tests with teeth: a test case from the deferred test files failed (JUnit), and
+    no verifier broke in another way (exit codes other than 0 and 1)."""
+    if any(run.returncode not in (0, 1) for run in runs):
+        return False
+    modules = {p[:-3].replace("/", ".") for p in paths if p.endswith(".py")}
+    for run in runs:
+        report = Path(run.log_path).parent / "run" / "junit.xml"
+        try:
+            cases = ElementTree.parse(report).getroot().iter("testcase")
+        except (OSError, ElementTree.ParseError):
+            continue
+        for case in cases:
+            owner = case.get("classname") or ""
+            failed = case.find("failure") is not None
+            if failed and any(owner == m or owner.startswith(m + ".") for m in modules):
+                return True
+    return False
 
 
 def lay_tests_over(

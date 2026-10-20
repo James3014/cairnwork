@@ -28,6 +28,7 @@ from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
 from cairnwork.deferred_tests import (
     TestCommitRejected,
+    ensure_test_commit,
     failed_on_base,
     lay_tests_over,
     test_paths,
@@ -237,10 +238,9 @@ class _Steps:
 
 
 def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
-    """Check a task's deferred tests before the worker starts: plain test files on the
-    base that really fail there. Returns their paths (none without a test_commit)."""
-    if not task.test_commit:
-        return ()
+    """Check a task's deferred tests once the worker is done: plain test files on the
+    base whose test cases really fail there. Returns their paths."""
+    ensure_test_commit(task.repo, task.test_commit)
     paths = test_paths(task.repo, task.base_commit, task.test_commit)
     runs = run_verifiers(
         task.repo,
@@ -253,7 +253,7 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
         python=verifying[1],
         base_commit=task.base_commit,
     )
-    if not failed_on_base(runs):
+    if not failed_on_base(runs, paths):
         codes = [run.returncode for run in runs]
         raise TestCommitRejected("TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
     return paths
@@ -262,11 +262,6 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
     task_id = steps.task_id
-    try:
-        test_files = _tests_with_teeth(task, specs, run_root, result, verifying)
-    except TestCommitRejected as exc:
-        result.reason = str(exc)
-        return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:
@@ -282,9 +277,10 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except CandidateRejected as exc:
             result.reason = str(exc)
             return
-        judged = candidate.candidate_commit
-        if test_files:
+        judged, test_files = candidate.candidate_commit, ()
+        if task.test_commit:  # only now: the worker is done (deferred_tests.py)
             try:
+                test_files = _tests_with_teeth(task, specs, run_root, result, verifying)
                 judged = lay_tests_over(
                     task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
                 )

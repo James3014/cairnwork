@@ -119,11 +119,12 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
         return
     root = Path(run_root)
     (root / f"{attempt_id}.index").unlink(missing_ok=True)
-    for private in root.glob(f"{attempt_id}-v-v*.*"):
+    (root / f"{attempt_id}.tests.index").unlink(missing_ok=True)
+    for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
         if private.is_dir() and not private.is_symlink():
             shutil.rmtree(private / "run", ignore_errors=True)
     names = [attempt_id] + sorted(
-        p.name for p in root.glob(f"{attempt_id}-v-v*") if p.is_dir() and "." not in p.name
+        p.name for p in root.glob(f"{attempt_id}-[vb]-v*") if p.is_dir() and "." not in p.name
     )
     for name in names:
         if (root / name).is_dir():

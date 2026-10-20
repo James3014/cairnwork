@@ -32,6 +32,7 @@ def project(repo):
 
 
 REGRESSION = "from calc import add\ndef test_regression():\n    assert add(1, 1) == 2\n"
+FIX = {"src/calc.py": "def add(a, b):\n    return a + b\n"}
 CHECK = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_regression.py")),)
 
 
@@ -81,16 +82,14 @@ def test_fix_and_tests_are_verified_together_and_the_worker_never_sees_them(proj
 def test_tests_that_already_pass_on_the_base_are_refused(project, tmp_path):
     passing = "from calc import add\ndef test_regression():\n    assert add(1, 1) == 3\n"
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": passing})
-    worker = SeeingWorker({"src/calc.py": "x = 1\n"})
-    result = run(project, tmp_path, base, test_commit, worker)
+    result = run(project, tmp_path, base, test_commit, SeeingWorker(FIX))
     assert result.status == "FAILED" and "TESTS_DO_NOT_FAIL_ON_BASE" in result.reason
-    assert not hasattr(worker, "saw_test")  # the worker never started
 
 
 def test_tests_that_only_break_on_the_base_are_refused(project, tmp_path):
     broken = "import no_such_module\ndef test_regression():\n    pass\n"
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": broken})
-    result = run(project, tmp_path, base, test_commit, SeeingWorker({}))
+    result = run(project, tmp_path, base, test_commit, SeeingWorker(FIX))
     assert "TESTS_DO_NOT_FAIL_ON_BASE" in result.reason
 
 
@@ -103,25 +102,75 @@ def test_tests_that_only_break_on_the_base_are_refused(project, tmp_path):
 )
 def test_a_test_commit_may_only_add_plain_test_files(project, tmp_path, files, code):
     base, test_commit = make_test_commit(project, files)
-    result = run(project, tmp_path, base, test_commit, SeeingWorker({}))
+    result = run(project, tmp_path, base, test_commit, SeeingWorker(FIX))
     assert code in result.reason
 
 
 def test_a_test_commit_must_sit_on_the_base(project, tmp_path):
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
     newer = commit_change(project, {"README.md": "moved\n"})
-    result = run(project, tmp_path, newer, test_commit, SeeingWorker({}))
+    result = run(project, tmp_path, newer, test_commit, SeeingWorker(FIX))
     assert "TEST_COMMIT_NOT_ON_BASE" in result.reason
 
 
 class _Run:
-    def __init__(self, code):
-        self.returncode = code
+    def __init__(self, tmp_path, name, code, failing=()):
+        private = tmp_path / name
+        (private / "run").mkdir(parents=True)
+        cases = "".join(
+            f'<testcase classname="{c}" name="t">'
+            + ("<failure message='x'/>" if c in failing else "")
+            + "</testcase>"
+            for c in ("tests.test_regression", "tests.test_other")
+        )
+        (private / "run" / "junit.xml").write_text(
+            f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+        )
+        self.log_path, self.returncode = private / "verifier.log", code
 
 
-@pytest.mark.parametrize(
-    ("codes", "teeth"),
-    [([1], True), ([0, 1], True), ([0], False), ([2], False), ([1, 2], False), ([None], False)],
-)
-def test_failed_on_base(codes, teeth):
-    assert dt.failed_on_base([_Run(c) for c in codes]) is teeth
+PATHS = ("tests/test_regression.py",)
+
+
+def test_teeth_need_a_failing_case_from_the_deferred_files(tmp_path):
+    assert dt.failed_on_base([_Run(tmp_path, "a", 1, {"tests.test_regression"})], PATHS)
+    # another file failing does not count, even with exit 1
+    assert not dt.failed_on_base([_Run(tmp_path, "b", 1, {"tests.test_other"})], PATHS)
+    # passing everywhere, or a verifier breaking otherwise, does not count
+    assert not dt.failed_on_base([_Run(tmp_path, "c", 0)], PATHS)
+    assert not dt.failed_on_base(
+        [_Run(tmp_path, "d", 1, {"tests.test_regression"}), _Run(tmp_path, "e", 2)], PATHS
+    )
+    assert not dt.failed_on_base([_Run(tmp_path, "f", None)], PATHS)
+
+
+class ScanningWorker(EditWorker):
+    """Writes the fix and records any readable file near its clone that holds the test."""
+
+    def run(self, workdir: Path, task) -> None:
+        self.found = [str(p) for p in Path(task.repo).rglob("*") if _holds(p)] + [
+            str(p) for p in workdir.parent.rglob("*") if _holds(p)
+        ]
+        super().run(workdir, task)
+
+
+def _holds(path: Path) -> bool:
+    try:
+        return path.is_file() and b"add(1, 1) == 2" in path.read_bytes()
+    except OSError:
+        return False
+
+
+def test_nothing_the_worker_can_read_holds_the_deferred_test(project, tmp_path):
+    origin = tmp_path / "origin.git"
+    git(project, "clone", "-q", "--bare", str(project), str(origin))
+    git(project, "remote", "add", "origin", str(origin))
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    git(project, "push", "-q", "origin", "tests-only")
+    git(project, "branch", "-D", "tests-only")
+    git(project, "reflog", "expire", "--expire=now", "--all")
+    git(project, "gc", "-q", "--prune=now")
+    worker = ScanningWorker({"src/calc.py": "def add(a, b):\n    return a + b\n"})
+    result = run(project, tmp_path, base, test_commit, worker)
+    assert result.status == "COMPLETED", result.reason
+    assert worker.found == []  # fetched only after the worker was done
