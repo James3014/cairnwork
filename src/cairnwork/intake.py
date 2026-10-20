@@ -55,6 +55,7 @@ FIELDS = frozenset(
 _spawn = subprocess.Popen  # replaced in tests
 # verifier_python: the target repository's own interpreter (scripts/setup_target_venv.sh),
 # an absolute path; None runs verifiers with the account's (or Cairnwork's) Python.
+# One per state directory, so one state directory serves one target repository.
 DEFAULT_CONFIG = {
     "model": "gemini-3.8-flash-high",
     "agy": "agy",

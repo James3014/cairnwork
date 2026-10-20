@@ -94,9 +94,9 @@
 |---|---|---|---|
 | pass | 被測模組加一行註解 | 通過 | 通過（7 passed） |
 | broken | 被測模組改壞一行（schema 版本比對） | 不通過 | 不通過（2 failed） |
-| config | 同樣的錯誤，再加上候選版本自己的 `pytest.ini`，用 `--deselect` 跳過會失敗的測試 | 不通過 | 不通過（2 failed）：候選版本的設定沒有被採用 |
-| no_venv | 同 pass，但用帳號原本只有 pytest 的 Python | 不通過 | 不通過（收集時 import 失敗） |
+| regression_candidate_ini | 同樣的錯誤，再加上候選版本自己的 `pytest.ini`，用 `--deselect` 跳過會失敗的測試 | 不通過 | 不通過（2 failed）：`run_verifiers` 沒有採用候選版本的設定。這只是回歸檢查：真正的任務在更早的階段就會拒絕（`pytest.ini` 是受保護的輸入） |
+| no_venv | 同 pass，但用帳號原本只有 pytest 的 Python | 不通過 | 拒絕執行：base 設了 `asyncio_mode`，這個 Python 沒有 pytest-asyncio（`PYTEST_CONFIG_ERROR`） |
 
-產生的 verifier ini 只有 base 的 `pytest.ini` 裡允許的鍵（`testpaths`、`python_*`、`norecursedirs`、`asyncio_mode`、`filterwarnings`），`addopts` 被丟掉，只保留其中的 `--import-mode=importlib`；plugin 以 `-p` 明確載入 pytest-asyncio、pytest-timeout、anyio。證據：`docs/drills/2026-10-20-nexus-new-verifier.json`。
+產生的 verifier ini 只有 base 的 `pytest.ini` 裡允許的鍵（`testpaths`、`python_*`、`norecursedirs`、`asyncio_mode`、`filterwarnings`），`addopts` 被丟掉，只保留其中的 `--import-mode=importlib`（Nexus-new 的 addopts 裡沒有 `-W` 或 strict 選項）；plugin 以 `-p` 明確載入 pytest-asyncio、pytest-timeout、anyio。實際執行的 pytest 參數記在 JSON 的 `pytest_argv`。證據：`docs/drills/2026-10-20-nexus-new-verifier.json`。
 
 這只證明「一個 Nexus-new 測試檔可以在 Cairnwork 的 verifier 裡正確地過與不過」。候選版本是演練腳本自己做的 commit，不是 agent 交出的修改，也沒有經過 Core 公證；還沒有跑過真正的 Nexus-new Issue。只讀 repo 根目錄的設定檔；需要網路、外部服務或 HOME 裡快取的測試，在 sandbox 裡仍然會失敗。

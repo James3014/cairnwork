@@ -10,10 +10,16 @@ base_commit=base):
 
   pass        a comment added to the module under test: must pass;
   broken      a one-line bug in that module: must fail;
-  config      the same bug plus a candidate pytest.ini that deselects the failing
-              test: must still fail (only the base commit's settings apply);
+  regression_candidate_ini
+              the same bug plus a candidate pytest.ini that deselects the failing
+              test: must still fail. A regression check of run_verifiers only: a
+              real task is refused earlier, pytest.ini is a protected input;
   no_venv     the passing candidate with the account's own Python (pytest only):
-              must fail, which is why a target needs its own interpreter.
+              must not pass; the base sets asyncio_mode and that Python has no
+              pytest-asyncio, so the run is refused (PytestConfigError).
+
+Each case records the pytest argv that was executed (from the interpreter on, run
+paths replaced by <run root>).
 
 The JSON goes to docs/drills/<date>-nexus-new-verifier.json; ``passed`` is true only
 if every case went the expected way.
@@ -30,6 +36,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from cairnwork import confined
+from cairnwork.pytest_config import PytestConfigError
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import parse_verifier, run_verifiers
 
@@ -70,8 +78,39 @@ def candidate(repo: Path, base: str, files: dict[str, bytes], message: str) -> s
         return git(repo, "commit-tree", tree, "-p", base, "-m", message, env=env)
 
 
+EXECUTED: list[list[str]] = []
+_execute = confined.execute
+
+
+def _recording_execute(argv, *args, **kwargs):
+    EXECUTED.append(list(argv))
+    return _execute(argv, *args, **kwargs)
+
+
+confined.execute = _recording_execute  # verifiers.py calls confined.execute at run time
+
+
+def pytest_argv(argv: list[str], python: str, run_root: Path) -> list[str]:
+    tail = argv[argv.index(python) :]
+    return [arg.replace(str(run_root.resolve()), "<run root>") for arg in tail]
+
+
 def verify(repo: Path, commit: str, base: str, python: str | None, account: VerifierAccount):
     spec = parse_verifier("federated-lessons", ["python3", "-m", "pytest", TEST])
+    EXECUTED.clear()
+    try:
+        return _verify(repo, commit, base, python, account, spec)
+    except PytestConfigError as exc:
+        return {
+            "candidate_commit": commit,
+            "python": python or account.python,
+            "passed": False,
+            "refused": str(exc),
+            "executed": bool(EXECUTED),
+        }
+
+
+def _verify(repo, commit, base, python, account, spec):
     run = run_verifiers(
         repo,
         commit,
@@ -97,6 +136,7 @@ def verify(repo: Path, commit: str, base: str, python: str | None, account: Veri
         "observation_hash": run.observation.artifact_hash,
         "pytest_summary": summary[-1:] if summary else log.splitlines()[-3:],
         "verifier_ini": ini.replace(str(private.parent), "<run root>"),
+        "pytest_argv": pytest_argv(EXECUTED[-1], python or account.python, account.run_root),
     }
 
 
@@ -114,11 +154,11 @@ def main() -> int:
     commits = {
         "pass": candidate(repo, base, {MODULE: source + b"# drill\n"}, "drill: comment"),
         "broken": candidate(repo, base, {MODULE: broken}, "drill: bug"),
-        "config": candidate(
+        "regression_candidate_ini": candidate(
             repo, base, {MODULE: broken, "pytest.ini": deselect}, "drill: bug + candidate ini"
         ),
     }
-    expect = {"pass": True, "broken": False, "config": False, "no_venv": False}
+    expect = {"pass": True, "broken": False, "regression_candidate_ini": False, "no_venv": False}
     cases = {name: verify(repo, sha, base, python, account) for name, sha in commits.items()}
     cases["no_venv"] = verify(repo, commits["pass"], base, None, account)
     for name, case in cases.items():
@@ -133,7 +173,8 @@ def main() -> int:
         "cases": cases,
         "passed": all(cases[name]["passed"] == want for name, want in expect.items()),
         "note": "candidates are drill commits made in Cairnwork's own Nexus-new clone, "
-        "not tasks run by an agent; the Core notary is not involved",
+        "not tasks run by an agent; the Core notary is not involved; regression_candidate_ini "
+        "only checks run_verifiers, a real task refuses a candidate pytest.ini earlier",
     }
     out = Path(__file__).resolve().parent.parent / "docs" / "drills"
     path = out / f"{result['date']}-nexus-new-verifier.json"

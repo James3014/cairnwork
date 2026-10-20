@@ -7,9 +7,12 @@ repository root of the *base* commit, read with git, so a candidate that edits
 ``pytest.ini`` or ``pyproject.toml`` changes nothing (those files are also protected
 verifier inputs). Only the keys in ``BASE_KEYS`` are copied; every other key is
 dropped and named in a comment of the generated ini. ``addopts`` is never copied
-(it can load plugins, change the rootdir or the ini); only an ``--import-mode`` found
-in it is kept. Plugins are never autoloaded: ``PLUGINS`` are loaded with an explicit
-``-p``, and only when the verifier's interpreter has them installed.
+(it can load plugins, change the rootdir or the ini); only an ``--import-mode`` and
+options that make the run stricter (``-W``, ``--strict-markers``, ``--strict-config``)
+found in it are kept, so these settings are not more lenient than the target's own CI.
+Plugins are never autoloaded: ``PLUGINS`` are loaded with an explicit ``-p``, and only
+when the verifier's interpreter has them installed; a kept key that needs a missing
+plugin (``timeout``, ``asyncio_*``) fails the run instead of being dropped.
 
 Only the root-level file is read, in pytest's discovery order; a configuration file in
 a test directory of the target is not looked at. A malformed or non-regular (symlink)
@@ -40,10 +43,14 @@ from cairnwork.gitcmd import run_git
 #                                     files), copied so the ini mirrors the base;
 #   markers                           registers mark names (matters with strict markers);
 #   filterwarnings                    how warnings are reported ("error" can only fail);
-#   xfail_strict                      an unexpected pass fails;
+#   xfail_strict, strict_xfail,       strictness the target's own CI has: they can only
+#   strict, strict_markers,           turn a pass into a failure, never the other way;
+#   strict_config
 #   asyncio_*                         pytest-asyncio needs them to run async tests;
 #   timeout                           pytest-timeout limit per test; it can only end a
 #                                     test sooner, Cairnwork's own timeout still applies.
+# A kept key whose plugin the interpreter lacks fails the run (PytestConfigError) rather
+# than being dropped: dropping it would run the tests more leniently than the target's CI.
 # pythonpath is handled apart: its entries must stay inside the checkout.
 BASE_KEYS = (
     "python_files",
@@ -54,6 +61,10 @@ BASE_KEYS = (
     "markers",
     "filterwarnings",
     "xfail_strict",
+    "strict",
+    "strict_xfail",
+    "strict_markers",
+    "strict_config",
     "asyncio_mode",
     "asyncio_default_fixture_loop_scope",
     "asyncio_default_test_loop_scope",
@@ -66,6 +77,9 @@ PLUGINS = (
     ("anyio", "anyio.pytest_plugin", None),
 )
 IMPORT_MODES = frozenset({"prepend", "append", "importlib"})
+# From the base addopts only these survive (everything else is dropped): the import
+# mode, and options that make the run stricter (-W warning filters, strict markers/config).
+STRICT_OPTIONS = frozenset({"--strict-markers", "--strict-config"})
 # pytest's discovery order: (file, section or TOML table path, format).
 _CANDIDATES = (
     ("pytest.ini", "pytest", "ini"),
@@ -95,29 +109,31 @@ class PytestSettings:
     pythonpath: tuple[str, ...] = ()
     import_mode: str | None = None
     dropped: tuple[str, ...] = ()
+    strict_args: tuple[str, ...] = ()
 
     def ini_text(self, checkout: Path, plugins: tuple[str, ...] = ()) -> bytes:
         """The verifier's ini. pythonpath is absolute: pytest resolves it against the
         ini's own directory, which is not the checkout. The checkout root comes first:
         ``-P`` keeps it off sys.path until pytest itself is imported."""
-        lines = [f"# base config: {self.source or 'none'}"]
-        dropped = list(self.dropped)
-        lines.append("[pytest]")
+        lines = [f"# base config: {self.source or 'none'}", "[pytest]"]
         for key, value in self.values:
             needs = [p for p in PLUGINS if p[2] and key.startswith(p[2])]
             if needs and needs[0][1] not in plugins:
-                dropped.append(key)
-                continue
+                raise PytestConfigError(
+                    f"the base config sets {key}, but {needs[0][0]} is not installed"
+                    " in the verifier's Python"
+                )
             lines.append(f"{key} = {_render(value)}")
         paths = [str(checkout), *(str(checkout / entry) for entry in self.pythonpath)]
         lines.append("pythonpath = " + " ".join(shlex.quote(p) for p in dict.fromkeys(paths)))
-        if dropped:
-            lines.insert(1, "# dropped: " + " ".join(sorted(set(dropped))))
+        if self.dropped:
+            lines.insert(1, "# dropped: " + " ".join(sorted(set(self.dropped))))
         return ("\n".join(lines) + "\n").encode()
 
     def args(self, plugins: tuple[str, ...] = ()) -> list[str]:
         mode = [f"--import-mode={self.import_mode}"] if self.import_mode else []
-        return [*mode, *(arg for plugin in plugins for arg in ("-p", plugin))]
+        loads = (arg for plugin in plugins for arg in ("-p", plugin))
+        return [*mode, *self.strict_args, *loads]
 
 
 def base_settings(repo: Path, base_commit: str | None) -> PytestSettings:
@@ -168,10 +184,16 @@ def _settings(source: str, config: dict[str, Any]) -> PytestSettings:
     paths = tuple(p for p in _words(config.get("pythonpath")) if _inside(p))
     if len(paths) != len(_words(config.get("pythonpath"))):
         dropped.append("pythonpath")
+    addopts = _words(config.get("addopts"))
     if "addopts" in config:
         dropped.append("addopts")
     return PytestSettings(
-        source, tuple(values), paths, _import_mode(_words(config.get("addopts"))), tuple(dropped)
+        source,
+        tuple(values),
+        paths,
+        _import_mode(addopts),
+        tuple(dropped),
+        _strict_args(addopts),
     )
 
 
@@ -195,6 +217,19 @@ def _inside(entry: str) -> bool:
         and all(part not in ("", "..") for part in parts)
         and not any(ord(ch) < 32 for ch in entry)
     )
+
+
+def _strict_args(tokens: list[str]) -> tuple[str, ...]:
+    """-W filters and strict options from the base addopts, as separate argv items."""
+    kept: list[str] = []
+    for index, token in enumerate(tokens):
+        if token in STRICT_OPTIONS:
+            kept.append(token)
+        elif token == "-W" and index + 1 < len(tokens):
+            kept += ["-W", tokens[index + 1]]
+        elif token.startswith("-W") and len(token) > 2:
+            kept += ["-W", token[2:]]
+    return tuple(kept)
 
 
 def _import_mode(tokens: list[str]) -> str | None:

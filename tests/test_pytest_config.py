@@ -20,12 +20,11 @@ from cairnwork.verifiers import parse_verifier, run_verifiers
 
 BASE_INI = """[pytest]
 python_functions = check_*
-asyncio_mode = auto
-timeout = 30
+strict_xfail = true
 markers =
     slow: a slow test
 pythonpath = lib ../outside /abs
-addopts = -p evil --rootdir=/ --import-mode=importlib
+addopts = -p evil --rootdir=/ --import-mode=importlib -x --strict-markers
 cache_dir = /tmp/x
 required_plugins = evil
 """
@@ -54,10 +53,10 @@ def test_only_allow_listed_keys_are_copied(based, tmp_path):
     repo, base = based
     settings = base_settings(repo, base)
     ini = read_ini(settings.ini_text(tmp_path / "co"))
-    assert set(ini) == {"python_functions", "markers", "pythonpath"}  # no plugins installed
+    assert set(ini) == {"python_functions", "strict_xfail", "markers", "pythonpath"}
     assert ini["python_functions"] == "check_*"
     assert ini["pythonpath"].split() == [str(tmp_path / "co"), str(tmp_path / "co" / "lib")]
-    assert settings.args() == ["--import-mode=importlib"]
+    assert settings.args() == ["--import-mode=importlib", "--strict-markers"]
     assert {"addopts", "cache_dir", "required_plugins", "pythonpath"} <= set(settings.dropped)
 
 
@@ -76,13 +75,31 @@ def test_only_a_known_import_mode_is_kept_from_addopts(repo, addopts, mode):
     assert base_settings(repo, base).import_mode == mode
 
 
-def test_plugin_keys_need_the_plugin(based, tmp_path):
-    repo, base = based
+@pytest.mark.parametrize(
+    ("addopts", "kept"),
+    [
+        ("-W error -p x", ("-W", "error")),
+        ("-Werror::UserWarning --strict-config", ("-W", "error::UserWarning", "--strict-config")),
+        ("--strict-markers --tb=no -x --rootdir=/ -W", ("--strict-markers",)),
+        ("-c other.ini --confcutdir=/ -o addopts=", ()),
+    ],
+)
+def test_only_strictness_options_are_kept_from_addopts(repo, addopts, kept):
+    base = commit_change(repo, {"pytest.ini": f"[pytest]\naddopts = {addopts}\n"})
+    assert base_settings(repo, base).strict_args == kept
+
+
+def test_plugin_keys_need_the_plugin(repo, tmp_path):
+    base = commit_change(repo, {"pytest.ini": "[pytest]\nasyncio_mode = auto\ntimeout = 30\n"})
     settings = base_settings(repo, base)
     plugins = ("pytest_asyncio.plugin", "pytest_timeout")
     ini = read_ini(settings.ini_text(tmp_path, plugins))
     assert ini["asyncio_mode"] == "auto" and ini["timeout"] == "30"
-    assert settings.args(plugins)[1:] == ["-p", "pytest_asyncio.plugin", "-p", "pytest_timeout"]
+    assert settings.args(plugins) == ["-p", "pytest_asyncio.plugin", "-p", "pytest_timeout"]
+    with pytest.raises(PytestConfigError, match="sets timeout, but pytest_timeout"):
+        settings.ini_text(tmp_path, ("pytest_asyncio.plugin",))
+    with pytest.raises(PytestConfigError, match="sets asyncio_mode, but pytest_asyncio"):
+        settings.ini_text(tmp_path, ("pytest_timeout",))
 
 
 def test_candidate_config_changes_are_ignored(based):
@@ -228,3 +245,31 @@ def test_the_account_runs_the_given_python(repo):
             account=account,
             python="/nonexistent/python",
         )
+
+
+@pytest.mark.sandbox
+def test_base_strictness_applies_and_a_missing_plugin_fails_closed(repo, tmp_path):
+    base = commit_change(
+        repo,
+        {
+            "pytest.ini": "[pytest]\naddopts = -W error::UserWarning --strict-markers\n",
+            "tests/test_warns.py": "import warnings\ndef test_w():\n    warnings.warn('x')\n",
+            "tests/test_mark.py": "import pytest\n@pytest.mark.undeclared\ndef test_m(): pass\n",
+        },
+    )
+    specs = tuple(
+        parse_verifier(name, ["python3", "-m", "pytest", f"tests/test_{name}.py"])
+        for name in ("warns", "mark")
+    )
+
+    def passed(base_commit, run_id):
+        runs = run_verifiers(repo, base, specs, tmp_path / "runs", run_id, base_commit=base_commit)
+        return [run.observation.passed for run in runs]
+
+    assert passed(None, "lenient") == [True, True]  # without the base's options both pass
+    assert passed(base, "strict") == [False, False]
+    if "pytest_timeout" in pytest_config.installed_plugins(sys.executable):
+        pytest.skip("pytest-timeout is installed here")
+    with_timeout = commit_change(repo, {"pytest.ini": "[pytest]\ntimeout = 5\n"})
+    with pytest.raises(PytestConfigError, match="pytest_timeout is not installed"):
+        run_verifiers(repo, with_timeout, specs, tmp_path / "runs", "t", base_commit=with_timeout)
