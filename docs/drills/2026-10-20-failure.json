@@ -1,0 +1,11 @@
+{
+  "mode": "failure",
+  "model": "gemini-3.8-flash-high",
+  "drill_passed": true,
+  "task_id": "task-698384315a204656970b9170923a53a3",
+  "attempt_id": "a7e957777307f2b01",
+  "status": "FAILED",
+  "reason": "CORE_FAILED_VERIFICATION",
+  "candidate_commit": "323d08a0e6bc2411421b5670469e21c9e72811af",
+  "verified": false
+}

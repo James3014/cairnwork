@@ -1,0 +1,18 @@
+{
+  "mode": "restart",
+  "model": "gemini-3.8-flash-high",
+  "drill_passed": true,
+  "agy_running_when_killed": 1,
+  "decisions": [
+    {
+      "task_id": "task-785e79c1217c495098ac9a6bfa0e2048",
+      "attempt_id": "a00c7d670ec416f0c",
+      "previous_status": "DISPATCHED",
+      "new_status": "FAILED",
+      "reason": "INTERRUPTED_AFTER_WORKER_STARTED",
+      "killed_processes": 1
+    }
+  ],
+  "agy_left_after_recovery": [],
+  "task_status": "FAILED"
+}

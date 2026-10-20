@@ -5,9 +5,9 @@
 | 演練 | 狀態 | 證據 |
 |---|---|---|
 | 正常 | **通過**（2026-10-20，2 次；第 2 次使用現行 worker 設定，含 `--sandbox`） | 見下方 |
-| 失敗 | 自動測試覆蓋：錯誤修正 → `CORE_FAILED_VERIFICATION`；改到範圍外的檔案 → `DIRTY_TREE`；沒有改動 → `NO_COMMIT`；worker 當掉 → `WORKER_FAILED`。四種結果的任務狀態都是 FAILED（`tests/test_pipeline.py`）。真 agent 的失敗演練還沒跑。 | `tests/test_pipeline.py::test_failures_never_complete` |
-| 重啟 | **通過**（自動測試，真的 kill -9）：在 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點各殺一次 Cairnwork 程序，再跑恢復。Core 已經判定通過的補成 COMPLETED，其餘都判 FAILED；worker 中途被殺時，留下的孤兒程序也會被清掉；正在跑的時候不能執行恢復；恢復可以重複執行，結果不變。真 agent 版還沒跑。 | `tests/test_recovery.py` |
-| 回退 | **未做**：線上切換（議會 F 條）還沒開始 | — |
+| 失敗 | **通過**：自動測試涵蓋四種路徑（錯誤修正 → `CORE_FAILED_VERIFICATION`、改到範圍外 → `DIRTY_TREE`、沒有改動 → `NO_COMMIT`、worker 當掉 → `WORKER_FAILED`）。真 agent 有 1 次走到預期路徑（改了檔案，Core 判定未通過），另外 3 次停在 worker 中止，見下方 | `tests/test_pipeline.py`、`docs/drills/2026-10-20-failure.json` |
+| 重啟 | **通過**：自動測試用真的 kill -9，涵蓋 DISPATCHED、WORKER_STARTED、CANDIDATE、VERIFYING、NOTARIZING、FINISHED 六個時間點，以及孤兒程序、鎖衝突、重複執行恢復。真 agent 跑了 1 次，agy 執行到一半時 kill -9，見下方 | `tests/test_recovery.py`、`docs/drills/2026-10-20-restart.json` |
+| 回退 | **還不能做**：回退的對象是 F 條的線上切換（舊 Gateway 把一類任務轉給 Cairnwork），這部分還沒建。等切換做出來，第一件事就是跑回退演練 | — |
 
 ## 正常演練 2026-10-20
 
@@ -46,3 +46,27 @@
 - 被拒之後，agy 會中止整次執行，連允許的修改也不會套用。agy 本身的 exit code 是 0（兩次實測都是 `exit=0`），所以 worker 正常結束，snapshot 判定為 `NO_COMMIT`。
 - 這是 agy 自己的權限機制，不是作業系統層級的 sandbox，所以 Cairnwork 不把它當成安全邊界。真正的防線仍然是：只收允許的檔案，並比對整個 clone。
 - 另一個測試：提示詞裡帶著 Cairnwork 的規則時，模型會直接拒絕執行這些要求。這只代表模型遵守了規則，不能證明權限有在擋。
+
+## 真 agent 失敗演練 2026-10-20
+
+腳本：`uv run python scripts/drill_agent.py failure|scope <空目錄>`（Agy gemini-3.8-flash-high，accept-edits --sandbox）。腳本只有在走到預期路徑時，才會回報 `drill_passed: true`：failure 模式要「Core 判定未通過」，scope 模式要「改到範圍外被抓到」。
+
+| 次 | 題目 | 結果 | 是否走到預期路徑 |
+|---|---|---|---|
+| 1、2 | scope：bug 在 `src/stats.py`，但只允許改 `src/report.py` | FAILED（`NO_COMMIT`） | **否**。agent 正常讀了 clone 裡的 `src/stats.py`、`src/report.py`，接著試圖讀取 clone 外面、實際上不存在的路徑，被權限拒絕，整次中止，沒有改任何檔案。也就是說，沒有驗到「改到範圍外會被抓」這條規則 |
+| 3 | failure（舊判定條件）：測試期待的值和題目矛盾（`average([2, 4]) == 4`） | FAILED（`NO_COMMIT`） | **否**。agent 讀完 clone 裡的檔案後，試圖讀取演練目錄裡、實際上不存在的 `eval.py`，被權限拒絕，整次中止 |
+| 4 | failure（嚴格判定條件），題目同上 | FAILED（`CORE_FAILED_VERIFICATION`） | **是**。agent 把 `average` 改成算術平均（`sum(values) / len(values)`），但測試期待的是矛盾的值，所以 verifier 沒過，Core 判定未通過。證據：`docs/drills/2026-10-20-failure.json`，候選 commit 為 `323d08a0e6bc2411421b5670469e21c9e72811af` |
+
+觀察到的現象：agent 試圖讀取工作區以外、不存在的路徑時，agy 的權限機制拒絕了，整次執行跟著中止。這只觀察到「不存在的外部路徑」這種情況，還沒驗證過讀取真實存在的外部檔案時會怎樣。
+
+## 真 agent 重啟演練 2026-10-20
+
+腳本：`uv run python scripts/drill_agent.py restart <空目錄>`。正常任務在子程序裡執行；等 agy 程序確實在跑之後，對子程序送出 SIGKILL，接著執行恢復。腳本要同時滿足以下條件才算通過：任務判定 FAILED、原因是 `INTERRUPTED_AFTER_WORKER_STARTED`、恢復有砍掉至少 1 個程序、事後沒有殘留的 agy。
+
+第 2 次執行（嚴格判定條件）的輸出：`docs/drills/2026-10-20-restart.json`
+
+- 被殺時正在跑的 agy 程序數：1
+- 恢復結果：`DISPATCHED → FAILED`，原因 `INTERRUPTED_AFTER_WORKER_STARTED`，`killed_processes = 1`
+- 恢復後殘留的 agy：0
+
+第 1 次執行（舊判定條件）結果相同，但只留下了螢幕輸出。
