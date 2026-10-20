@@ -21,6 +21,9 @@ MAX_REPORT_BYTES = 4 << 20
 def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
     """Run in a new process group; the parent copies output into log_path (the child
     never holds the log's file descriptor); kill the group afterwards."""
+    token = env.get(RUN_TOKEN_VAR)
+    if not token:
+        raise ValueError(f"{RUN_TOKEN_VAR} must be set so escaped processes can be found")
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as log:
         process = subprocess.Popen(  # noqa: S603 - argv built from an allow-listed spec, no shell
@@ -42,32 +45,40 @@ def execute(argv, cwd, env, timeout, log_path) -> tuple[int | None, bool, int]:
             timed_out = True
         _kill_group(process.pid)
         process.wait()
-        survivors = _sweep_survivors(env[RUN_TOKEN_VAR])
+        survivors = _sweep_survivors(token, process.pid)
         copier.join(timeout=10)  # a descendant that escaped the group may hold the pipe
+        process.stdout.close()
     return (None if timed_out else process.returncode), timed_out, survivors
 
 
-def _sweep_survivors(token: str) -> int:
+def _sweep_survivors(token: str, group: int) -> int:
     """Kill processes from this run that escaped the process group (e.g. via setsid).
 
-    They are found by the run token in their environment (ps -E, same user only). A
+    They are found by the run token in their environment (ps -E, same user only).
+    Members of the original group were just sent SIGKILL and are not counted. A
     process that clears its environment is not found; only a separate uid stops that.
+    If the process list cannot be read, the run counts as having a survivor.
     """
     marker = f"{RUN_TOKEN_VAR}={token}"
     try:
         listing = subprocess.run(  # noqa: S603 - fixed argv
-            ["/bin/ps", "-axwwE", "-o", "pid=,command="],
+            ["/bin/ps", "-axwwE", "-o", "pid=,pgid=,command="],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return 0
+        return 1
     found = 0
     for line in listing.splitlines():
-        pid_text, _, rest = line.strip().partition(" ")
-        if marker in rest and pid_text.isdigit() and int(pid_text) != os.getpid():
+        fields = line.split(None, 2)
+        if len(fields) < 3 or not (fields[0].isdigit() and fields[1].isdigit()):
+            continue
+        pid_text, pgid_text, rest = fields
+        if int(pgid_text) == group:
+            continue
+        if marker in rest and int(pid_text) != os.getpid():
             try:
                 os.kill(int(pid_text), signal.SIGKILL)
                 found += 1
