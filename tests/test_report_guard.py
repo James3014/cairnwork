@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 
@@ -176,3 +177,16 @@ def test_a_symlinked_verdict_is_not_followed(tmp_path):
     link = tmp_path / "verdict.json"
     link.symlink_to(target)
     assert report_guard.read_verdict(link, NONCE).ran is False  # O_NOFOLLOW refuses the symlink
+
+
+def test_a_non_string_outcome_value_fails_closed(tmp_path):
+    path = _write(tmp_path, {"nonce": NONCE, "collected": ["a"], "outcomes": {"a": 123}})
+    assert report_guard.read_verdict(path, NONCE).ran is False
+
+
+def test_a_fifo_in_place_of_the_verdict_does_not_hang(tmp_path):
+    """A candidate could delete the verdict and mkfifo in its place; O_NONBLOCK + a regular-file
+    check must fail closed instead of blocking the parent forever."""
+    path = tmp_path / "verdict.json"
+    os.mkfifo(path)
+    assert report_guard.read_verdict(path, NONCE).ran is False  # returns, does not hang

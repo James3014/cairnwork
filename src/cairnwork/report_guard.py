@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,7 +102,12 @@ def read_verdict(path: Path, nonce: str) -> Verdict:
     results are ``passed``. Outcomes are returned whenever the nonce matches (even when not all
     passed) so failed_on_base can see a test that failed."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # a candidate-controlled path; no symlink
+        # a candidate controls this path in run_dir: no symlink, and O_NONBLOCK + a regular-file
+        # check so a FIFO planted in its place cannot hang the parent open().
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return Verdict(False, {})
         with os.fdopen(fd, "rb") as handle:
             raw = handle.read(MAX_REPORT_BYTES + 1)  # cap the read
         if len(raw) > MAX_REPORT_BYTES:
@@ -113,11 +119,13 @@ def read_verdict(path: Path, nonce: str) -> Verdict:
         return Verdict(False, {})
     collected = data.get("collected")
     outcomes = data.get("outcomes")
-    # fail closed on any malformed shape (a candidate controls the file): no unhashable node
-    # ids, no non-dict outcomes — otherwise set()/membership would raise and crash the parent.
+    # fail closed on any malformed shape (a candidate controls the file): node ids and outcomes
+    # must be strings, else set()/membership/str compares could misbehave or crash the parent.
     if not isinstance(collected, list) or not all(isinstance(node, str) for node in collected):
         return Verdict(False, {})
-    if not isinstance(outcomes, dict) or not all(isinstance(node, str) for node in outcomes):
+    if not isinstance(outcomes, dict) or not all(
+        isinstance(node, str) and isinstance(result, str) for node, result in outcomes.items()
+    ):
         return Verdict(False, {})
     ran = (
         bool(collected)
