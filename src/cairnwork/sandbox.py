@@ -112,7 +112,8 @@ _DEVELOPER_DIR = re.compile(
 @lru_cache(maxsize=1)
 def developer_dirs() -> tuple[str, ...]:
     """The active developer directory (read-only): /usr/bin/git and friends are xcrun
-    shims that load their tools from it, so without it no test can run git."""
+    shims that load their tools from it, so without it no test can run git. For a full
+    Xcode the whole .app is readable: its tools load frameworks from SharedFrameworks."""
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv
             ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10,
@@ -123,7 +124,7 @@ def developer_dirs() -> tuple[str, ...]:
     real = os.path.realpath(done.stdout.strip()) if done.returncode == 0 else ""
     if not _DEVELOPER_DIR.fullmatch(real) or not os.path.isdir(real):
         return ()
-    return (real,)
+    return (real.removesuffix("/Contents/Developer"),)
 
 
 def build_profile(

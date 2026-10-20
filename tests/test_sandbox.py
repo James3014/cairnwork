@@ -275,3 +275,25 @@ def test_tests_can_run_git(project, tmp_path):
 )
 def test_only_standard_developer_dirs_are_readable(path, allowed):
     assert bool(sandbox._DEVELOPER_DIR.fullmatch(path)) is allowed
+
+
+@pytest.mark.parametrize(
+    ("selected", "readable"),
+    [
+        ("/Library/Developer/CommandLineTools", ("/Library/Developer/CommandLineTools",)),
+        ("/Applications/Xcode_26.6.app/Contents/Developer", ("/Applications/Xcode_26.6.app",)),
+        ("/Applications/Xcode.app/Contents", ()),
+    ],
+)
+def test_developer_dirs_maps_xcode_to_its_bundle(monkeypatch, selected, readable):
+    import subprocess
+
+    done = subprocess.CompletedProcess([], 0, stdout=selected + "\n", stderr="")
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: done)
+    monkeypatch.setattr(sandbox.os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(sandbox.os.path, "isdir", lambda p: True)
+    sandbox.developer_dirs.cache_clear()
+    try:
+        assert sandbox.developer_dirs() == readable
+    finally:
+        sandbox.developer_dirs.cache_clear()
