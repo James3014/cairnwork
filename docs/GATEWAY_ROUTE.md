@@ -12,11 +12,11 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 | `submit` < request.json | 綁定並開始執行；同一個冪等鍵重送時，回傳同一筆任務，不會重跑 | `{"task_id", "status", "duplicate"}` |
 | `status --task-id ID` 或 `--key 冪等鍵` | 查詢 | `{"task_id", "idempotency_key", "owner", "status", "attempt_id", "phase", "detail", "candidate_commit", "core_verified"}` |
 | `cancel --task-id ID` | 只能取消還沒開始的任務；已經在跑的會跑完 | `{"task_id", "status": "CANCELLED"}` |
-| `in-flight` | 給部署器的靜止閘門用 | `{"accepting", "count", "task_ids"}` |
+| `in-flight` | 給部署器的靜止閘門用；任何非 0 的 exit code（例如 state 目錄不存在）都要當作「有在途任務」 | `{"accepting", "count", "task_ids"}` |
 | `accept`／`drain` | 打開／關閉接新任務（**預設是關閉**） | `{"accepting": bool}` |
 | `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1 | `{"decisions": [...]}` |
 
-所有指令都要加 `--state <目錄>`。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。不要用 umask 077 啟動 Cairnwork：verifier 帳號需要讀取 checkout。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。
+所有指令都要加 `--state <目錄>`。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。呼叫端的 umask 不影響結果（umask 077 也可以，已實測）：verifier 帳號需要的讀取權限由 Cairnwork 自己設定。第一次正式 `accept` 請用全新的 state 目錄（請求摘要從這一版起包含 repo 路徑，舊目錄裡的綁定會對不上）。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。
 
 **Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`BAD_CONFIG`、`BAD_STATE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`、`DuplicateLogicalTask`）；3 查不到這個任務（`UNKNOWN_TASK`）；1 其他錯誤。
 
