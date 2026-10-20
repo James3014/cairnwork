@@ -29,7 +29,7 @@ packages = ["src/cairnwork"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 markers = [
     "sandbox: needs real macOS sandbox-exec (skipped elsewhere unless required)",
     "verifier_account: needs the dedicated verifier account (scripts/setup_verifier_user.sh)",

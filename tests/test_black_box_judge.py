@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from cairnwork.black_box_judge import (
+from experimental.black_box_judge import (
     BlackBoxCase,
     BlackBoxError,
     run_black_box_judge,
