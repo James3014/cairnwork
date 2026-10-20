@@ -20,6 +20,7 @@ with network access could still look for a public test branch.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path, PurePosixPath
 
 from cairnwork.gitcmd import OID, GitCommandError, run_git
@@ -96,16 +97,59 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def failed_on_base(runs, paths: tuple[str, ...]) -> bool:
-    """Tests with teeth: a test case from the deferred test files failed (the verifier's
-    trusted result, report_guard), and no verifier broke in another way (exit codes other
-    than 0 and 1)."""
+def new_tests(repo: Path, base: str, test_commit: str, paths: tuple[str, ...]) -> frozenset[str]:
+    """Node ids (``path::name`` or ``path::Class::name``) of the test functions the test
+    commit adds or changes: only these may count as teeth, not tests in the same file
+    that already failed on the base for another reason (e.g. the environment).
+
+    Top-level ``test*`` functions and ``test*`` methods of top-level ``Test*`` classes,
+    compared by AST (decorators included, line numbers not). Not seen: tests changed only
+    through a fixture, helper or module constant, nested or inherited test classes,
+    TestCase subclasses not named Test*, custom python_functions/python_classes. Such a
+    test commit is refused (no teeth found), never wrongly accepted."""
+    found = set()
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        before = _test_functions(repo, f"{base}:{path}")
+        for node_id, body in _test_functions(repo, f"{test_commit}:{path}").items():
+            if before.get(node_id) != body:
+                found.add(f"{path}::{node_id}")
+    return frozenset(found)
+
+
+def _test_functions(repo: Path, blob: str) -> dict[str, str]:
+    try:
+        source = run_git(repo, "show", blob)
+    except GitCommandError:
+        return {}  # a new file
+    except UnicodeDecodeError as exc:
+        raise TestCommitRejected("TEST_COMMIT_UNPARSABLE", f"{blob} is not UTF-8") from exc
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        raise TestCommitRejected("TEST_COMMIT_UNPARSABLE", blob) from exc
+    functions: dict[str, str] = {}
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in tree.body:
+        if isinstance(node, defs) and node.name.startswith("test"):
+            functions[node.name] = ast.dump(node)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            for item in node.body:
+                if isinstance(item, defs) and item.name.startswith("test"):
+                    functions[f"{node.name}::{item.name}"] = ast.dump(item)
+    return functions
+
+
+def failed_on_base(runs, targets: frozenset[str]) -> bool:
+    """Tests with teeth: one of the new or changed tests failed on the base (the
+    verifier's trusted result, report_guard), and no verifier broke in another way
+    (exit codes other than 0 and 1)."""
     if any(run.returncode not in (0, 1) for run in runs):
         return False
-    test_files = set(paths)
     for run in runs:
         for nodeid, outcome in run.outcomes.items():
-            if outcome == "failed" and nodeid.split("::", 1)[0] in test_files:
+            if outcome == "failed" and nodeid.split("[", 1)[0] in targets:
                 return True
     return False
 

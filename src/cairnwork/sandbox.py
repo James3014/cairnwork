@@ -36,6 +36,9 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _SAFE = re.compile(r"^/[A-Za-z0-9 _./+@~-]*$")
 SYSTEM_READ_SUBPATHS = ("/usr/lib", "/usr/share", "/System/Library", "/dev")
 SYSTEM_READ_LITERALS = ("/", "/private/etc/localtime", "/private/etc/passwd", "/usr/bin/env")
+# Where xcodebuild records that the Xcode license was accepted; a full Xcode's tools
+# refuse to run without reading it. It holds no user data.
+XCODE_LICENSE_PLIST = "/Library/Preferences/com.apple.dt.Xcode.plist"
 DEVICE_WRITES = ("/dev/null", "/dev/tty", "/dev/dtracehelper")
 CREDENTIAL_HOME_PATHS = (
     ".ssh",
@@ -103,6 +106,30 @@ def sbpl_path(path: Path | str) -> str:
     return real
 
 
+# Only the two standard places: the Command Line Tools, or an Xcode app bundle.
+_DEVELOPER_DIR = re.compile(
+    r"/Library/Developer/CommandLineTools|/Applications/Xcode[A-Za-z0-9._-]*\.app/Contents/Developer"
+)
+
+
+@lru_cache(maxsize=1)
+def developer_dirs() -> tuple[str, ...]:
+    """The active developer directory (read-only): /usr/bin/git and friends are xcrun
+    shims that load their tools from it, so without it no test can run git. For a full
+    Xcode the whole .app is readable: its tools load frameworks from SharedFrameworks."""
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, text=True, timeout=10,
+            check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    real = os.path.realpath(done.stdout.strip()) if done.returncode == 0 else ""
+    if not _DEVELOPER_DIR.fullmatch(real) or not os.path.isdir(real):
+        return ()
+    return (real.removesuffix("/Contents/Developer"),)
+
+
 def build_profile(
     read_roots: tuple[Path, ...], write_roots: tuple[Path, ...], home: Path | None = None
 ) -> Profile:
@@ -124,6 +151,10 @@ def build_profile(
         "(allow file-read*",
         *[f'  (subpath "{p}")' for p in SYSTEM_READ_SUBPATHS],
         *[f'  (literal "{p}")' for p in SYSTEM_READ_LITERALS],
+        *[f'  (subpath "{p}")' for p in developer_dirs()],
+        *[f'  (literal "{XCODE_LICENSE_PLIST}")' for p in developer_dirs() if p.endswith(".app")][
+            :1
+        ],
         *[f"  {rule}" for rule in reads],
         ")",
         "(allow file-write*",

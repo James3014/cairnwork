@@ -242,3 +242,68 @@ def test_python_must_be_an_absolute_path(project, tmp_path):
         run_verifiers(
             project, git(project, "rev-parse", "HEAD"), (spec,), tmp_path, "r1", python="python3"
         )
+
+
+@pytest.mark.sandbox
+def test_tests_can_run_git(project, tmp_path):
+    """/usr/bin/git is an xcrun shim that loads its tools from the developer directory;
+    a test that runs git must work inside the sandbox (Nexus-new #2769 pilot). The shim
+    is named outright: a Homebrew git earlier on PATH is not what this is about."""
+    code = (
+        "import subprocess\n"
+        "def test_git(tmp_path):\n"
+        "    for argv in (['/usr/bin/git', '--version'], ['/usr/bin/git', 'init', '-q']):\n"
+        "        done = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)\n"
+        "        assert done.returncode == 0, done.stderr\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_git.py": code}, "tests/test_git.py")
+    assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        ("/Library/Developer/CommandLineTools", True),
+        ("/Applications/Xcode.app/Contents/Developer", True),
+        ("/Applications/Xcode_16.4.app/Contents/Developer", True),
+        ("/Library/Developer", False),
+        ("/Library/Developer/CoreSimulator", False),
+        ("/Applications/XcodeEvil", False),
+        ("/Applications/Xcode.app/Contents", False),
+        ("/tmp", False),
+    ],
+)
+def test_only_standard_developer_dirs_are_readable(path, allowed):
+    assert bool(sandbox._DEVELOPER_DIR.fullmatch(path)) is allowed
+
+
+@pytest.mark.parametrize(
+    ("selected", "readable"),
+    [
+        ("/Library/Developer/CommandLineTools", ("/Library/Developer/CommandLineTools",)),
+        ("/Applications/Xcode_26.6.app/Contents/Developer", ("/Applications/Xcode_26.6.app",)),
+        ("/Applications/Xcode.app/Contents", ()),
+    ],
+)
+def test_developer_dirs_maps_xcode_to_its_bundle(monkeypatch, selected, readable):
+    import subprocess
+
+    done = subprocess.CompletedProcess([], 0, stdout=selected + "\n", stderr="")
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: done)
+    monkeypatch.setattr(sandbox.os.path, "realpath", lambda p: p)
+    monkeypatch.setattr(sandbox.os.path, "isdir", lambda p: True)
+    sandbox.developer_dirs.cache_clear()
+    try:
+        assert sandbox.developer_dirs() == readable
+    finally:
+        sandbox.developer_dirs.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("dirs", "licensed"),
+    [(("/Applications/Xcode.app",), True), (("/Library/Developer/CommandLineTools",), False)],
+)
+def test_xcode_license_plist_only_with_a_full_xcode(monkeypatch, tmp_path, dirs, licensed):
+    monkeypatch.setattr(sandbox, "developer_dirs", lambda: dirs)
+    profile = sandbox.build_profile((), (tmp_path / "w",), home=tmp_path / "home")
+    assert (sandbox.XCODE_LICENSE_PLIST in profile.text) is licensed
