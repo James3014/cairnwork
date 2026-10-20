@@ -79,6 +79,11 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     """Reject a task before anything is bound or run."""
     if not task.allowed_files or len(set(task.allowed_files)) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
+    if len(set(task.allowed_files)) != len(task.allowed_files):
+        raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
+    for path in task.allowed_files:
+        if not _clean_relative_path(path):
+            raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
     protected = protected_verifier_inputs(task.allowed_files)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
@@ -86,6 +91,18 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
         return tuple(parse_verifier(vid, list(argv)) for vid, argv in task.verifiers)
     except VerifierRejected as exc:
         raise TaskRejected(exc.code, str(exc)) from exc
+
+
+def _clean_relative_path(path: object) -> bool:
+    if not isinstance(path, str) or not path or path != path.strip():
+        return False
+    parts = path.split("/")
+    return (
+        not path.startswith("/")
+        and all(part not in ("", ".", "..") for part in parts)
+        and parts[0].lower() != ".git"
+        and not any(ord(ch) < 32 or ch == "\\" for ch in path)
+    )
 
 
 def run_task(

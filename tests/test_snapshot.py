@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from conftest import git
 
@@ -83,3 +85,20 @@ def test_worker_attributes_and_filters_do_not_run(repo, attempt, tmp_path):
     (attempt.path / "src" / "a.py").write_text("x = 2\n")
     snapshot_candidate(repo, attempt, ALLOWED)
     assert not marker.exists()
+
+
+def test_hard_link_to_a_file_outside_the_clone_is_rejected(repo, attempt, tmp_path):
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY\n")
+    target = attempt.path / "src" / "a.py"
+    target.unlink()
+    os.link(secret, target)
+    assert code(repo, attempt) == "FORBIDDEN_MODE"
+    assert "PRIVATE KEY" not in git(repo, "log", "--all", "-p")
+
+
+def test_fifo_in_place_of_an_allowed_file_is_rejected(repo, attempt):
+    target = attempt.path / "src" / "a.py"
+    target.unlink()
+    os.mkfifo(target)
+    assert code(repo, attempt) == "FORBIDDEN_MODE"

@@ -118,6 +118,13 @@ def test_resend_does_not_run_again(project, stores, tmp_path):
         ({"allowed": ("tests/test_calc.py",)}, "PROTECTED_VERIFIER_INPUT"),
         ({"allowed": ("src/calc.py", "pyproject.toml")}, "PROTECTED_VERIFIER_INPUT"),
         ({"allowed": ()}, "BAD_SCOPE"),
+        ({"allowed": ("../x.py",)}, "BAD_SCOPE"),
+        ({"allowed": ("/etc/passwd",)}, "BAD_SCOPE"),
+        ({"allowed": (".git/config",)}, "BAD_SCOPE"),
+        ({"allowed": ("src//calc.py",)}, "BAD_SCOPE"),
+        ({"allowed": ("src/./calc.py",)}, "BAD_SCOPE"),
+        ({"allowed": ("src/calc.py", "src/calc.py")}, "BAD_SCOPE"),
+        ({"allowed": ("src/calc.py\n",)}, "BAD_SCOPE"),
         ({"verifiers": (("v", ("bash", "-c", "true")),)}, "VERIFIER_NOT_ALLOWED"),
     ],
 )
