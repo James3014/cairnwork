@@ -303,3 +303,16 @@ def test_leftover_cleanup_ignores_an_attempt_id_that_is_not_a_name(tmp_path):
     (tmp_path / "runs").mkdir()
     _remove_leftovers(tmp_path / "runs", "../keep")
     assert victim.exists()
+
+
+def test_leftover_cleanup_removes_whole_base_test_runs(tmp_path):
+    from cairnwork.recovery import _remove_leftovers
+
+    base_run = tmp_path / "a1-b-v0.abc"
+    verify_run = tmp_path / "a1-v-v0.def"
+    for private in (base_run, verify_run):
+        (private / "run").mkdir(parents=True)
+        (private / "verifier.log").write_text("log")
+    _remove_leftovers(tmp_path, "a1")
+    assert not base_run.exists()
+    assert (verify_run / "verifier.log").exists() and not (verify_run / "run").exists()

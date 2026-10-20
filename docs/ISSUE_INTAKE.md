@@ -7,7 +7,18 @@
 1. 在 Issue 內文放**一個** ```` ```eia-task ```` JSON 區塊，格式和 Nexus-new 的 EIA 相同（`docs/ops/eia_nightly.md`）。有三點不同：
    - `verification` 只接受 `python3 -m pytest [-q] [-p no:cacheprovider] tests/...`，不接受 `git diff --check` 那種 shell 寫法。
    - `hard` 的 Issue 不收。
-   - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。所以會失敗的那個測試要先放到 main 上（例如先標成 `xfail(strict=True)`，再讓修正把標記拿掉，這種情況要事先講好），worker 只改原始碼。
+   - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。
+   - **證明 bug 的測試用 `test_commit` 提供（測試延後套用）**：開 Issue 的人先推一個分支，上面只有一個 commit，父 commit 是 main 上的某個版本，內容只新增或修改 `tests/` 底下的一般檔案，不能有 `conftest.py`。把它的 40 位 hex 填進區塊的 `test_commit`。
+     - **worker 在修 bug 的期間，這台機器上沒有任何地方有這個測試**：
+       - 接手時只透過 GitHub API 讀取它的父 commit，不下載測試。
+       - 給 worker 的指示裡不含 `eia-task` 區塊，也不含 commit id。
+       - worker 結束後，Cairnwork 才抓取測試；在 base 上跑的 log 用完就刪。
+       - 任務開始前，如果這個測試 commit 已經在本機出現過（例如重試，或之前另一個任務用過同一個），就拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）。重試時要把測試推成一個新的 commit。兩個**同時執行**的任務用同一個測試 commit 時擋不住，所以一個測試 commit 只給一張 Issue 用。
+       - **限制**：worker 和 Cairnwork 用同一個系統帳號，而修正的驗證 log 是 Core 公證的證據，必須保留。所以重試時如果新的測試內容和上一次相同，worker 仍可能從上一次的 log 讀到。要徹底解決，必須讓 worker 改在獨立的帳號或環境裡執行（追蹤中）。
+     - **確認測試有效**：在「base + 測試」上跑 verifier，JUnit 報告裡必須有延後測試檔的測試案例失敗，而且沒有 verifier 用其他方式出錯。測試原本就通過、只是 import 失敗、或只有別的檔案失敗，都拒絕（`TESTS_DO_NOT_FAIL_ON_BASE`）。
+     - **驗證修正**：把測試疊到修正上，再跑 verifier、交給 Core 公證。PR 的內容就是這個 commit，修正和測試一起送出。
+     - **base 的決定方式**：有 `test_commit` 時，base 是它的父 commit，而且必須在 origin/main 的歷史裡，不是當下的 main。
+     - **限制**：測試分支放在公開 repo 上。worker 拿不到 commit id，也不會被告知分支名稱，但如果 worker 有網路，理論上能自己去找。要徹底杜絕，必須限制 worker 的網路，這要等 worker 改在獨立環境裡執行。分支名稱不要用一看就知道的名字。分支要保留到 Cairnwork 收尾（開出 PR 或判定失敗）之後才刪：worker 結束時 Cairnwork 才用 commit id 抓取測試，而 GitHub 只允許抓取還有分支指得到的 commit。
 2. 由可信身分貼上 `cairnwork:queue` 標籤。可信身分是 `James3014` 或 `james3014-nexus-agent[bot]`。
    - repo 是公開的，所以會逐一檢查：Issue 作者、最後一次貼標籤的人、貼標籤之後所有的標題和內文修改，都必須是可信身分。
    - 編輯歷史不完整也一律拒絕。

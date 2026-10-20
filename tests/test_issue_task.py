@@ -49,6 +49,8 @@ def test_a_good_block_parses():
         (body({**GOOD, "verification": ["python3 -m pytest -q"]}), "TASK_VERIFICATION_UNSUPPORTED"),
         (body(extra="```eia-contract\n{}\n```"), "TASK_BODY_HAS_FOREIGN_CONTRACT"),
         (body({**GOOD, "capability_ids": []}), "TASK_CAPABILITY_IDS_INVALID"),
+        (body({**GOOD, "test_commit": "abc"}), "TASK_TEST_COMMIT_INVALID"),
+        (body({**GOOD, "test_commit": 7}), "TASK_TEST_COMMIT_INVALID"),
     ],
 )
 def test_refused_blocks(text, code):
@@ -114,3 +116,7 @@ def test_untrusted_queue(kwargs, reason):
 def test_the_latest_label_event_counts():
     relabeled = {**LABELED, "actor": "someone", "at": "2026-10-20T10:00:00Z"}
     assert trust(events=(LABELED, relabeled)) == "QUEUE_LABELED_BY_UNTRUSTED"
+
+
+def test_a_test_commit_is_carried():
+    assert parse_task_block(body({**GOOD, "test_commit": "a" * 40})).test_commit == "a" * 40

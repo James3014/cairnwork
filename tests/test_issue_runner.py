@@ -26,6 +26,7 @@ class FakeGitHub(runner.GitHub):
         self.bodies = {i["number"]: i for i in issues}
         self.trusted = trusted
         self.comments, self.prs = [], []
+        self.commits = {}
 
     def issues(self, label):
         return [self.bodies[n] for n, labels in self.labels.items() if label in labels]
@@ -38,6 +39,11 @@ class FakeGitHub(runner.GitHub):
 
     def relabel(self, number, add, remove):
         self.labels[number] = (self.labels[number] - {remove}) | {add}
+
+    def parents(self, commit):
+        if commit not in self.commits:
+            raise RuntimeError("gh api failed: HTTP 404 Not Found")
+        return self.commits[commit]
 
     def find_pr(self, branch):
         return next(
@@ -286,3 +292,51 @@ def test_a_github_error_while_refusing_does_not_stop_the_pass(setup):
     github = Flaky([issue(block={**BLOCK, "allowed_files": ["pyproject.toml"]}), issue(number=8)])
     out = runner.take(setup["intake"], github, setup["clone"])
     assert "502" in out[0]["error"] and out[1]["duplicate"] is False
+
+
+def test_an_issue_with_deferred_tests_binds_to_the_tests_base(setup, monkeypatch):
+    clone = setup["clone"]
+    base = git(clone, "rev-parse", "HEAD")
+    commit_change(clone, {"later.txt": "main moved on\n"})
+    git(clone, "push", "-q", "origin", "main")
+    test_commit = "c" * 40
+    github = FakeGitHub([issue(block={**BLOCK, "test_commit": test_commit})])
+    github.commits[test_commit] = [base]
+    taken = runner.take(setup["intake"], github, clone)[0]
+    request = setup["intake"].load_request(taken["task_id"])
+    assert request.test_commit == test_commit and request.base_commit == base
+    assert test_commit not in request.instructions and "eia-task" not in request.instructions
+    assert base in github.comments[-1][1]
+    git(clone, "checkout", "-q", "--detach", base)  # what Cairnwork builds: fix, then tests
+    commit_change(clone, {"src/calc.py": "x = 2\n"}, message="fix")
+    tests = commit_change(clone, {"tests/test_bug.py": "def test_bug():\n    assert 0\n"})
+    git(clone, "checkout", "-q", "main")
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    monkeypatch.setattr(
+        Intake, "load_request", lambda self, tid: _with(request, test_commit=tests, base=base)
+    )
+    monkeypatch.setattr(Intake, "status", _completed(setup, taken, tests))
+    out = runner.settle(setup["intake"], github, clone)
+    assert out[0]["pr"].startswith("https://")
+
+
+def _with(request, test_commit, base):
+    import dataclasses
+
+    return dataclasses.replace(request, test_commit=test_commit, base_commit=base)
+
+
+@pytest.mark.parametrize(
+    ("parents", "code"),
+    [
+        (None, "TASK_TEST_COMMIT_UNKNOWN"),
+        ([], "TASK_TEST_COMMIT_SHAPE"),
+        (["d" * 40], "TASK_TEST_BASE_NOT_ON_MAIN"),
+    ],
+)
+def test_bad_test_commits_need_a_fix(setup, parents, code):
+    github = FakeGitHub([issue(block={**BLOCK, "test_commit": "c" * 40})])
+    if parents is not None:
+        github.commits["c" * 40] = parents
+    out = runner.take(setup["intake"], github, setup["clone"])
+    assert code in out[0]["refused"] and github.labels[7] == {runner.NEEDS_FIX}

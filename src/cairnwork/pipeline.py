@@ -20,12 +20,21 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
+from cairnwork.deferred_tests import (
+    TestCommitRejected,
+    ensure_test_commit,
+    failed_on_base,
+    lay_tests_over,
+    never_seen,
+    test_paths,
+)
 from cairnwork.gitcmd import OID
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
@@ -66,9 +75,11 @@ class TaskSpec:
     allowed_files: tuple[str, ...]
     verifiers: tuple[tuple[str, tuple[str, ...]], ...]
     allow_deletions: bool = False
+    test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
 
     def request(self) -> dict:
-        return {
+        extra = {"test_commit": self.test_commit} if self.test_commit else {}
+        return extra | {
             "repo": str(self.repo),
             "title": self.title,
             "instructions": self.instructions,
@@ -105,6 +116,8 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     """Reject a task before anything is bound or run."""
     if not isinstance(task.base_commit, str) or not OID.fullmatch(task.base_commit):
         raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
+    if task.test_commit and not OID.fullmatch(str(task.test_commit)):
+        raise TaskRejected("BAD_TEST_COMMIT", "test_commit must be a 40-hex commit id")
     if not task.allowed_files or len(set(task.allowed_files)) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
     if len(set(task.allowed_files)) != len(task.allowed_files):
@@ -226,9 +239,40 @@ class _Steps:
             os._exit(137)
 
 
+def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
+    """Check a task's deferred tests once the worker is done: plain test files on the
+    base whose test cases really fail there. Returns their paths."""
+    ensure_test_commit(task.repo, task.test_commit)
+    paths = test_paths(task.repo, task.base_commit, task.test_commit)
+    runs = run_verifiers(
+        task.repo,
+        task.test_commit,
+        specs,
+        run_root,
+        f"{result.attempt_id}-b",
+        attempt_id=result.attempt_id,
+        account=verifying[0],
+        python=verifying[1],
+        base_commit=task.base_commit,
+    )
+    teeth = failed_on_base(runs, paths)
+    for run in runs:  # not evidence for Core; would show the tests to later workers
+        shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
+    if not teeth:
+        codes = [run.returncode for run in runs]
+        raise TestCommitRejected("TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
+    return paths
+
+
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
     task_id = steps.task_id
+    if task.test_commit:
+        try:
+            never_seen(task.repo, task.test_commit)
+        except TestCommitRejected as exc:
+            result.reason = str(exc)
+            return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:
@@ -244,12 +288,22 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except CandidateRejected as exc:
             result.reason = str(exc)
             return
-        result.candidate_commit = candidate.candidate_commit
-        steps.reach("CANDIDATE", candidate.candidate_commit)
+        judged, test_files = candidate.candidate_commit, ()
+        if task.test_commit:  # only now: the worker is done (deferred_tests.py)
+            try:
+                test_files = _tests_with_teeth(task, specs, run_root, result, verifying)
+                judged = lay_tests_over(
+                    task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
+                )
+            except TestCommitRejected as exc:
+                result.reason = str(exc)
+                return
+        result.candidate_commit = judged
+        steps.reach("CANDIDATE", judged)
         steps.reach("VERIFYING")
         runs = run_verifiers(
             task.repo,
-            candidate.candidate_commit,
+            judged,
             specs,
             run_root,
             f"{result.attempt_id}-v",
@@ -263,7 +317,7 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
             task_id,
             digest,
             tuple(s.verifier_id for s in specs),
-            task.allowed_files,
+            tuple(task.allowed_files) + test_files,
             task.allow_deletions,
         )
         steps.reach("NOTARIZING")
@@ -273,12 +327,10 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
             spec,
             task.repo,
             task.base_commit,
-            candidate.candidate_commit,
+            judged,
             tuple(run.observation for run in runs),
         )
-        recorded = notary.verdict(
-            task_id, result.attempt_id, expected_candidate=candidate.candidate_commit
-        )
+        recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
         result.verified = bool(verdict.verified and recorded and recorded.verified)
         result.reason = f"CORE_{verdict.status}"
     finally:
