@@ -7,7 +7,9 @@ recovery needs the exclusive lock, so it can only run when no Cairnwork process
 is mid-task. The kernel drops the lock when the process dies, however it dies,
 so there is no stale lock to clean up and no PID that could be reused (Nexus-new
 #2646 zombie PIDs, #2717 unreclaimable lease receipts). Child processes do not
-inherit the lock (subprocess closes file descriptors by default).
+inherit the lock (subprocess closes file descriptors by default), except where
+``shared_fd`` hands it on: intake binds a task and passes the lock to the runner
+it starts, so recovery cannot settle the task between the two.
 """
 
 from __future__ import annotations
@@ -26,11 +28,21 @@ class RunLockBusy(Exception):
         super().__init__(f"{self.code}: a Cairnwork run is in progress")
 
 
+def shared_fd(ledger_path: Path) -> int:
+    """Open and share-lock the run lock; the caller owns (and must close) the fd."""
+    fd = os.open(_lock_path(ledger_path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    return fd
+
+
+def _lock_path(ledger_path: Path) -> Path:
+    return Path(ledger_path).with_name(Path(ledger_path).name + ".lock")
+
+
 @contextmanager
 def held(ledger_path: Path, *, exclusive: bool) -> Iterator[None]:
     """Hold the run lock of a ledger; exclusive is non-blocking (RunLockBusy if taken)."""
-    lock = Path(ledger_path).with_name(Path(ledger_path).name + ".lock")
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = os.open(_lock_path(ledger_path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         if exclusive:
             try:

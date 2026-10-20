@@ -12,6 +12,9 @@ dependencies = [
     "nexus-certify",
 ]
 
+[project.scripts]
+cairnwork-route = "cairnwork.route:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8",

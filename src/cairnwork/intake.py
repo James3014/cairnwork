@@ -1,0 +1,238 @@
+"""Gateway-facing intake for one task type (council F): submit, status, cancel, drain.
+
+The old Gateway keeps its entry and authentication and forwards only small bug
+fixes here, through the ``cairnwork-route`` command (route.py). Everything lives
+in one state directory (owner-only):
+
+    ACCEPTING          present: new tasks are taken; absent (the default): refused
+    config.json        {"model", "agy", "verifier_account"} for the runner
+    ownership.sqlite, notary.sqlite, journal.sqlite
+    requests/<task_id>.json   the request as bound (its digest is checked again)
+    runs/              attempt clones, verifier logs, one runner log per task
+
+``submit`` binds the task (owner "cairnwork") while holding the shared run lock
+and starts a runner process that inherits that lock, so restart recovery cannot
+settle the task before the runner has it; if the runner dies, the kernel drops
+the lock and ``recover`` settles the task (never re-runs it). A resend with the
+same idempotency key returns the same task and starts nothing, also while
+drained. Rollback = remove ACCEPTING: tasks in flight finish or are settled here;
+nothing is re-run in another system.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from cairnwork import runlock
+from cairnwork.journal import Journal
+from cairnwork.notary import Notary
+from cairnwork.ownership import OwnershipLedger, OwnershipUnknown
+from cairnwork.pipeline import TaskSpec, check_task
+from cairnwork.verifier_account import VerifierAccount
+
+FIELDS = frozenset(
+    {
+        "idempotency_key",
+        "card_hash",
+        "title",
+        "instructions",
+        "repo",
+        "base_commit",
+        "allowed_files",
+        "verifiers",
+    }
+)
+_spawn = subprocess.Popen  # replaced in tests
+DEFAULT_CONFIG = {"model": "gemini-3.8-flash-high", "agy": "agy", "verifier_account": True}
+
+
+class IntakeRefused(Exception):
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
+
+
+def task_from_payload(payload: Any) -> TaskSpec:
+    """A closed schema: unknown or missing fields are refused, never ignored."""
+    if not isinstance(payload, dict) or set(payload) != FIELDS:
+        got = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
+        raise IntakeRefused("BAD_REQUEST", f"fields must be exactly {sorted(FIELDS)}, got {got}")
+    texts = ("idempotency_key", "card_hash", "title", "instructions", "repo", "base_commit")
+    if not all(isinstance(payload[name], str) for name in texts):
+        raise IntakeRefused("BAD_REQUEST", "text fields must be strings")
+    files, verifiers = payload["allowed_files"], payload["verifiers"]
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise IntakeRefused("BAD_REQUEST", "allowed_files must be a list of strings")
+    if not isinstance(verifiers, list) or not all(_verifier_shape(v) for v in verifiers):
+        raise IntakeRefused("BAD_REQUEST", "verifiers must be [[id, [argv...]], ...]")
+    if not os.path.isabs(payload["repo"]):
+        raise IntakeRefused("BAD_REQUEST", "repo must be an absolute path")
+    return TaskSpec(
+        idempotency_key=payload["idempotency_key"],
+        card_hash=payload["card_hash"],
+        title=payload["title"],
+        instructions=payload["instructions"],
+        repo=Path(payload["repo"]),
+        base_commit=payload["base_commit"],
+        allowed_files=tuple(files),
+        verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
+    )
+
+
+def _verifier_shape(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and isinstance(value[1], list)
+        and all(isinstance(a, str) for a in value[1])
+    )
+
+
+@dataclass(frozen=True)
+class Intake:
+    state: Path
+
+    @property
+    def ledger(self) -> OwnershipLedger:
+        return OwnershipLedger(self.state / "ownership.sqlite")
+
+    @property
+    def notary(self) -> Notary:
+        return Notary(self.state / "notary.sqlite")
+
+    @property
+    def journal(self) -> Journal:
+        return Journal(self.state / "journal.sqlite")
+
+    @property
+    def run_root(self) -> Path:
+        return self.state / "runs"
+
+    def config(self) -> dict[str, Any]:
+        path = self.state / "config.json"
+        loaded = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
+            raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
+        return {**DEFAULT_CONFIG, **loaded}
+
+    def verifier_account(self) -> VerifierAccount | None:
+        return VerifierAccount() if self.config()["verifier_account"] else None
+
+    def accepting(self) -> bool:
+        return (self.state / "ACCEPTING").exists()
+
+    def set_accepting(self, on: bool) -> None:
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if on:
+            (self.state / "ACCEPTING").touch(mode=0o600)
+        else:
+            (self.state / "ACCEPTING").unlink(missing_ok=True)
+
+    def submit(self, payload: Any) -> dict[str, Any]:
+        task = task_from_payload(payload)
+        check_task(task)
+        ledger = self.ledger
+        if not self.accepting():
+            try:
+                ledger.get(idempotency_key=task.idempotency_key)
+            except OwnershipUnknown as exc:
+                raise IntakeRefused("NOT_ACCEPTING", "Cairnwork takes no new tasks") from exc
+        for directory in (self.state, self.state / "requests", self.run_root):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = runlock.shared_fd(ledger.path)
+        try:
+            bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
+            record = bound.record
+            if not bound.duplicate:
+                try:
+                    self._store_request(record.task_id, payload)
+                    self._start_runner(record.task_id, fd)
+                except Exception:
+                    ledger.set_status(record.task_id, "FAILED")  # never left BOUND, unowned
+                    raise
+        finally:
+            os.close(fd)  # the runner holds its own copy of the lock now
+        return {"task_id": record.task_id, "status": record.status, "duplicate": bound.duplicate}
+
+    def _store_request(self, task_id: str, payload: dict[str, Any]) -> None:
+        path = self.state / "requests" / f"{task_id}.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, sort_keys=True)
+
+    def load_request(self, task_id: str) -> TaskSpec:
+        path = self.state / "requests" / f"{task_id}.json"
+        return task_from_payload(json.loads(path.read_text()))
+
+    def _start_runner(self, task_id: str, lock_fd: int) -> None:
+        log = self.run_root / f"{task_id}.runner.log"
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            _spawn(  # noqa: S603 - fixed argv, no shell
+                [
+                    sys.executable,
+                    "-m",
+                    "cairnwork.route",
+                    "--state",
+                    str(self.state),
+                    "_run",
+                    "--task-id",
+                    task_id,
+                    "--lock-fd",
+                    str(lock_fd),
+                ],
+                pass_fds=(lock_fd,),
+                stdin=subprocess.DEVNULL,
+                stdout=fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            os.close(fd)
+
+    def status(self, *, task_id: str | None = None, key: str | None = None) -> dict[str, Any]:
+        record = self.ledger.get(task_id=task_id, idempotency_key=key)
+        entries = self.journal.entries(record.task_id)
+        attempt = entries[-1].attempt_id if entries else ""
+        phases = [e for e in entries if e.attempt_id == attempt]
+        candidates = [e.detail for e in phases if e.phase == "CANDIDATE"]
+        verified = False
+        if candidates:
+            verdict = self.notary.verdict(
+                record.task_id, attempt, expected_candidate=candidates[-1]
+            )
+            verified = bool(verdict and verdict.verified)
+        return {
+            "task_id": record.task_id,
+            "idempotency_key": record.idempotency_key,
+            "owner": record.owner,
+            "status": record.status,
+            "attempt_id": attempt,
+            "phase": phases[-1].phase if phases else "",
+            "detail": phases[-1].detail if phases else "",
+            "candidate_commit": candidates[-1] if candidates else "",
+            "core_verified": verified,
+        }
+
+    def cancel(self, task_id: str) -> dict[str, Any]:
+        """Only a task that has not started can be cancelled; a running one finishes."""
+        record = self.ledger.get(task_id=task_id)
+        if record.status != "BOUND":
+            raise IntakeRefused("NOT_CANCELLABLE", f"{task_id} is {record.status}")
+        return {"task_id": task_id, "status": self.ledger.set_status(task_id, "CANCELLED").status}
+
+    def in_flight(self) -> dict[str, Any]:
+        records = self.ledger.in_flight() if (self.state / "ownership.sqlite").exists() else []
+        return {
+            "accepting": self.accepting(),
+            "count": len(records),
+            "task_ids": [r.task_id for r in records],
+        }
