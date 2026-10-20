@@ -5,7 +5,7 @@ fixes here, through the ``cairnwork-route`` command (route.py). Everything lives
 in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
-    config.json        {"model", "agy", "verifier_account", "verifier_python"} for the runner
+    config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork import runlock
+from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import InvalidStatusTransition, OwnershipLedger, OwnershipUnknown
@@ -61,6 +62,10 @@ DEFAULT_CONFIG = {
     "agy": "agy",
     "verifier_account": True,
     "verifier_python": None,
+    # Cairnwork's own repository for this target: the base is fetched into it from the
+    # request's repo (read-only), and every ref or object Cairnwork writes lands here,
+    # never in the caller's repository (e.g. the Gateway's live Controller).
+    "mirror": None,
 }
 
 
@@ -138,9 +143,10 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
-        python = loaded.get("verifier_python")
-        if python is not None and not (isinstance(python, str) and os.path.isabs(python)):
-            raise IntakeRefused("BAD_CONFIG", "verifier_python must be an absolute path")
+        for key in ("verifier_python", "mirror"):
+            value = loaded.get(key)
+            if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
+                raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:
@@ -182,7 +188,10 @@ class Intake:
     def submit(self, payload: Any) -> dict[str, Any]:
         task = task_from_payload(payload)
         check_task(task)
-        self.config()  # a bad config is refused here, not left to the runner
+        mirror = self.config()["mirror"]  # a bad config is refused here, not by the runner
+        if mirror:
+            payload = {**payload, "repo": _mirror_base(Path(mirror), task.repo, task.base_commit)}
+            task = task_from_payload(payload)
         with self._intake_lock():
             return self._bind_and_start(task, payload)
 
@@ -289,3 +298,15 @@ class Intake:
             "count": len(records),
             "task_ids": [r.task_id for r in records],
         }
+
+
+def _mirror_base(mirror: Path, source: Path, base: str) -> str:
+    """Fetch base from source into mirror (created bare if missing); only source is read."""
+    try:
+        if not mirror.exists():
+            run_git(mirror.parent, "init", "--quiet", "--bare", str(mirror))
+        run_git(mirror, "fetch", "--quiet", "--no-tags", str(source), base)
+        run_git(mirror, "cat-file", "-e", f"{base}^{{commit}}")
+    except GitCommandError as exc:
+        raise IntakeRefused("BAD_REQUEST", f"cannot fetch {base} from {source}") from exc
+    return str(mirror)

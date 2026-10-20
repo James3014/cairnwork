@@ -183,3 +183,25 @@ def test_shadow_check_validates_without_side_effects(state, project):
     code, out = route(state, "check", stdin={**request(project), "allowed_files": ["../x"]})
     assert code == 2 and out["error"] == "BAD_SCOPE"
     assert sorted(p.name for p in state.iterdir()) == ["config.json"]
+
+
+def test_a_mirror_keeps_every_write_out_of_the_callers_repository(state, project, tmp_path):
+    mirror = tmp_path / "mirror.git"
+    config = json.loads((state / "config.json").read_text())
+    (state / "config.json").write_text(json.dumps({**config, "mirror": str(mirror)}))
+    refs_before = git(project, "for-each-ref")
+    route(state, "accept")
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 0, out
+    status = wait_finished(state, out["task_id"])
+    assert status["status"] == "COMPLETED" and status["core_verified"] is True
+    candidate = status["candidate_commit"]
+    assert git(mirror, "cat-file", "-t", candidate) == "commit"
+    assert git(project, "for-each-ref") == refs_before  # no ref written in the caller's repo
+    probe = subprocess.run(
+        ["git", "-C", str(project), "cat-file", "-e", candidate], capture_output=True, check=False
+    )
+    assert probe.returncode != 0  # nor the candidate's objects
+    bad = {**request(project, key="gw-2"), "base_commit": "d" * 40}
+    code, refused = route(state, "submit", stdin=bad)
+    assert code == 2 and refused["error"] == "BAD_REQUEST"
