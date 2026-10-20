@@ -14,6 +14,7 @@ import subprocess
 import threading
 
 RUN_TOKEN_VAR = "CAIRNWORK_VERIFIER_RUN"
+ATTEMPT_ENV = "CAIRNWORK_ATTEMPT"  # marks every process of an attempt, for recovery
 MAX_LOG_BYTES = 4 << 20
 MAX_REPORT_BYTES = 4 << 20
 

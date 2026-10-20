@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-ATTEMPT_ENV = "CAIRNWORK_ATTEMPT"  # lets recovery find this worker if Cairnwork dies
+from cairnwork.confined import ATTEMPT_ENV
 
 PROMPT = """You are fixing a small bug in this repository.
 

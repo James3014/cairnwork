@@ -196,6 +196,10 @@ class OwnershipLedger:
             raise OwnershipUnknown(str(value))
         return record
 
+    @property
+    def path(self) -> Path:
+        return self._path
+
     def in_flight(self) -> list[OwnershipRecord]:
         """Tasks bound or dispatched but not finished (what a crash can leave behind)."""
         conn = self._connect()

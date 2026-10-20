@@ -134,14 +134,14 @@ def run_task(
     run_root: Path,
 ) -> TaskResult:
     specs = check_task(task)
-    with runlock.held(run_root, exclusive=False):
+    with runlock.held(ledger.path, exclusive=False):
         bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
         record = bound.record
         if bound.duplicate:
             return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
         attempt_id = f"a{secrets.token_hex(8)}"
         steps = _Steps(journal, record.task_id, attempt_id)
-        steps.reach("DISPATCHED")
+        steps.reach("DISPATCHED", str(Path(run_root).resolve()))
         ledger.set_status(record.task_id, "DISPATCHED")
         result = TaskResult(record.task_id, attempt_id, "FAILED")
         try:
@@ -192,7 +192,12 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps) -> No
         steps.reach("CANDIDATE", candidate.candidate_commit)
         steps.reach("VERIFYING")
         runs = run_verifiers(
-            task.repo, candidate.candidate_commit, specs, run_root, f"{result.attempt_id}-v"
+            task.repo,
+            candidate.candidate_commit,
+            specs,
+            run_root,
+            f"{result.attempt_id}-v",
+            attempt_id=result.attempt_id,
         )
         result.logs = [str(run.log_path) for run in runs]
         spec = AcceptanceSpec(

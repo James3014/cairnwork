@@ -220,3 +220,76 @@ def test_run_that_decided_failed_stays_failed_even_if_core_verified(project, tmp
     assert [(d.new_status, d.reason) for d in decisions] == [
         ("FAILED", "INTERRUPTED_AFTER_FINISHED")
     ]
+
+
+def test_recovery_with_another_run_root_still_waits_for_the_live_run(project, tmp_path):
+    proc = subprocess.Popen(
+        [sys.executable, str(DRIVER), str(project), str(tmp_path), GOOD, "orphan"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "worker-running").exists():
+            assert time.monotonic() < deadline and proc.poll() is None
+            time.sleep(0.1)
+        ledger, notary, journal = stores(tmp_path)
+        with pytest.raises(runlock.RunLockBusy):
+            recover(ledger=ledger, notary=notary, journal=journal, run_root=tmp_path / "other")
+        assert ledger.in_flight()[0].status == "DISPATCHED"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_dispatched_task_without_journal_is_reported_not_failed(project, tmp_path):
+    ledger, _, _ = stores(tmp_path)
+    task = ledger.bind("k7", {"x": 1}, "cairnwork", "card-7").record
+    ledger.set_status(task.task_id, "DISPATCHED")
+    decisions, ledger = settle(tmp_path)
+    assert decisions[0].reason.startswith("RECOVERY_ERROR")
+    assert ledger.get(task_id=task.task_id).status == "DISPATCHED"
+
+
+@pytest.mark.sandbox
+def test_sigkill_during_verification_kills_the_verifier_and_cleans_up(repo, tmp_path):
+    commit_change(
+        repo,
+        {
+            "src/calc.py": "def add(a, b):\n    return a + b + 1\n",
+            "tests/conftest.py": (
+                "import sys, pathlib\n"
+                "sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / 'src'))\n"
+            ),
+            "tests/test_calc.py": (
+                "import time\nfrom calc import add\n"
+                "def test_add():\n    time.sleep(40)\n    assert add(2, 3) == 5\n"
+            ),
+        },
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(DRIVER), str(repo), str(tmp_path), GOOD],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 60
+    journal = Journal(tmp_path / "journal.sqlite")
+    while True:
+        assert time.monotonic() < deadline and proc.poll() is None
+        ledger = OwnershipLedger(tmp_path / "own.sqlite")
+        flight = ledger.in_flight()
+        if flight and any(e.phase == "VERIFYING" for e in journal.entries(flight[0].task_id)):
+            break
+        time.sleep(0.2)
+    time.sleep(3)  # let the sandboxed pytest start
+    os.kill(proc.pid, signal.SIGKILL)
+    proc.wait()
+    decisions, _ = settle(tmp_path)
+    assert [(d.new_status, d.reason) for d in decisions] == [
+        ("FAILED", "INTERRUPTED_AFTER_VERIFYING")
+    ]
+    assert decisions[0].killed_processes >= 1
+    attempt = decisions[0].attempt_id
+    runs = tmp_path / "runs"
+    assert not (runs / f"{attempt}-v-v0").exists()
+    assert all(not (p / "run").exists() for p in runs.glob(f"{attempt}-v-v0.*"))

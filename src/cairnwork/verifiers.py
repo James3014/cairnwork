@@ -62,7 +62,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from cairnwork import confined, sandbox
-from cairnwork.confined import MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
+from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, MAX_REPORT_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
 from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
@@ -138,6 +138,7 @@ def run_verifiers(
     *,
     python: str = sys.executable,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    attempt_id: str = "",
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
 
@@ -151,14 +152,15 @@ def run_verifiers(
         raise VerifierRejected(f"duplicate verifier ids in {ids}")
     runs = []
     for index, spec in enumerate(specs):
-        attempt_id = f"{run_id}-v{index}"
-        checkout = create_attempt_clone(repo, candidate_commit, run_root, attempt_id).path
+        clone_id = f"{run_id}-v{index}"
+        checkout = create_attempt_clone(repo, candidate_commit, run_root, clone_id).path
         try:
-            runs.append(_run_one(repo, candidate_commit, spec, checkout, python, timeout))
-
+            runs.append(
+                _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id)
+            )
         finally:
             try:
-                remove_attempt_clone(run_root, attempt_id)
+                remove_attempt_clone(run_root, clone_id)
             except WorkspaceError:
                 pass  # the run's verdict stands; a leftover directory is only disk space
     return tuple(runs)
@@ -175,7 +177,7 @@ def protected_verifier_inputs(paths: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> VerifierRun:
+def _run_one(repo, candidate_commit, spec, checkout, python, timeout, attempt_id) -> VerifierRun:
     private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent))
     log_path, ini, profile_path = (
         private / "verifier.log",
@@ -183,6 +185,8 @@ def _run_one(repo, candidate_commit, spec, checkout, python, timeout) -> Verifie
         private / "profile.sb",
     )
     run_dir, home, tmp, report, env = _prepare_run(private, ini)
+    if attempt_id:
+        env[ATTEMPT_ENV] = attempt_id
     argv = [
         python,
         "-P",
