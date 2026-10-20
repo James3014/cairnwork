@@ -124,6 +124,7 @@ def test_resend_does_not_run_again(project, stores, tmp_path):
         ({"allowed": ("src//calc.py",)}, "BAD_SCOPE"),
         ({"allowed": ("src/./calc.py",)}, "BAD_SCOPE"),
         ({"allowed": ("src/calc.py", "src/calc.py")}, "BAD_SCOPE"),
+        ({"allowed": ("src/.GIT/config",)}, "BAD_SCOPE"),
         ({"allowed": ("src/calc.py\n",)}, "BAD_SCOPE"),
         ({"verifiers": (("v", ("bash", "-c", "true")),)}, "VERIFIER_NOT_ALLOWED"),
     ],
@@ -133,3 +134,28 @@ def test_bad_tasks_are_rejected_before_anything_runs(project, stores, tmp_path, 
         go(project, stores, tmp_path, CrashWorker(), **kwargs)
     assert info.value.code == code
     assert not (tmp_path / "runs").exists()
+
+
+class ChmodWorker:
+    def run(self, workdir, _task):
+        (workdir / "src").chmod(0)
+
+
+def test_infrastructure_errors_end_failed_with_a_reason(project, stores, tmp_path):
+    try:
+        result = go(project, stores, tmp_path, ChmodWorker())
+    finally:
+        for path in (tmp_path / "runs").rglob("*"):
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o755)
+    assert result.status == "FAILED" and not result.verified
+    assert result.reason
+    assert stores[0].get(task_id=result.task_id).status == "FAILED"
+
+
+def test_bad_base_commit_is_rejected_before_binding(project, stores, tmp_path):
+    ledger, notary = stores
+    bad = TaskSpec(**{**task(project).__dict__, "base_commit": "HEAD"})
+    with pytest.raises(TaskRejected) as info:
+        run_task(bad, ledger=ledger, notary=notary, worker=CrashWorker(), run_root=tmp_path / "r")
+    assert info.value.code == "BAD_BASE"

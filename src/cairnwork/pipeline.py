@@ -5,6 +5,12 @@ preserved behaviors: every step that fails leaves the task FAILED (or not
 COMPLETED) with a reason, and only a Core verdict that is verified for the
 exact candidate commit makes it COMPLETED.
 
+Any exception after binding is recorded as FAILED with an ``INFRA_ERROR``
+reason; a crash of this process itself leaves the task DISPATCHED until restart
+recovery (preserved behavior #21) exists. A FAILED task keeps its card: to try
+again, move it to SUPERSEDED (``OwnershipLedger.set_status``) and submit with a
+new idempotency key.
+
 Workers are pluggable (``Worker``). A worker edits files in the clone it is
 given; Cairnwork snapshots the allowed files into a commit itself (see
 snapshot.py). The worker must have exited when ``run`` returns.
@@ -18,6 +24,7 @@ from pathlib import Path
 from typing import Protocol
 
 from cairnwork.core_request import AcceptanceSpec
+from cairnwork.gitcmd import OID
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.snapshot import snapshot_candidate
@@ -28,7 +35,12 @@ from cairnwork.verifiers import (
     protected_verifier_inputs,
     run_verifiers,
 )
-from cairnwork.workspace import CandidateRejected, create_attempt_clone, remove_attempt_clone
+from cairnwork.workspace import (
+    CandidateRejected,
+    WorkspaceError,
+    create_attempt_clone,
+    remove_attempt_clone,
+)
 
 
 class TaskRejected(Exception):
@@ -77,6 +89,8 @@ class TaskResult:
 
 def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     """Reject a task before anything is bound or run."""
+    if not isinstance(task.base_commit, str) or not OID.match(task.base_commit):
+        raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
     if not task.allowed_files or len(set(task.allowed_files)) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
     if len(set(task.allowed_files)) != len(task.allowed_files):
@@ -100,7 +114,7 @@ def _clean_relative_path(path: object) -> bool:
     return (
         not path.startswith("/")
         and all(part not in ("", ".", "..") for part in parts)
-        and parts[0].lower() != ".git"
+        and all(part.lower() != ".git" for part in parts)
         and not any(ord(ch) < 32 or ch == "\\" for ch in path)
     )
 
@@ -120,6 +134,9 @@ def run_task(
         _attempt(
             task, specs, record.task_id, record.request_digest, notary, worker, run_root, result
         )
+    except Exception as exc:  # noqa: BLE001 - recorded as an infrastructure failure, never success
+        result.verified = False
+        result.reason = f"INFRA_ERROR: {type(exc).__name__}: {exc}"
     finally:
         ledger.set_status(record.task_id, "COMPLETED" if result.verified else "FAILED")
         result.status = "COMPLETED" if result.verified else "FAILED"
@@ -168,4 +185,7 @@ def _attempt(task, specs, task_id, digest, notary, worker, run_root, result) -> 
         result.verified = bool(verdict.verified and recorded and recorded.verified)
         result.reason = f"CORE_{verdict.status}"
     finally:
-        remove_attempt_clone(run_root, result.attempt_id)
+        try:
+            remove_attempt_clone(run_root, result.attempt_id)
+        except WorkspaceError as exc:  # keep the attempt's own outcome; note the leftover
+            result.logs.append(f"cleanup failed: {exc}")

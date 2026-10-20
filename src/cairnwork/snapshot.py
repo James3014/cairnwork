@@ -67,6 +67,8 @@ def snapshot_candidate(
 
 def _stage(repo: Path, clone: Path, path: str, index: Path) -> None:
     full = clone / path
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        raise CandidateRejected("OUT_OF_SCOPE", f"{path} leaves the clone")
     parent = clone
     for part in Path(path).parts[:-1]:
         parent = parent / part

@@ -1,8 +1,10 @@
 """A worker that asks an Agy (Antigravity CLI) model to edit the attempt clone.
 
-The model runs in print mode with ``--mode accept-edits``: file edits are
-applied, tool commands are refused, so the model cannot run shell commands or
-git. It works in the clone only; Cairnwork snapshots and checks the result.
+The model runs in print mode with ``--mode accept-edits --sandbox`` and the
+clone as its working directory. What that actually allows was probed on
+2026-10-20 (docs/DRILLS.md); it is not a security boundary. Cairnwork never
+trusts the worker: it snapshots only the allowed files and rejects any other
+change in the clone.
 The agy process runs in its own process group, which is killed afterwards.
 """
 
@@ -56,6 +58,7 @@ class AgyWorker:
             self.model,
             "--mode",
             "accept-edits",
+            "--sandbox",
             "--print-timeout",
             f"{self.timeout_seconds}s",
         ]
