@@ -264,3 +264,23 @@ def test_only_one_pass_runs_at_a_time(setup, capsys):
     finally:
         os.close(fd)
     assert code == 2 and "BUSY" in capsys.readouterr().out
+
+
+def test_a_cairnwork_side_fault_leaves_the_issue_queued(setup):
+    (setup["intake"].state / "config.json").write_text('{"modle": "x"}')
+    github = FakeGitHub([issue()])
+    out = runner.take(setup["intake"], github, setup["clone"])
+    assert out == [{"issue": 7, "skipped": "BAD_CONFIG"}]
+    assert github.labels[7] == {runner.QUEUE} and github.comments == []
+
+
+def test_a_github_error_while_refusing_does_not_stop_the_pass(setup):
+    class Flaky(FakeGitHub):
+        def relabel(self, number, add, remove):
+            if number == 7:
+                raise RuntimeError("gh issue failed: 502")
+            super().relabel(number, add, remove)
+
+    github = Flaky([issue(block={**BLOCK, "allowed_files": ["pyproject.toml"]}), issue(number=8)])
+    out = runner.take(setup["intake"], github, setup["clone"])
+    assert "502" in out[0]["error"] and out[1]["duplicate"] is False

@@ -127,14 +127,14 @@ def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
         number = int(issue["number"])
         try:
             results.append({"issue": number, **_take_one(intake, github, clone, base, issue)})
-        except IntakeRefused as exc:
-            if exc.code == "NOT_ACCEPTING":  # not the Issue's fault: it stays queued
+        except (IssueRefused, TaskRejected, IntakeRefused) as exc:
+            if isinstance(exc, IntakeRefused) and exc.code != "BAD_REQUEST":
+                # NOT_ACCEPTING, BAD_CONFIG, BAD_STATE: Cairnwork's state, not the Issue's
                 results.append({"issue": number, "skipped": exc.code})
-            else:
-                results.append({"issue": number, "refused": _needs_fix(github, number, exc)})
-        except (IssueRefused, TaskRejected, OwnershipError) as exc:
-            results.append({"issue": number, "refused": _needs_fix(github, number, exc)})
-        except (RuntimeError, OSError, ValueError, KeyError) as exc:
+                continue
+            results.append({"issue": number, **_needs_fix(github, number, exc)})
+        except (OwnershipError, RuntimeError, OSError, ValueError, KeyError) as exc:
+            # ledger or GitHub trouble: report it and leave the Issue queued
             results.append({"issue": number, "error": f"{type(exc).__name__}: {exc}"})
     return results
 
@@ -167,15 +167,18 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     return out
 
 
-def _needs_fix(github: GitHub, number: int, exc: Exception) -> str:
+def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
     """A block Cairnwork cannot take: say why once and take it out of the queue."""
-    github.relabel(number, NEEDS_FIX, QUEUE)
-    github.comment(
-        number,
-        f"Cairnwork 不能接這張：`{exc}`。修正 ```eia-task 區塊後，移除 `{NEEDS_FIX}` 並重新"
-        f"加上 `{QUEUE}`。注意：驗證用的測試檔不能列在 allowed_files，要先放在 main 上。",
-    )
-    return str(exc)
+    try:
+        github.relabel(number, NEEDS_FIX, QUEUE)
+        github.comment(
+            number,
+            f"Cairnwork 不能接這張：`{exc}`。修正 ```eia-task 區塊後，移除 `{NEEDS_FIX}` 並重新"
+            f"加上 `{QUEUE}`。注意：驗證用的測試檔不能列在 allowed_files，要先放在 main 上。",
+        )
+    except (RuntimeError, OSError) as gh_error:  # retried on the next pass
+        return {"refused": str(exc), "error": f"{type(gh_error).__name__}: {gh_error}"}
+    return {"refused": str(exc)}
 
 
 def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
@@ -214,12 +217,12 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     if not set(changed.split()) <= set(request.allowed_files):
         raise ValueError(f"candidate {commit} changes files outside the Issue's allowed_files")
     branch = f"cairnwork/{number}-{attempt}"
-    helper = f"!{shlex.quote(github.gh)} auth git-credential"
-    _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
-         "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
     existing = github.find_pr(branch)
     if existing:  # a previous pass opened it; only the labels were left to do
         return existing
+    helper = f"!{shlex.quote(github.gh)} auth git-credential"
+    _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
+         "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
     body = (
         f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
         f"- Cairnwork task `{status['task_id']}`，attempt `{attempt}`\n"
