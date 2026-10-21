@@ -224,7 +224,7 @@ def test_a_strict_caller_umask_does_not_break_the_account_run(project):
     assert result.observation.passed, result.log_path.read_text()
 
 
-def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
+def test_tests_can_run_git_in_the_checkout_they_do_not_own(project, monkeypatch):
     """The account does not own the checkout; git in it must still work (Nexus-new #2760
     pilot: 'detected dubious ownership'), and only that checkout is trusted."""
     code = (
@@ -237,5 +237,14 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
         "                         capture_output=True, text=True).stdout.split()\n"
         "    assert out and '*' not in out\n"
     )
+    seen = []
+    original_reap = VerifierAccount.reap
+
+    def reap_and_record(self):
+        ps = ["/bin/ps", "-x", "-U", self.user, "-o", "pid,ppid,comm"]
+        seen.append(subprocess.run(ps, capture_output=True, text=True).stdout)
+        return original_reap(self)
+
+    monkeypatch.setattr(VerifierAccount, "reap", reap_and_record)
     result = verify(project, {"tests/test_git.py": code}, "tests/test_git.py")
-    assert result.observation.passed, (result.mutated, result.log_path.read_text())
+    assert result.observation.passed, (result.mutated, seen, result.log_path.read_text())
