@@ -382,7 +382,8 @@ def test_response_not_bound_to_the_request_is_not_verified(repo, tmp_path, trans
         verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
         assert verdict.status == "VERIFIED" and verdict.integrity == "VALID"
         assert not verdict.verified and verdict.reason == code
-        assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
+        stored = notary.verdict("task-1", "a1", expected_candidate=head_of(repo))
+        assert stored is not None and not stored.verified
 
 
 def test_configured_core_identity_is_what_the_response_must_report(repo, tmp_path):
