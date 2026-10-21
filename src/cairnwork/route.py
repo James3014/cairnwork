@@ -14,18 +14,12 @@ not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
     cairnwork-route --state DIR in-flight        # for the deployer's quiescence gate
     cairnwork-route --state DIR accept | drain   # switch new-task intake on / off
     cairnwork-route --state DIR recover          # after a restart, with no runner alive
-    cairnwork-route --state DIR verify --repo-path P --base SHA --candidate SHA \\
-        --allowed-file F [...] --verifier CMD [...] [--test-commit SHA]
-        # judge a commit made elsewhere; no worker, no ledger record. Exit 0 verified,
-        # 2 refused or not verified, 3 usage error. Prints status, verified, reason,
-        # core_status.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,18 +34,11 @@ from cairnwork.ownership import (
 from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
-from cairnwork.verify_candidate import verify_candidate
 from cairnwork.workers.agy import AgyWorker
 
 
 def main(argv: list[str] | None = None) -> int:
-    tokens = sys.argv[1:] if argv is None else argv
-    try:
-        args = _parser().parse_args(tokens)
-    except SystemExit as exc:  # argparse already wrote its usage to stderr
-        if exc.code == 2 and "verify" in tokens:
-            return _emit({"error": "USAGE", "detail": "see stderr"}, 3)
-        raise
+    args = _parser().parse_args(argv)
     intake = Intake(Path(args.state).resolve())
     try:
         result = _dispatch(intake, args)
@@ -68,8 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
     stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
-    if args.command == "verify":
-        return _emit(result, 0 if result["verified"] else 2)
     return _emit(result, 1 if stuck else 0)
 
 
@@ -101,27 +86,7 @@ def _dispatch(intake: Intake, args) -> Any:
             verifier_account=intake.verifier_account(),
         )
         return {"decisions": [d.__dict__ for d in decisions]}
-    if args.command == "verify":
-        return _verify(intake, args)
     return _run(intake, args.task_id)
-
-
-def _verify(intake: Intake, args) -> dict[str, Any]:
-    try:
-        verifiers = tuple(
-            (f"pytest-{i}", tuple(shlex.split(c))) for i, c in enumerate(args.verifier)
-        )
-    except ValueError as exc:
-        raise TaskRejected("BAD_VERIFIER", str(exc)) from exc
-    return verify_candidate(
-        intake,
-        repo=Path(args.repo_path).resolve(),
-        base=args.base,
-        candidate=args.candidate,
-        allowed_files=tuple(args.allowed_file),
-        verifiers=verifiers,
-        test_commit=args.test_commit,
-    )
 
 
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
@@ -154,13 +119,6 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("cancel").add_argument("--task-id", required=True)
     for name in ("in-flight", "accept", "drain", "recover"):
         commands.add_parser(name)
-    verify = commands.add_parser("verify")
-    verify.add_argument("--repo-path", required=True)
-    verify.add_argument("--base", required=True)
-    verify.add_argument("--candidate", required=True)
-    verify.add_argument("--allowed-file", action="append", required=True)
-    verify.add_argument("--verifier", action="append", required=True)
-    verify.add_argument("--test-commit", default="")
     run = commands.add_parser("_run")
     run.add_argument("--task-id", required=True)
     run.add_argument("--lock-fd", type=int, required=True)  # held, never used directly

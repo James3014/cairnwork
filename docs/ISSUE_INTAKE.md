@@ -62,20 +62,23 @@
   5. 其他（包括只是提到原 PR、沒說要修正它）→ 不算。
 - **記錄**：每次交付一列，放在該 state 目錄的交付紀錄裡（欄位：repo、Issue、原 PR、合併時間、返工 PR 編號或空白、判定日期）。合併滿 7 天後補填一次，不回頭重算。交付紀錄的格式由 Cairnwork 整合負責人定義。
 
-## 驗證別處產生的 commit：`route verify`
+## 驗證別處產生的 commit：`cairnwork-verify`
 
-候選 commit 不是 Cairnwork 的 worker 做的（例如另一個 agent 或 CI 產生）時，用同一套檢查判定它：
+候選 commit 不是 Cairnwork 的 worker 做的（例如另一個 agent 或 CI 產生）時，用同一套檢查判定它（程式在核心之外的 `src/cairnwork_verify/`，核心不會 import 它）：
 
 ```
-cairnwork-route --state DIR verify --repo-path P --base SHA --candidate SHA \
+cairnwork-verify --state DIR run --repo-path P --base SHA --candidate SHA \
   --allowed-file F [--allowed-file F ...] --verifier "python3 -m pytest -q tests/..." [...] \
   [--test-commit SHA]
+cairnwork-verify --state DIR cleanup     # 某次執行被強制結束後，在 recover 之前跑
 ```
 
 - 檢查和 worker 的產出完全相同：候選必須是 base 上的單一 commit、只動 `allowed_files`（不能刪檔、不能有 symlink 或 submodule）；給了 `--test-commit` 就在 worker 之後才疊上延後測試（同樣的「從未出現過」和單一父 commit 規則）；verifier 在沙盒裡跑（同樣的白名單，任何 skipped 都算失敗）；最後交給 Core 公證，回應必須綁定這個 commit。
-- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`（疊了延後測試時和候選不同）。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤。
+- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`（疊了延後測試時和候選不同）。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤，1 內部錯誤。
+- 和 `submit` 一樣：state 沒有 `ACCEPTING`（drain 中）就拒絕（`VERIFY_NOT_ACCEPTING`）；state 的 `config.json` 設了 `mirror` 時，只在 mirror 裡工作：base 和候選會從 `--repo-path` fetch 進 mirror，呼叫者的 repo 不會被寫入。沒設 `mirror` 時，`--test-commit` 才會在 `--repo-path` 寫 `refs/cairnwork/attempts/`，所以請指向 Cairnwork 自己的 clone。
 - 不跑 worker，也不在 ownership 帳本建立任務，所以 `in-flight`（部署器的靜止檢查）看不到它；它持有共用的執行鎖，所以 `recover` 這時會回 `RUN_LOCK_BUSY`。Core 紀錄寫進 state 的 notary，任務代號以 `verify-` 開頭。
-- 候選必須能從 `--repo-path` 的某個 ref 取得（先推到一個分支或 fetch 進來）。它和一般任務一樣會在 `--repo-path` 寫 `refs/cairnwork/attempts/`，所以請指向 Cairnwork 自己的 mirror 或 clone。`--test-commit` 每次要用新的 commit：已經在這台機器上出現過的會被拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）。
+- 執行期間在 `<state>/verify-runs/` 放一個加鎖的標記檔；行程被強制結束時核心的 `recover` 看不到它（沒有帳本記錄），改用 `cleanup`：它清掉已死執行的殘留 clone、基準目錄和孤兒 verifier 行程，還活著的執行（鎖還在）不動。每次 `run` 開頭也會先做一次。**強制結束後請先跑 `cleanup`，再跑 `recover`**，否則孤兒 verifier 會讓 `recover` 以為驗證帳號不閒。
+- 候選必須能從 `--repo-path` 取得（先推到一個分支或 fetch 進來）。`--test-commit` 每次要用新的 commit：已經在這台機器上出現過的會被拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）。
 
 ## Upgrading Core
 

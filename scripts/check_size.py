@@ -52,6 +52,8 @@ def main() -> int:
     problems = check()
     for problem in problems:
         print(problem)
+    core = sum(p.read_text(encoding="utf-8").count("\n") for p in _python_files(CORE))
+    print(f"core: {core}/{MAX_CORE_LINES} lines (packages outside src/cairnwork are not counted)")
     return 1 if problems else 0
 
 
