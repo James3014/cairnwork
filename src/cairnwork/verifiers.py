@@ -21,7 +21,7 @@ that starts its own session escapes the group kill; only a sandbox stops that.
 The observation hash binds the candidate commit, verifier id, full argv, exit
 code, timeout, mutations, test result and log hash.
 
-The run is confined with macOS Seatbelt (see sandbox.py): no network, reads only
+The run is confined with macOS Seatbelt (see cairnwork_sandbox): no network, reads only
 from the system, the interpreter and the checkout, writes only to the checkout
 and a per-run directory. Without a working sandbox-exec nothing runs and the
 verifier fails (no unconfined fallback). Logs, the pytest ini and the profile
@@ -59,7 +59,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork import confined, pytest_config, report_guard, sandbox
+import cairnwork_sandbox
+from cairnwork import confined, pytest_config, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
@@ -269,14 +270,15 @@ def _run_one(
     ]  # fmt: skip
     before = os.lstat(checkout)
     profile = None
-    if sandbox.available():
-        profile = sandbox.build_profile(
+    backend = cairnwork_sandbox.select()
+    if backend is not None:
+        profile = backend.policy(
             read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
             write_roots=(checkout.parent, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
         returncode, timed_out, survivors = _execute(
-            argv, profile_path, checkout, env, timeout, log_path, account
+            argv, profile_path, checkout, env, timeout, log_path, account, backend
         )
     else:
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
@@ -327,7 +329,7 @@ def _same_directory(path: Path, before: os.stat_result) -> bool:
     return same and stat.S_ISDIR(after.st_mode)
 
 
-def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
+def _execute(argv, profile_path, checkout, env, timeout, log_path, account, backend):
     """Run argv under the sandbox profile, as the verifier account when one is given.
     As if the verifier's venv were activated, its bin directory (argv[0] is its Python)
     leads PATH: tests that spawn plain ``python`` get the same interpreter as pytest."""
@@ -337,7 +339,7 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
     env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory")
     env["GIT_CONFIG_VALUE_0"] = os.path.realpath(checkout)
     if account is None:
-        return confined.execute(sandbox.wrap(argv, profile_path), checkout, env, timeout, log_path)
+        return confined.execute(backend.wrap(argv, profile_path), checkout, env, timeout, log_path)
     os.chmod(profile_path, 0o640)
     returncode, timed_out, survivors = confined.execute(
         account.wrap(argv, profile_path, env),

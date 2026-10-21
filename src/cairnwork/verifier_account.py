@@ -30,6 +30,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from cairnwork_sandbox import Backend, platform_backend
+
 SUDO = "/usr/bin/sudo"
 DEFAULT_USER = "cairnwork-verifier"
 DEFAULT_ROOT = Path("/Users/Shared/cairnwork")
@@ -40,6 +42,13 @@ class VerifierAccountError(Exception):
 
     def __init__(self, detail: str) -> None:
         super().__init__(f"{self.code}: {detail}")
+
+
+def _backend() -> Backend:
+    backend = platform_backend()
+    if backend is None:
+        raise VerifierAccountError("no sandbox backend on this platform")
+    return backend
 
 
 @dataclass(frozen=True)
@@ -67,24 +76,22 @@ class VerifierAccount:
             return False
         if uid in (0, os.getuid()):
             return False  # kill -9 -1 as root or as the owner would be destructive
-        probe = self.wrap([python or self.python, "-P", "-c", "import pytest"], None)
         try:
+            probe = self.wrap([python or self.python, "-P", "-c", "import pytest"], None)
             done = subprocess.run(  # noqa: S603 - fixed argv
                 probe, capture_output=True, timeout=60, check=False, cwd=self.root
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, VerifierAccountError):
             return False
         return done.returncode == 0
 
     def wrap(self, argv: list[str], profile: Path | None, env: dict[str, str] | None = None):
         """sudo -> sandbox-exec -> env -i -> argv (profile None: an allow-all probe)."""
-        sandbox = (
-            ["/usr/bin/sandbox-exec", "-f", str(profile)]
-            if profile is not None
-            else ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default)"]
-        )
         environment = ["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in (env or {}).items()]]
-        return [SUDO, "-n", "-u", self.user, "--", *sandbox, *environment, *argv]
+        inner = [*environment, *argv]
+        backend = _backend()
+        jailed = backend.wrap(inner, profile) if profile is not None else backend.unconfined(inner)
+        return [SUDO, "-n", "-u", self.user, "--", *jailed]
 
     def count(self) -> int:
         """How many processes the account is running (-1: cannot tell)."""
@@ -150,8 +157,7 @@ class VerifierAccount:
         # The account may have left directories without permissions: rm -rf alone cannot
         # enter them. chmod runs as the account (allowed only through sandbox-exec).
         for argv in (
-            ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default)"]
-            + ["/bin/chmod", "-R", "u+rwx", "--", str(real)],
+            _backend().unconfined(["/bin/chmod", "-R", "u+rwx", "--", str(real)]),
             ["/bin/rm", "-rf", "--", str(real)],
         ):
             subprocess.run(  # noqa: S603 - fixed argv, path checked above

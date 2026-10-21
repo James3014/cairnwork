@@ -39,7 +39,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork import confined, pytest_config, sandbox
+import cairnwork_sandbox
+from cairnwork import confined, pytest_config
 from cairnwork.confined import RUN_TOKEN_VAR
 
 MAX_RESULT_BYTES = 4 << 20
@@ -119,17 +120,18 @@ def run_black_box_judge(
         raise BlackBoxError(f"python must be an absolute path, got {python!r}")
     if not cases:
         raise BlackBoxError("no cases given")
-    if not sandbox.available():
+    backend = cairnwork_sandbox.select()
+    if backend is None:
         return BlackBoxVerdict(False, False, 0, len(cases), "sandbox-exec unavailable")
 
     private = Path(tempfile.mkdtemp(prefix="bbj.", dir=checkout.parent))
     try:
-        return _judge(checkout, target, cases, python, timeout, private)
+        return _judge(checkout, target, cases, python, timeout, private, backend)
     finally:
         _scrub(private)
 
 
-def _judge(checkout, target, cases, python, timeout, private) -> BlackBoxVerdict:
+def _judge(checkout, target, cases, python, timeout, private, backend) -> BlackBoxVerdict:
     supervisor = private / "supervisor"  # read-only to the child: harness + inputs only
     run_dir = private / "run"  # the only place besides nothing the child may write
     home = run_dir / "home"
@@ -153,7 +155,7 @@ def _judge(checkout, target, cases, python, timeout, private) -> BlackBoxVerdict
         "CAIRNWORK_BBJ_RESULTS": str(results_path),
         RUN_TOKEN_VAR: secrets.token_hex(16),
     }
-    profile = sandbox.build_profile(
+    profile = backend.policy(
         read_roots=(*pytest_config.interpreter_roots(python), supervisor, checkout),
         write_roots=(run_dir,),
     )
@@ -163,7 +165,7 @@ def _judge(checkout, target, cases, python, timeout, private) -> BlackBoxVerdict
     # harness's own directory on sys.path. The environment is already scrubbed to what we set here.
     argv = [python, "-P", str(harness)]
     _returncode, timed_out, survivors = confined.execute(
-        sandbox.wrap(argv, profile_path), checkout, env, timeout, run_dir / "judge.log"
+        backend.wrap(argv, profile_path), checkout, env, timeout, run_dir / "judge.log"
     )
     return _verdict(results_path, cases, timed_out, survivors)
 

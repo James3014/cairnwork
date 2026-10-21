@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from conftest import commit_change, git
 
-from cairnwork import sandbox
 from cairnwork.verifiers import parse_verifier, run_verifiers
+from cairnwork_sandbox import seatbelt as sandbox
 
 
 @pytest.fixture

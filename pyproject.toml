@@ -25,7 +25,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cairnwork", "src/cairnwork_protocol"]
+packages = ["src/cairnwork", "src/cairnwork_protocol", "src/cairnwork_sandbox"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -46,7 +46,7 @@ select = ["E", "F", "W", "I", "B", "BLE", "S110", "S112", "UP"]
 "tests/**" = ["S"]
 
 [tool.importlinter]
-root_packages = ["cairnwork", "cairnwork_protocol"]
+root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -61,6 +61,13 @@ name = "The protocol package stands alone (no Core code, no Cairnwork core)"
 type = "forbidden"
 source_modules = ["cairnwork_protocol"]
 forbidden_modules = ["product", "cairnwork"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "The sandbox package stands alone (only the core calls it, never the other way)"
+type = "forbidden"
+source_modules = ["cairnwork_sandbox"]
+forbidden_modules = ["cairnwork", "product", "experimental"]
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
