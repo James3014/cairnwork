@@ -126,8 +126,11 @@ class GitHub:
         ).strip()  # fmt: skip
 
 
-def _verify_origin(clone: Path, repo: str) -> str:
-    """Every fetch and push URL of origin must be https://github.com/<repo>; returns that URL."""
+def _verify_origin(clone: Path, repo: str) -> None:
+    """Every fetch and push URL of origin must be https://github.com/<repo>.
+
+    ``get-url --push --all origin`` is the set ``git push origin`` uses (insteadOf included),
+    so the push must name the remote, never a URL built here."""
     for flags in (("--all",), ("--push", "--all")):
         urls = _git(clone, "remote", "get-url", *flags, "origin").splitlines()
         if not any(urls):
@@ -138,7 +141,6 @@ def _verify_origin(clone: Path, repo: str) -> str:
                 raise RuntimeError(f"LINEAGE_REMOTE_UNKNOWN: origin {url!r} is not a github URL")
             if found[1].removesuffix(".git").lower() != repo.lower():
                 raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
-    return f"https://github.com/{repo}.git"
 
 
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
@@ -270,10 +272,10 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     existing = github.find_pr(branch)
     if existing:  # a previous pass opened it; only the labels were left to do
         return existing
-    url = _verify_origin(clone, github.repo)  # re-checked: the remote may have changed
+    _verify_origin(clone, github.repo)  # re-checked: the remote may have changed
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
-         url, f"{commit}:refs/heads/{branch}")  # fmt: skip
+         "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
     body = (
         f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
         f"- Cairnwork task `{status['task_id']}`，attempt `{attempt}`\n"

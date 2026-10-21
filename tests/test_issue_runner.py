@@ -71,7 +71,6 @@ def setup(repo, tmp_path, monkeypatch):
     subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
     git(clone, "config", "user.email", "t@e")  # CI runners have no git identity
     git(clone, "config", "user.name", "t")
-    git(clone, "config", f"url.{origin}.insteadOf", "https://github.com/James3014/demo.git")
     started = []
     monkeypatch.setattr(
         runner, "_verify_origin", lambda clone, repo: f"https://github.com/{repo}.git"

@@ -37,7 +37,7 @@ def _clone_with_origin(tmp_path, urls, pushes=()):
 )
 def test_https_origins_of_the_same_repo_pass(tmp_path, urls, pushes):
     clone = _clone_with_origin(tmp_path, urls, pushes)
-    assert REAL_VERIFY(clone, "James3014/demo") == "https://github.com/James3014/demo.git"
+    REAL_VERIFY(clone, "James3014/demo")
 
 
 @pytest.mark.parametrize(
@@ -115,18 +115,40 @@ def test_a_remote_swapped_after_take_is_not_pushed_to(setup, monkeypatch):
     assert pushes == [] and github.prs == []
 
 
-def test_the_push_goes_to_the_verified_url_not_the_remote_name(setup, monkeypatch):
+def _settled_with(setup, monkeypatch, stored, rule_key, rule_from):
+    """Run settle with the real check; a foreign bare repo is wired in by an insteadOf rule."""
     github = FakeGitHub([issue()])
     taken = runner.take(setup["intake"], github, setup["clone"])[0]
     commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n"})
     monkeypatch.setattr(Intake, "status", _completed(setup, taken, commit))
     monkeypatch.setattr(runner, "_verify_origin", REAL_VERIFY)
-    git(setup["clone"], "remote", "set-url", "origin", "https://github.com/james3014/Demo.git")
+    foreign = setup["origin"].parent / "foreign.git"
+    git(setup["origin"].parent, "init", "-q", "--bare", str(foreign))
+    git(setup["clone"], "remote", "set-url", "origin", stored)
+    git(setup["clone"], "config", f"url.{foreign}.{rule_key}", rule_from)
     pushes = []
     real_git = runner._git
     monkeypatch.setattr(
         runner, "_git", lambda r, *a: pushes.append(a) if "push" in a else real_git(r, *a)
     )
-    runner.settle(setup["intake"], github, setup["clone"])
-    assert len(pushes) == 1 and "origin" not in pushes[0]
-    assert pushes[0][-2] == "https://github.com/James3014/demo.git"
+    return runner.settle(setup["intake"], github, setup["clone"]), pushes, foreign
+
+
+@pytest.mark.parametrize("rule_key", ["insteadOf", "pushInsteadOf"])
+def test_the_push_names_the_remote_so_a_rule_on_another_form_cannot_redirect_it(
+    setup, monkeypatch, rule_key
+):
+    # stored form has no .git; the rule targets the .git form a self-built URL would use
+    out, pushes, foreign = _settled_with(
+        setup, monkeypatch, GOOD, rule_key, "https://github.com/James3014/demo.git"
+    )
+    assert "error" not in out[0]
+    assert len(pushes) == 1 and pushes[0][-2] == "origin"
+
+
+@pytest.mark.parametrize("rule_key", ["insteadOf", "pushInsteadOf"])
+def test_a_rule_that_rewrites_the_stored_form_is_refused_before_the_push(
+    setup, monkeypatch, rule_key
+):
+    out, pushes, foreign = _settled_with(setup, monkeypatch, GOOD, rule_key, GOOD)
+    assert "LINEAGE_REMOTE_UNKNOWN" in out[0]["error"] and pushes == []
