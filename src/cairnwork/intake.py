@@ -5,7 +5,8 @@ fixes here, through the ``cairnwork-route`` command (route.py). Everything lives
 in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
-    config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror"}
+    config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror",
+                        "core_url", "core_token_file"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -40,6 +41,7 @@ from cairnwork.notary import Notary
 from cairnwork.ownership import InvalidStatusTransition, OwnershipLedger, OwnershipUnknown
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.verifier_account import VerifierAccount
+from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
 
 FIELDS = frozenset(
     {
@@ -66,6 +68,10 @@ DEFAULT_CONFIG = {
     # request's repo (read-only), and every ref or object Cairnwork writes lands here,
     # never in the caller's repository (e.g. the Gateway's live Controller).
     "mirror": None,
+    # Nexus Core as an HTTP service (cairnwork_protocol.http) instead of in-process:
+    # its root URL and a file holding its bearer token (never the token itself).
+    "core_url": None,
+    "core_token_file": None,
 }
 
 
@@ -118,6 +124,15 @@ def _verifier_shape(value: Any) -> bool:
     )
 
 
+def _has_token(token_file: Any) -> bool:
+    """A regular file holding a token; it is read again at each Core call (rotation)."""
+    try:
+        path = Path(token_file)
+        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 @dataclass(frozen=True)
 class Intake:
     state: Path
@@ -128,7 +143,11 @@ class Intake:
 
     @property
     def notary(self) -> Notary:
-        return Notary(self.state / "notary.sqlite")
+        config = self.config()  # a Core HTTP service when configured, else in-process
+        if config["core_url"] is None:
+            return Notary(self.state / "notary.sqlite")
+        verify = http_core_verify(config["core_url"], Path(config["core_token_file"]))
+        return Notary(self.state / "notary.sqlite", core_verify=verify)
 
     @property
     def journal(self) -> Journal:
@@ -143,10 +162,17 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
-        for key in ("verifier_python", "mirror"):
+        for key in ("verifier_python", "mirror", "core_token_file"):
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
+        if loaded.get("core_url") is not None:
+            try:
+                check_core_url(loaded["core_url"])
+            except CoreHttpError as exc:
+                raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
+            if not _has_token(loaded.get("core_token_file")):
+                raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:

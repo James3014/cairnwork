@@ -38,6 +38,12 @@ from typing import Any
 
 from cairnwork.changeset import read_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
+from cairnwork_protocol import (
+    acceptance_contract_hash,
+    change_set_hash,
+    evidence_bundle_hash,
+    verification_plan_hash,
+)
 
 CoreVerify = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
 CORE_ERROR = "CORE_ERROR"
@@ -304,13 +310,6 @@ def _columns_match(
 
 
 def _request_hashes(request: dict[str, Any]) -> dict[str, str | None]:
-    from product.protocol.generic_verification import (
-        acceptance_contract_hash,
-        change_set_hash,
-        evidence_bundle_hash,
-        verification_plan_hash,
-    )
-
     try:
         return {
             "acceptance_contract_hash": acceptance_contract_hash(request["acceptance_contract"]),
