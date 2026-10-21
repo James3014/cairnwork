@@ -54,7 +54,7 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
         (home / rel).write_text("secret\n")
     lines = bwrap.BACKEND.policy((), (work,), home=home).text.splitlines()
     real_work, real_home = str(work.resolve()), str(home.resolve())
-    assert lines[:2] == ["--unshare-all", "--new-session"]
+    assert lines[:3] == ["--unshare-all", "--unshare-user", "--new-session"]
     assert "--cap-drop" in lines and "--disable-userns" in lines
     root = lines.index("--ro-bind")
     assert lines[root : root + 3] == ["--ro-bind", "/", "/"]

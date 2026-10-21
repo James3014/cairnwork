@@ -92,7 +92,8 @@ _SEATBELT_ONLY = ("read-outside", "read-repo-git")
     ],
 )
 def test_attacks_are_denied(project, tmp_path, monkeypatch, name, code):
-    if name in _SEATBELT_ONLY and cairnwork_sandbox.platform_backend().name != "seatbelt":
+    backend = cairnwork_sandbox.platform_backend()
+    if name in _SEATBELT_ONLY and (backend is None or backend.name != "seatbelt"):
         pytest.skip("bwrap binds the whole root read-only: reads outside the roots are allowed")
     secret = tmp_path / "secret.txt"
     secret.write_text("TOP SECRET\n")

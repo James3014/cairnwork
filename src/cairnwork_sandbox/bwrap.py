@@ -132,6 +132,10 @@ def build_policy(
         _require_narrow(root, real_home)
     flags = [
         "--unshare-all",
+        # --unshare-all uses --unshare-user-try (soft); --disable-userns needs the hard
+        # --unshare-user, so pass it explicitly or bwrap refuses with
+        # "--disable-userns requires --unshare-user".
+        "--unshare-user",
         "--new-session",
         "--die-with-parent",
         "--cap-drop",
