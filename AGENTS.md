@@ -1,16 +1,16 @@
 # Cairnwork repository contract
 
-Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first. Decision and council record: knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md` and `nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md` (clauses A–I).
+Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first.
 
 ## Before you change anything
 
-- Get scope from the integration owner (`coord who repo:cairnwork`). At most two Claude sessions develop Cairnwork at the same time.
+- Get scope from the integration owner before starting; at most two agent sessions develop Cairnwork at the same time.
 - One worktree per session; the main clone at `~/workspace/cairnwork` is read-only.
 - Do not copy Nexus-new code wholesale. Every capability enters under one of three classes (README): safeguard, experimental (`experimental/`, default off, owner + expiry), or formal (beat the bare core in Cairnwork's own A/B).
 - Experimental capabilities live in `experimental/<name>/` with `__init__.py`, the module, `OWNER` and `EXPIRES` (ISO date); default off, 14-day expiry, never imported by core. Not-yet-wired code belongs there, not in `src/cairnwork`: `experimental/` still obeys the file and function limits but does not count toward the 5,000-line core cap.
 - Never put the names or task ids of private evaluation task banks in public Issues, PRs or comments; refer to them only by Issue number.
 - No experimental capability is moved in until the bare core passes the four drills: normal, failure, restart, rollback.
-- Never touch the Nexus-new#2721 measurement environment.
+- Never modify a running evaluation's measurement environment.
 
 ## Rules the code must follow
 
