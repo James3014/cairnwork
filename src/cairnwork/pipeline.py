@@ -243,7 +243,7 @@ class _Steps:
             os._exit(137)
 
 
-def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
+def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
     """Check a task's deferred tests once the worker is done: plain test files on the
     base whose test cases really fail there. Returns their paths."""
     ensure_test_commit(task.repo, task.test_commit)
@@ -269,9 +269,57 @@ def _tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ..
     return paths
 
 
+def judge_candidate(
+    task, specs, digest, notary, run_root, result, test_files, verifying, reach
+) -> None:
+    """Verify result.candidate_commit and have Core notarise it; sets result.verified,
+    result.reason and result.logs. Shared by the worker pipeline and ``verify_candidate``;
+    reach(phase) records progress."""
+    judged = result.candidate_commit
+    task_id = result.task_id
+    reach("VERIFYING")
+    runs = run_verifiers(
+        task.repo,
+        judged,
+        specs,
+        run_root,
+        f"{result.attempt_id}-v",
+        attempt_id=result.attempt_id,
+        account=verifying[0],
+        python=verifying[1],
+        base_commit=task.base_commit,
+    )
+    result.logs = [str(run.log_path) for run in runs]
+    spec = AcceptanceSpec(
+        task_id,
+        digest,
+        tuple(s.verifier_id for s in specs),
+        tuple(task.allowed_files) + test_files,
+        task.allow_deletions,
+    )
+    reach("NOTARIZING")
+    verdict = notary.notarize(
+        task_id,
+        result.attempt_id,
+        spec,
+        task.repo,
+        task.base_commit,
+        judged,
+        tuple(run.observation for run in runs),
+    )
+    recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
+    result.verified = bool(verdict.verified and recorded and recorded.verified)
+    shown = recorded or verdict  # an unverified readback never reads as CORE_VERIFIED
+    result.reason = (
+        f"CORE_{verdict.status}"
+        if result.verified
+        else shown.reason
+        or ("CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}")
+    )
+
+
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
-    task_id = steps.task_id
     if task.test_commit:
         try:
             never_seen(task.repo, task.test_commit)
@@ -296,7 +344,7 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         judged, test_files = candidate.candidate_commit, ()
         if task.test_commit:  # only now: the worker is done (deferred_tests.py)
             try:
-                test_files = _tests_with_teeth(task, specs, run_root, result, verifying)
+                test_files = tests_with_teeth(task, specs, run_root, result, verifying)
                 judged = lay_tests_over(
                     task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
                 )
@@ -305,44 +353,8 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
                 return
         result.candidate_commit = judged
         steps.reach("CANDIDATE", judged)
-        steps.reach("VERIFYING")
-        runs = run_verifiers(
-            task.repo,
-            judged,
-            specs,
-            run_root,
-            f"{result.attempt_id}-v",
-            attempt_id=result.attempt_id,
-            account=verifying[0],
-            python=verifying[1],
-            base_commit=task.base_commit,
-        )
-        result.logs = [str(run.log_path) for run in runs]
-        spec = AcceptanceSpec(
-            task_id,
-            digest,
-            tuple(s.verifier_id for s in specs),
-            tuple(task.allowed_files) + test_files,
-            task.allow_deletions,
-        )
-        steps.reach("NOTARIZING")
-        verdict = notary.notarize(
-            task_id,
-            result.attempt_id,
-            spec,
-            task.repo,
-            task.base_commit,
-            judged,
-            tuple(run.observation for run in runs),
-        )
-        recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
-        result.verified = bool(verdict.verified and recorded and recorded.verified)
-        shown = recorded or verdict  # an unverified readback never reads as CORE_VERIFIED
-        result.reason = (
-            f"CORE_{verdict.status}"
-            if result.verified
-            else shown.reason
-            or ("CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}")
+        judge_candidate(
+            task, specs, digest, notary, run_root, result, test_files, verifying, steps.reach
         )
     finally:
         try:
