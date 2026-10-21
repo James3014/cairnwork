@@ -25,7 +25,7 @@ def _host_independent_ipc_masks(monkeypatch):
     import os
 
     real_isdir = os.path.isdir
-    masked_dirs = {"/run/user", bwrap._X11_SOCKET_DIR}
+    masked_dirs = {"/run/user", bwrap._X11_SOCKET_DIR, "/run/libvirt", "/var/run/libvirt"}
     monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", ())
     monkeypatch.setattr(
         bwrap.os.path, "isdir", lambda p: False if p in masked_dirs else real_isdir(p)
@@ -168,6 +168,7 @@ def test_dangerous_sockets_cover_the_root_equivalent_services():
         "/run/dbus/system_bus_socket",
         "/var/snap/lxd/common/lxd/unix.socket",
         "/var/lib/incus/unix.socket",
+        "/run/incus/unix.socket",
     }
     assert required <= set(_REAL_DANGEROUS_SOCKETS)
 

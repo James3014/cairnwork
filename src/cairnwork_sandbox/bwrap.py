@@ -100,6 +100,7 @@ _DANGEROUS_SOCKETS = (
     "/var/snap/lxd/common/lxd/unix.socket",  # LXD: root-equivalent (launch a privileged container)
     "/var/lib/lxd/unix.socket",
     "/var/lib/incus/unix.socket",  # Incus (the LXD fork): same root-equivalence
+    "/run/incus/unix.socket",
 )
 # libvirt's sockets (the monolithic libvirtd and the modular virtqemud/virtnetworkd/… daemons)
 # all live under /run/libvirt, so that whole directory is emptied with a tmpfs (see
@@ -260,10 +261,19 @@ def _socket_dirs_to_empty() -> list[str]:
     mask the wrong subdir. The tuple is read each call (tests rebind the module globals):
     ``/run/user`` holds the systemd user bus (a ``systemd-run --user`` would start a process
     outside the sandbox) and session agents; ``/tmp/.X11-unix`` the X server sockets (a reachable
-    X server lets a process inject input and run commands); ``/run/libvirt`` every libvirt daemon
-    socket (the monolithic ``libvirtd`` and the modular ``virtqemud``/``virtnetworkd``/… — each is
-    root-equivalent), covered in one tmpfs rather than enumerating each socket."""
-    return [d for d in ("/run/user", _X11_SOCKET_DIR, "/run/libvirt") if os.path.isdir(d)]
+    X server lets a process inject input and run commands); ``/run/libvirt`` (and
+    ``/var/run/libvirt`` where that is a separate tree, not a symlink to ``/run``) every libvirt
+    daemon socket (the monolithic ``libvirtd`` and the modular ``virtqemud``/``virtnetworkd``/… —
+    each root-equivalent), covered in one tmpfs rather than enumerating each socket. Deduplicated
+    by real path so two names for the same directory (the usual /var/run -> /run symlink) mask
+    it once."""
+    seen: set[str] = set()
+    dirs = []
+    for d in ("/run/user", _X11_SOCKET_DIR, "/run/libvirt", "/var/run/libvirt"):
+        if os.path.isdir(d) and os.path.realpath(d) not in seen:
+            seen.add(os.path.realpath(d))
+            dirs.append(d)
+    return dirs
 
 
 def _binary() -> str:
