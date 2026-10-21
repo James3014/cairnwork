@@ -9,7 +9,10 @@ never guess.
 At most one task per card is active. CANCELLED and SUPERSEDED release the card.
 COMPLETED and FAILED keep holding it. A resend with the same key returns the
 same record and never re-runs it (a FAILED task stays FAILED); to retry, mark the
-FAILED task SUPERSEDED, then bind a new key. The rule
+FAILED task SUPERSEDED, then bind a new key. Resending an identical request (same
+digest) under another key or card is refused while a task for it is active
+(REPLAY_FORBIDDEN if COMPLETED or FAILED, RECONCILIATION_REQUIRED if BOUND or
+DISPATCHED). The one-active-card rule
 lives in the schema (a partial unique index), so it also holds for raw writers;
 ``bind`` maps the index violation to DuplicateLogicalTask.
 
@@ -67,6 +70,14 @@ class OwnershipError(Exception):
 
 class KeyReusedWithDifferentRequest(OwnershipError):
     code = "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST"
+
+
+class ReplayForbidden(OwnershipError):
+    code = "REPLAY_FORBIDDEN"
+
+
+class ReconciliationRequired(OwnershipError):
+    code = "RECONCILIATION_REQUIRED"
 
 
 class OwnerMismatch(OwnershipError):
@@ -165,6 +176,7 @@ class OwnershipLedger:
             if existing is not None:
                 conn.execute("ROLLBACK")
                 return BindResult(_same_binding(existing, digest, owner, card_hash), True)
+            _refuse_replay(conn, digest, card_hash)
             record = OwnershipRecord(
                 idempotency_key, digest, owner, f"task-{uuid.uuid4().hex}", card_hash, "BOUND"
             )
@@ -252,6 +264,28 @@ def _same_binding(
     if existing.owner != owner:
         raise OwnerMismatch(f"{existing.task_id} is owned by {existing.owner}, not {owner}")
     return existing
+
+
+def _refuse_replay(conn: sqlite3.Connection, digest: str, card_hash: str) -> None:
+    """The same request must not run twice under another key or card.
+
+    Checked in code, inside bind's transaction, not by a unique index: a state
+    directory that already holds two rows of one digest must still open. A task
+    on the same card is left to DuplicateLogicalTask (the card index).
+    """
+    row = conn.execute(
+        "SELECT task_id, status FROM task_ownership WHERE request_digest = ?"
+        " AND card_hash != ? AND status NOT IN ('SUPERSEDED', 'CANCELLED')"
+        " ORDER BY status IN ('COMPLETED', 'FAILED') DESC",
+        (digest, card_hash),
+    ).fetchone()
+    if row is None:
+        return
+    task_id, status = row
+    if status in ("COMPLETED", "FAILED"):
+        hint = "supersede it, then use a new key" if status == "FAILED" else "it is not resent"
+        raise ReplayForbidden(f"{task_id} is {status}; {hint}")
+    raise ReconciliationRequired(f"{task_id} is {status}")
 
 
 def _insert(conn: sqlite3.Connection, record: OwnershipRecord) -> None:
