@@ -14,19 +14,27 @@ def _tree(root: Path, source: str) -> Path:
     return root
 
 
-def _report(root: Path, findings: list[tuple[int, str]], name: str = "r.json") -> Path:
+def _report(
+    root: Path,
+    findings: list[tuple[int, str]],
+    name: str = "r.json",
+    severity: str = "error",
+    rule: str = "reportGeneralTypeIssues",
+    files: int = 1,
+) -> Path:
     diagnostics = [
         {
             "file": str(root / "m.py"),
-            "severity": "error",
+            "severity": severity,
             "message": message,
             "range": {"start": {"line": line, "character": 0}},
-            "rule": "reportGeneralTypeIssues",
+            "rule": rule,
         }
         for line, message in findings
     ]
     path = root.parent / f"{root.name}-{name}"
-    path.write_text(json.dumps({"generalDiagnostics": diagnostics}), encoding="utf-8")
+    data = {"generalDiagnostics": diagnostics, "summary": {"filesAnalyzed": files}}
+    path.write_text(json.dumps(data), encoding="utf-8")
     return path
 
 
@@ -70,5 +78,50 @@ def test_malformed_json_fails_closed(tmp_path: Path) -> None:
     bad.write_text("{not json", encoding="utf-8")
     assert _run(base, bad, head, good) == 2
     assert _run(base, tmp_path / "missing.json", head, good) == 2
-    bad.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+    bad.write_text(json.dumps({"generalDiagnostics": []}), encoding="utf-8")
     assert _run(base, bad, head, good) == 2
+
+
+def test_zero_files_analyzed_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    empty = _report(head, [], name="empty.json", files=0)
+    assert _run(base, _report(base, []), head, empty) == 2
+    assert _run(base, empty, head, _report(head, [])) == 2
+
+
+def test_information_severity_is_ignored(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    info = _report(head, [(0, "hint")], severity="information")
+    assert _run(base, _report(base, []), head, info) == 0
+
+
+def test_rule_is_part_of_the_key(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "x: int = 'a'\n")
+    old = _report(base, [(0, "bad")], rule="reportA")
+    assert _run(base, old, head, _report(head, [(0, "bad")], rule="reportB")) == 1
+
+
+def test_message_is_part_of_the_key(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "x: int = 'a'\n")
+    assert _run(base, _report(base, [(0, "old")]), head, _report(head, [(0, "new")])) == 1
+
+
+def test_config_change_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    (head / "pyrightconfig.json").write_text("{}", encoding="utf-8")
+    assert _run(base, _report(base, []), head, _report(head, [])) == 2
+
+
+def test_pyproject_pyright_table_change_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    (base / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
+    (head / "pyproject.toml").write_text("[tool.pyright]\nstrict = ['.']\n", encoding="utf-8")
+    assert _run(base, _report(base, []), head, _report(head, [])) == 2
+    (head / "pyproject.toml").write_text("[tool.ruff]\nline-length = 1\n", encoding="utf-8")
+    assert _run(base, _report(base, []), head, _report(head, [])) == 0

@@ -5,13 +5,21 @@ Usage: pyright_gate.py BASE.json BASE_ROOT HEAD.json HEAD_ROOT   (pyright --outp
 A finding is identified by (relative file, rule, message, stripped source line), never by line
 number, so inserting lines above old debt does not resurface it. Counts are compared per key, so
 a second copy of an old finding is new. Exit 0 = nothing new, 1 = new findings, 2 = unreadable
-input (fail closed).
+input or changed pyright configuration (fail closed).
+
+Fails closed (2) when either report analyzed no files, and when pyrightconfig.json or the
+[tool.pyright] table of pyproject.toml differs between the two roots: a config change needs a
+human, not a silent comparison.
+
+Known limitations: a renamed file's findings all show as new (fails closed); fixing one finding
+and adding an identical-text one elsewhere in the same file is not detected.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -33,6 +41,8 @@ def load(report: Path, root: Path) -> Counter[Key]:
     try:
         data = json.loads(report.read_text(encoding="utf-8"))
         diagnostics = data["generalDiagnostics"]
+        if not data["summary"]["filesAnalyzed"]:
+            raise ValueError("pyright analyzed no files")
         found: Counter[Key] = Counter()
         for item in diagnostics:
             if item["severity"] not in ("error", "warning"):
@@ -46,6 +56,16 @@ def load(report: Path, root: Path) -> Counter[Key]:
     return found
 
 
+def _config(root: Path) -> tuple[str | None, object]:
+    cfg = root / "pyrightconfig.json"
+    text = cfg.read_text(encoding="utf-8") if cfg.is_file() else None
+    try:
+        table = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except OSError:
+        return text, None
+    return text, table.get("tool", {}).get("pyright")
+
+
 def new_findings(base: Counter[Key], head: Counter[Key]) -> list[Key]:
     extra = head - base
     return sorted(extra.elements())
@@ -56,9 +76,11 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     try:
+        if _config(Path(argv[1])) != _config(Path(argv[3])):
+            raise GateError("pyright configuration changed; a human must review this PR")
         base = load(Path(argv[0]), Path(argv[1]).resolve())
         head = load(Path(argv[2]), Path(argv[3]).resolve())
-    except GateError as exc:
+    except (GateError, OSError, ValueError) as exc:
         print(f"pyright gate failed closed: {exc}")
         return 2
     added = new_findings(base, head)

@@ -29,8 +29,8 @@ jobs:
 
   # Exact-base Pyright gate: fails only on findings the PR adds versus its merge base, matched
   # by (file, rule, message, source line text) rather than line number. Limitation: the
-  # comparison script comes from the PR head (the base has none on the first PR), so a PR that
-  # edits scripts/pyright_gate.py is judged by its own copy; review that file by hand.
+  # comparison script comes from the base when it has one, so a PR cannot weaken its own gate;
+  # only the PR that introduces scripts/pyright_gate.py is judged by its own copy.
   pyright:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -42,19 +42,26 @@ jobs:
         with:
           python-version: "3.13"
       - name: Pyright on the merge base and on the head
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          base_sha=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          base_sha=$(git merge-base "origin/${BASE_REF}" HEAD)
           echo "merge base: $base_sha"
           git worktree add "$RUNNER_TEMP/base" "$base_sha"
-          # pyright exits 1 when it has findings; the gate decides, so tolerate that here.
+          # pyright exits 0 (clean) or 1 (findings); the gate judges findings, any other
+          # exit code (crash, bad config, usage) fails this step.
           run_pyright() {
-            (cd "$1" && uv sync --locked &&
-              { uvx --from pyright==1.1.414 pyright --pythonpath .venv/bin/python --outputjson \
-                > "$2" || true; })
+            (cd "$1" && uv sync --locked)
+            local rc=0
+            (cd "$1" && uvx --from pyright==1.1.414 pyright --pythonpath .venv/bin/python \
+              --outputjson > "$2") || rc=$?
+            if [ "$rc" -gt 1 ]; then echo "pyright exited $rc in $1"; exit 1; fi
           }
           run_pyright "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
           run_pyright "$GITHUB_WORKSPACE" "$RUNNER_TEMP/head.json"
-          python3 scripts/pyright_gate.py "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/base" \
+          gate="$RUNNER_TEMP/base/scripts/pyright_gate.py"
+          [ -f "$gate" ] || gate=scripts/pyright_gate.py
+          python3 "$gate" "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/base" \
             "$RUNNER_TEMP/head.json" "$GITHUB_WORKSPACE"
 
   # The verifier sandbox (macOS Seatbelt) is only proven on macOS. Nexus-new's
