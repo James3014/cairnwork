@@ -27,6 +27,6 @@ echo "installing the cairnwork CLI from $REPO…"
 uv tool install --from "git+$REPO" cairnwork
 
 echo
-echo "Installed. Try the five-minute demo (no GitHub, no network, no API key):"
+echo "Installed. Try the five-minute demo (no GitHub, no AI worker, no API key):"
 echo "    cairnwork demo"
 echo "Then see docs/QUICKSTART.md to point Cairnwork at a real repository."

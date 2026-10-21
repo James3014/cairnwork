@@ -4,14 +4,18 @@ whole governed-verification flow on a self-contained fixture in a few seconds.
 This is user-facing orchestration, not part of the governance engine: ``demo`` only calls the
 same public ``verify_candidate`` path a real run uses. It builds a tiny throwaway git repo with
 a seeded bug and a test that catches it, a ready-made one-line fix as the candidate, and a
-private venv, then asks Cairnwork to verify the fix — showing the isolated clone, the file-scope
-check, the test run and the Core VERIFIED verdict, with no GitHub, no network and no AI worker.
+private venv, then asks Cairnwork to verify the fix — showing the governed *verification* an
+attempt goes through (the isolated clone, the file-scope check, the test run in the sandbox, and
+the Core VERIFIED verdict bound to the commit). It does not exercise the task-ownership/dispatch
+side of a real run. It needs no GitHub, no AI worker and no API key; setting up the throwaway
+venv may fetch pytest from the package cache or index on a cold machine.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,8 +28,7 @@ from cairnwork.gitcmd import run_git
 _BUGGY = "def total(items):\n    return sum(items) if items else -1\n"
 _FIXED = "def total(items):\n    return sum(items)\n"
 _CONFTEST = (
-    "import pathlib, sys\n\n"
-    'sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "src"))\n'
+    'import pathlib, sys\n\nsys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "src"))\n'
 )
 _TEST = (
     "from calc import total\n\n\n"
@@ -44,7 +47,11 @@ def main(argv: list[str] | None = None) -> int:
 def _init(args) -> int:
     """Create a state directory with a minimal config.json for a real target repository."""
     state = Path(args.dir).resolve()
+    if args.verifier_python is not None and not os.path.isabs(args.verifier_python):
+        print("error: --verifier-python must be an absolute path", file=sys.stderr)
+        return 2
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(state, 0o700)  # tighten an existing dir too; Intake.prepare() requires 0700
     config = {"verifier_account": args.verifier_account, "verifier_python": args.verifier_python}
     (state / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     (state / "ACCEPTING").touch(mode=0o600)
@@ -125,7 +132,8 @@ def _verify(state: Path, repo: Path, shas: dict[str, str]) -> dict:
 
 
 def _report(result: dict, kept: Path | None) -> int:
-    verified = bool(result.get("verified"))
+    # Fail closed: only call it verified when the run says so AND Core recorded VERIFIED.
+    verified = bool(result.get("verified")) and result.get("core_status") == "VERIFIED"
     mark = "VERIFIED ✓" if verified else "NOT VERIFIED ✗"
     print(f"\n  verdict:      {mark}")
     print(f"  core status:  {result.get('core_status') or '—'}")

@@ -8,7 +8,7 @@ Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexu
 
 ```sh
 uv tool install --from git+https://github.com/James3014/cairnwork.git cairnwork
-cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證、Core VERIFIED（不需 GitHub／網路／AI）
+cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證、Core VERIFIED（不需 GitHub／AI／API key）
 ```
 
 完整安裝、`cairnwork init` 接真實 repo、平台註記見 [docs/QUICKSTART.md](docs/QUICKSTART.md)。

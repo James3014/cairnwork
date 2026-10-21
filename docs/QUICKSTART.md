@@ -23,9 +23,10 @@ curl -fsSLO https://cairnwork.github.io/install.sh   # read it, check the sha256
 sh install.sh
 ```
 
-**Platform note.** Runtime is Python ≥ 3.11. `cryptography` 50 ships wheels for Apple Silicon and
-for Linux x86-64/arm64; on an **Intel Mac** there is no wheel, so it builds from source and you
-need a Rust toolchain (`rustup`) first.
+**Platform note.** Runtime is Python ≥ 3.11. Cairnwork depends on `cryptography`; if your
+platform has no prebuilt wheel for the resolved version (notably older **Intel Macs**), pip/uv
+builds it from source, which needs a Rust toolchain (`rustup`) first. Apple Silicon and
+Linux x86-64/arm64 use prebuilt wheels.
 
 ## 2. See it work — the five-minute demo
 
@@ -33,9 +34,11 @@ need a Rust toolchain (`rustup`) first.
 cairnwork demo
 ```
 
-This needs no GitHub, no network and no AI worker. It builds a throwaway git project with a
-seeded bug and a test that catches it, applies a ready-made one-line fix as the candidate, and
-asks Cairnwork to verify it. You should see the Core verdict:
+This needs no GitHub, no AI worker and no API key (setting up the throwaway venv may fetch
+pytest from the cache or index the first time). It builds a throwaway git project with a seeded
+bug and a test that catches it, applies a ready-made one-line fix as the candidate, and asks
+Cairnwork to verify it — the governed *verification* an attempt goes through. You should see the
+Core verdict:
 
 ```
   verdict:      VERIFIED ✓
@@ -58,8 +61,10 @@ deferred `test_commit`, the `cairnwork:queue` label and the trusted-identity rul
 
 ## Running untrusted third-party code
 
-The demo and `init` default to running verifiers under the account that launches Cairnwork,
-which is fine for your own or semi-trusted code. To run genuinely adversarial code, first set up
-the dedicated, unprivileged verifier account (macOS: `scripts/setup_verifier_user.sh`; Linux:
-`scripts/setup_verifier_user_linux.sh`), then `cairnwork init` without `--no-verifier-account`.
+The `demo` runs verifiers under the account that launches Cairnwork (fine for this fixed,
+self-contained fixture). `cairnwork init` **defaults to the dedicated account** (`verifier_account`
+true); it falls back to the launching account only if you pass `--no-verifier-account`, which is
+appropriate only for your own or semi-trusted code. To run genuinely adversarial code, first set
+up the dedicated, unprivileged verifier account (macOS: `scripts/setup_verifier_user.sh`; Linux:
+`scripts/setup_verifier_user_linux.sh`), then `cairnwork init` with the default account on.
 See [SECURITY.md](SECURITY.md) for the sandbox backends and the isolation model.
