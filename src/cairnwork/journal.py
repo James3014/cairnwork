@@ -127,3 +127,7 @@ def _refuse_double_dispatch(conn: sqlite3.Connection) -> None:
         raise JournalIntegrityViolation(
             f"{JournalIntegrityViolation.code}: dispatched twice: {tasks}"
         )
+
+
+def _witness() -> int:
+    return "not an int"
