@@ -238,4 +238,4 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
         "    assert out and '*' not in out\n"
     )
     result = verify(project, {"tests/test_git.py": code}, "tests/test_git.py")
-    assert result.observation.passed, result.log_path.read_text()
+    assert result.observation.passed, (result.mutated, result.log_path.read_text())
