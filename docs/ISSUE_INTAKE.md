@@ -47,3 +47,14 @@
 - 同一時間只會跑一輪（鎖）。收尾時不會重新檢查可信身分（EIA 會），因為 PR 內容完全不用 Issue 的文字。
 - 目標 repo 的測試需要該 repo 自己的依賴和 pytest 設定。依賴：用 `scripts/setup_target_venv.sh` 建 venv，並在 state 的 `config.json` 設 `verifier_python`。一個 state 目錄只有一個 `verifier_python`，所以 `--repo` 一個 repo 就要配一個自己的 state 目錄（見 `docs/GATEWAY_ROUTE.md`）。pytest 設定一律取自 base commit，由 `src/cairnwork/pytest_config.py` 處理。
 - 和 EIA 不重複：`cairnwork:queue` 是另一個標籤。要做 A/B 比較時，再明確把同一張 Issue 兩個標籤都貼上，兩邊各自開 PR，最後只合併一張。
+
+## 常設 KPI：7 天返工率
+
+每一張由 Cairnwork 從 Issue 交付、且已合併的 PR，都要記「7 天返工率」。它是第一層指標，和「一次成功率」（first-try success）一起報告，不單獨拿來下結論。
+
+- **定義**：已合併的 Cairnwork 交付 PR 中，改動的行在合併後 7 天內又被另一個已合併的 PR 修改或還原的比例。
+- **時間窗**：從該 PR 的合併時間起算，到 7×24 小時為止。
+- **算返工的**：①還原（revert）該 PR 的 commit；②之後的已合併 PR 動到原 PR 改過的同一些行或同一個函式，而且內文、commit 訊息或留言引用了原 Issue 或原 PR 的編號。
+- **不算**：純格式調整（空白、換行、排序 import、formatter 輸出）；沒有引用原 Issue／PR 且沒動到同一行的改動；窗口之外的修改。
+- **記錄位置**：每次交付一列，放在該 state 目錄的交付紀錄裡（欄位：repo、Issue、PR、合併時間、返工 PR 編號或空白、判定日期）。合併滿 7 天後補填一次，不回頭重算。
+- **分母**：已合併的 Cairnwork 交付 PR；未合併或被關閉的不進分母（它們算在一次成功率）。
