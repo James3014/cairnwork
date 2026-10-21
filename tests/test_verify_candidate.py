@@ -276,7 +276,9 @@ def test_notarize_saying_verified_is_not_enough_without_a_bound_readback(
 
     def forged(self, *args, **kwargs):
         found = real(self, *args, **kwargs)
-        return None if readback == "missing" else dataclasses.replace(found, verified=False)
+        if readback == "missing" or found is None:
+            return None
+        return dataclasses.replace(found, verified=False)
 
     monkeypatch.setattr(Notary, "verdict", forged)
     base = base_of(project)
