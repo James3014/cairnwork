@@ -17,7 +17,8 @@ host. Only pytest repos are covered, because ``parse_verifier`` accepts only
 A repo is ENV_OK when its green tests stay green under the sandbox, ENV_COUPLING when
 they pass bare but fail under the sandbox (the reason is classified from the verifier
 log), and REPO_TESTS_NOT_GREEN when they do not pass bare — in which case the repo
-cannot serve as an environment probe at all.
+cannot serve as an environment probe at all. A run that passes except for skipped tests is
+SKIPPED_TESTS: the verifier rejects skips, so the target must name tests that run on this host.
 
 Scope and honest limits:
 - This probes the ``account=None`` path (same uid as the caller). Couplings that only
@@ -69,7 +70,7 @@ class RepoProbe:
 @dataclass(frozen=True)
 class ProbeResult:
     repo: str
-    verdict: str  # ENV_OK | ENV_COUPLING | REPO_TESTS_NOT_GREEN | SKIP_BARE_TIMEOUT
+    verdict: str  # ENV_OK | ENV_COUPLING | SKIPPED_TESTS | REPO_TESTS_NOT_GREEN | SKIP_BARE_TIMEOUT
     reason: str
 
 
@@ -149,9 +150,33 @@ def probe_repo(probe: RepoProbe, *, timeout: int = 300) -> ProbeResult:
         )[0]
         if run.observation.passed:
             return ProbeResult(name, "ENV_OK", "")
+        skipped = _skip_like(run)
+        if skipped is not None:
+            return ProbeResult(
+                name, "SKIPPED_TESTS", f"{skipped} skipped; pick targets without skips"
+            )
         return ProbeResult(name, "ENV_COUPLING", _classify(run))
     finally:
         _scrub(run_root)
+
+
+def _skip_like(run) -> int | None:
+    """Count skip-like outcomes when that is the only reason the run was not passed.
+
+    The verifier counts a run as passed only when every collected test is ``passed`` — a
+    deliberate rule so a candidate cannot hide a failure behind a skip. So an all-pass-but-skipped
+    run (exit 0, nothing mutated, not timed out) is not an environment coupling: the verification
+    target just names tests that do not run on this host. Report it as SKIPPED_TESTS so the operator
+    picks targets without skips, rather than ``ENV_COUPLING sandbox returncode=0`` which reads like
+    an environment problem."""
+    if run.timed_out or run.mutated or run.returncode != 0:
+        return None
+    skip = {"skipped", "xfailed", "xpassed"}
+    outcomes = list(run.outcomes.values())
+    skipped = sum(1 for outcome in outcomes if outcome in skip)
+    if skipped and all(outcome == "passed" or outcome in skip for outcome in outcomes):
+        return skipped
+    return None
 
 
 def _classify(run) -> str:
@@ -200,7 +225,9 @@ def main(argv: list[str]) -> int:
         return 1
     # Distinct code: a repo we could not probe at all (not green bare, or bare timed out) is not
     # the same signal as a coupling, but still not a clean onboarding.
-    if any(r.verdict in ("REPO_TESTS_NOT_GREEN", "SKIP_BARE_TIMEOUT") for r in results):
+    if any(
+        r.verdict in ("SKIPPED_TESTS", "REPO_TESTS_NOT_GREEN", "SKIP_BARE_TIMEOUT") for r in results
+    ):
         return 2
     return 0
 

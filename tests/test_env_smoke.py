@@ -42,6 +42,20 @@ def test_bare_side_puts_the_venv_python_on_path(repo, monkeypatch):
     assert _probe(repo, "tests/test_py.py").verdict == "ENV_OK"
 
 
+def test_a_skipped_test_is_reported_as_skipped_not_coupling(repo):
+    # The verifier rejects any skip (so a candidate cannot hide a failure behind one), so an
+    # all-pass-but-skipped suite is not an env coupling — it should read as SKIPPED_TESTS.
+    source = (
+        "import pytest\n"
+        "def test_ok():\n    assert True\n"
+        "def test_s():\n    pytest.skip('platform')\n"
+    )
+    commit_change(repo, files={"tests/test_skip.py": source})
+    result = _probe(repo, "tests/test_skip.py")
+    assert result.verdict == "SKIPPED_TESTS"
+    assert "1 skipped" in result.reason
+
+
 def test_write_outside_the_repo_shows_up_as_env_coupling(repo):
     # Passes bare (it can write to /private/tmp) but the sandbox denies that write, so the
     # same green test fails only under the real verification path -> ENV_COUPLING.
