@@ -72,6 +72,9 @@ def setup(repo, tmp_path, monkeypatch):
     git(clone, "config", "user.email", "t@e")  # CI runners have no git identity
     git(clone, "config", "user.name", "t")
     started = []
+    monkeypatch.setattr(
+        runner, "_verify_origin", lambda clone, repo: f"https://github.com/{repo}.git"
+    )
     monkeypatch.setattr(intake_module, "_spawn", lambda argv, **kw: started.append(argv))
     intake = Intake(tmp_path / "state")
     intake.set_accepting(True)
