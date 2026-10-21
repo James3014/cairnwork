@@ -17,11 +17,13 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
       `.local/share/keyrings`, `.terraform.d`.
     - **Credential files** replaced with `/dev/null`: `.netrc`, `.git-credentials`, `.npmrc`,
       `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, `.Xauthority`.
-    - **Socket trees** emptied with a tmpfs: `/run/user` (systemd user bus, session agents — a
-      `systemd-run --user` would start a process outside the sandbox) and `/tmp/.X11-unix` (an X
-      server lets a process inject input and run commands outside the sandbox).
+    - **Socket trees** emptied with a tmpfs (the whole tree, covering every socket under it):
+      `/run/user` (systemd user bus — a `systemd-run --user` would start a process outside the
+      sandbox — and session agents), `/tmp/.X11-unix` (an X server lets a process inject input and
+      run commands outside the sandbox), and `/run/libvirt` (every libvirt daemon socket, the
+      monolithic `libvirtd` and the modular `virtqemud`/`virtnetworkd`/…, each root-equivalent).
     - **Root-equivalent daemon sockets** replaced with `/dev/null`: Docker, Podman, containerd,
-      the system D-Bus, libvirt and LXD (each is root-equivalent; a read-only bind does not stop
+      the system D-Bus, LXD and Incus (each is root-equivalent; a read-only bind does not stop
       `connect()` to a pathname `AF_UNIX` socket, and the network namespace covers only abstract
       sockets).
 
@@ -29,10 +31,14 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
   or an ancestor of `$HOME` are refused.
 
   **Deployment note:** a verifier write root or state directory must not live under a masked path
-  (e.g. `~/.config`, `~/.local/state`). The credential tmpfs is applied after the write binds, so
-  it would empty the directory inside the sandbox and the run would fail closed (nothing written,
-  no false pass). Put Cairnwork's state under a dedicated location such as `/var/lib/cairnwork` (or
-  `$XDG_STATE_HOME` set outside the masked tree), not under the masked credential directories.
+  (a masked credential dir such as `~/.config` or `~/.local/state`, or a masked socket tree such as
+  `/run/user`, `/tmp/.X11-unix`, `/run/libvirt`). The tmpfs is applied after the write binds, so
+  inside the sandbox the directory is replaced by an empty tmpfs: any state already there is hidden
+  from the run, and anything written there is discarded when the run ends. (The tmpfs is itself
+  writable, so a single run that writes and reads back within itself still sees its own data — the
+  loss is of *pre-existing* and *persisted* state, not an in-run write.) Put Cairnwork's state under
+  a dedicated location such as `/var/lib/cairnwork` (or `$XDG_STATE_HOME` set outside the masked
+  trees), not under a masked directory.
 
 ### The dedicated verifier account (Linux P4, Issue #84)
 

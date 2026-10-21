@@ -3,11 +3,12 @@
 The policy is a read-only bind of the whole root plus read-write binds for the write roots,
 with a fresh /dev and /proc, every namespace unshared (so no network), all capabilities
 dropped and nested user namespaces disabled. Named credential directories under $HOME (and the
-/run/user and /tmp/.X11-unix socket trees) are emptied with a tmpfs, credential files are
-replaced by /dev/null, and root-equivalent daemon sockets (Docker/Podman/containerd, the system
-D-Bus, libvirt, LXD) are replaced by /dev/null — a read-only root bind does not stop connect()
-to a pathname socket, which no network namespace covers (an X server likewise lets a reachable
-client inject input and run commands outside the sandbox). See docs/SECURITY.md for the full set.
+/run/user, /tmp/.X11-unix and /run/libvirt socket trees) are emptied with a tmpfs, credential
+files are replaced by /dev/null, and root-equivalent daemon socket files (Docker/Podman/
+containerd, the system D-Bus, LXD, Incus) are replaced by /dev/null — a read-only root bind does
+not stop connect() to a pathname socket, which no network namespace covers (an X server likewise
+lets a reachable client inject input and run commands outside the sandbox). See docs/SECURITY.md
+for the full set.
 
 Trade-off (documented in docs/SECURITY.md): until the verifier runs under its own account
 (P4) the sandbox runs as the invoking account, so everything that account can read is
@@ -96,11 +97,13 @@ _DANGEROUS_SOCKETS = (
     "/var/run/containerd/containerd.sock",
     "/run/dbus/system_bus_socket",  # system D-Bus
     "/var/run/dbus/system_bus_socket",
-    "/run/libvirt/libvirt-sock",  # libvirt: root-equivalent (define+start a VM as root)
-    "/var/run/libvirt/libvirt-sock",
     "/var/snap/lxd/common/lxd/unix.socket",  # LXD: root-equivalent (launch a privileged container)
     "/var/lib/lxd/unix.socket",
+    "/var/lib/incus/unix.socket",  # Incus (the LXD fork): same root-equivalence
 )
+# libvirt's sockets (the monolithic libvirtd and the modular virtqemud/virtnetworkd/… daemons)
+# all live under /run/libvirt, so that whole directory is emptied with a tmpfs (see
+# _socket_dirs_to_empty) rather than enumerating each socket here.
 # Socket directories emptied with a tmpfs (the whole tree at once, uid-independent): the X11
 # server sockets (a reachable X server lets a process inject input and run commands outside the
 # sandbox on a desktop) and the per-user runtime tree (systemd user bus, session agents).
@@ -249,18 +252,18 @@ def build_policy(
     return Policy("\n".join(flags) + "\n")
 
 
-_SOCKET_DIRS = ("/run/user", _X11_SOCKET_DIR)
-
-
 def _socket_dirs_to_empty() -> list[str]:
-    """The socket directories to empty with a tmpfs, those that exist. The whole tree is masked,
-    not a per-uid subdir, so it holds whether the candidate runs as the launching account or
-    (under P4) a dedicated verifier uid — the policy is built before any account switch, so keying
-    on the launcher's own uid would mask the wrong subdir. ``/run/user`` holds the systemd user
-    bus (a ``systemd-run --user`` would start a process outside the sandbox) and session agents;
-    ``/tmp/.X11-unix`` holds the X server sockets (a reachable X server lets a process inject input
-    and run commands outside the sandbox)."""
-    return [directory for directory in _SOCKET_DIRS if os.path.isdir(directory)]
+    """The socket directories to empty with a tmpfs, those that exist. Masking the whole tree
+    (not a per-path or per-uid entry) is uid-independent and covers every socket under it, so it
+    holds whether the candidate runs as the launching account or (under P4) a dedicated verifier
+    uid — the policy is built before any account switch, so keying on the launcher's own uid would
+    mask the wrong subdir. The tuple is read each call (tests rebind the module globals):
+    ``/run/user`` holds the systemd user bus (a ``systemd-run --user`` would start a process
+    outside the sandbox) and session agents; ``/tmp/.X11-unix`` the X server sockets (a reachable
+    X server lets a process inject input and run commands); ``/run/libvirt`` every libvirt daemon
+    socket (the monolithic ``libvirtd`` and the modular ``virtqemud``/``virtnetworkd``/… — each is
+    root-equivalent), covered in one tmpfs rather than enumerating each socket."""
+    return [d for d in ("/run/user", _X11_SOCKET_DIR, "/run/libvirt") if os.path.isdir(d)]
 
 
 def _binary() -> str:

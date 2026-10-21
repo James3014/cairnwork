@@ -161,14 +161,23 @@ def test_policy_always_dies_with_parent():
 
 
 def test_dangerous_sockets_cover_the_root_equivalent_services():
-    # The real list must mask the known root-equivalent / input-injection daemon sockets (#85).
+    # The real list must mask the known root-equivalent daemon socket files (#85). libvirt's
+    # sockets are covered by the /run/libvirt directory tmpfs instead (see the next test).
     required = {
         "/run/docker.sock",
         "/run/dbus/system_bus_socket",
-        "/run/libvirt/libvirt-sock",
         "/var/snap/lxd/common/lxd/unix.socket",
+        "/var/lib/incus/unix.socket",
     }
     assert required <= set(_REAL_DANGEROUS_SOCKETS)
+
+
+def test_socket_dirs_cover_runtime_x11_and_libvirt(monkeypatch):
+    # /run/user, /tmp/.X11-unix and /run/libvirt (all its daemon sockets) are emptied as whole
+    # trees. Patch them all present so the pure function returns the full set it would mask.
+    trees = {"/run/user", bwrap._X11_SOCKET_DIR, "/run/libvirt"}
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p in trees)
+    assert set(bwrap._socket_dirs_to_empty()) == trees
 
 
 def test_x11_socket_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
