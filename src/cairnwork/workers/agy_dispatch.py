@@ -86,6 +86,7 @@ class StatusReader(threading.Thread):
                 continue
             if not line:
                 return
+            failures = 0  # the limit is on consecutive failures, so draining never stops early
             if line.startswith(STATUS_PREFIX.encode()):
                 self.last = line
 
