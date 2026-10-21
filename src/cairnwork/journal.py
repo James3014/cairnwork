@@ -38,6 +38,21 @@ CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_
     BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
 """
 
+_ONE_DISPATCH = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS attempt_journal_one_dispatch"
+    " ON attempt_journal (task_id) WHERE phase = 'DISPATCHED'"
+)
+
+
+class JournalIntegrityViolation(Exception):
+    """The journal already has two DISPATCHED rows for one task; reconcile it by hand."""
+
+    code = "JOURNAL_INTEGRITY_VIOLATION"
+
+
+class AlreadyDispatched(Exception):
+    """A DISPATCHED row already exists for this task: only one attempt may start."""
+
 
 @dataclass(frozen=True)
 class Entry:
@@ -53,6 +68,16 @@ class Journal:
         conn = self._connect()
         try:
             conn.executescript(_SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")  # the check and the index share one write lock
+            try:
+                _refuse_double_dispatch(conn)
+                conn.execute(_ONE_DISPATCH)
+                conn.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                raise JournalIntegrityViolation(f"{JournalIntegrityViolation.code}: {exc}") from exc
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
         finally:
             conn.close()
 
@@ -71,6 +96,10 @@ class Journal:
                 " VALUES (?, ?, ?, ?, ?)",
                 (task_id, attempt_id, phase, detail, datetime.now(UTC).isoformat()),
             )
+        except sqlite3.IntegrityError as exc:
+            if phase == "DISPATCHED":
+                raise AlreadyDispatched(task_id) from exc
+            raise
         finally:
             conn.close()
 
@@ -85,3 +114,16 @@ class Journal:
         finally:
             conn.close()
         return [Entry(*row) for row in rows]
+
+
+def _refuse_double_dispatch(conn: sqlite3.Connection) -> None:
+    """Name the tasks an old journal dispatched twice, before the unique index is built."""
+    rows = conn.execute(
+        "SELECT task_id FROM attempt_journal WHERE phase = 'DISPATCHED'"
+        " GROUP BY task_id HAVING count(*) > 1 ORDER BY task_id"
+    ).fetchall()
+    if rows:
+        tasks = ", ".join(r[0] for r in rows)
+        raise JournalIntegrityViolation(
+            f"{JournalIntegrityViolation.code}: dispatched twice: {tasks}"
+        )
