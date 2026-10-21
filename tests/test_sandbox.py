@@ -1,18 +1,19 @@
 """Witnesses: the verifier sandbox really denies, and pytest really runs inside it.
 
 Each attack is a candidate test that asserts the operation is refused. A verifier
-PASS therefore proves the denial happened inside the real Seatbelt sandbox; if
-the sandbox let it through, the test (and so the verifier) would fail.
+PASS therefore proves the denial happened inside the real sandbox (Seatbelt on macOS,
+bubblewrap on Linux); if the sandbox let it through, the test (and so the verifier)
+would fail. The witnesses assert behaviour, not policy text; one backend's policy
+construction is tested in test_seatbelt_profile.py and test_bwrap_probe.py.
 """
 
 import sys
-from pathlib import Path
 
 import pytest
 from conftest import commit_change, git
 
+import cairnwork_sandbox
 from cairnwork.verifiers import parse_verifier, run_verifiers
-from cairnwork_sandbox import seatbelt as sandbox
 
 
 @pytest.fixture
@@ -49,6 +50,9 @@ def attack(code):
     )
 
 
+_SEATBELT_ONLY = ("read-outside", "read-repo-git")
+
+
 @pytest.mark.sandbox
 @pytest.mark.parametrize(
     "name,code",
@@ -64,20 +68,22 @@ def attack(code):
             "assert result.returncode != 0",
         ),
         (
-            "read-outside",
+            "read-outside",  # seatbelt only: the bwrap root is readable (docs/SECURITY.md)
             "with pytest.raises(PermissionError):\n    open(os.environ['CW_SECRET']).read()",
         ),
         (
             "write-outside",
-            "with pytest.raises(PermissionError):\n    open(os.environ['CW_OUTSIDE'], 'w')",
+            "with pytest.raises(OSError):\n    open(os.environ['CW_OUTSIDE'], 'w')",
         ),
         (
             "write-tmp",
-            "with pytest.raises(PermissionError):\n    open(os.environ['CW_TMP_TARGET'], 'w')",
+            "with pytest.raises(OSError):\n    open(os.environ['CW_TMP_TARGET'], 'w')",
         ),
         (
             "read-ssh",
-            "with pytest.raises(PermissionError):\n    os.listdir(os.environ['CW_SSH'])",
+            "try:\n    listing = os.listdir(os.environ['CW_SSH'])\n"
+            "except OSError:\n    listing = []\n"
+            "assert listing == []",
         ),
         (
             "read-repo-git",
@@ -86,6 +92,9 @@ def attack(code):
     ],
 )
 def test_attacks_are_denied(project, tmp_path, monkeypatch, name, code):
+    backend = cairnwork_sandbox.platform_backend()
+    if name in _SEATBELT_ONLY and (backend is None or backend.name != "seatbelt"):
+        pytest.skip("bwrap binds the whole root read-only: reads outside the roots are allowed")
     secret = tmp_path / "secret.txt"
     secret.write_text("TOP SECRET\n")
     import os
@@ -118,7 +127,7 @@ def test_attacks_are_denied(project, tmp_path, monkeypatch, name, code):
 
 def test_without_sandbox_nothing_runs_and_the_verifier_fails(project, tmp_path, monkeypatch):
     marker = tmp_path / "ran"
-    monkeypatch.setattr(sandbox, "available", lambda: False)
+    monkeypatch.setattr(cairnwork_sandbox.platform_backend(), "available", lambda: False)
     result = verify(
         project,
         tmp_path,
@@ -137,59 +146,11 @@ def test_child_cannot_touch_its_own_log_ini_or_profile(project, tmp_path):
         "def test_tamper():\n"
         "    run = pathlib.Path(__import__('os').environ['HOME']).parent\n"
         "    for name in ('verifier.log', 'pytest.ini', 'profile.sb'):\n"
-        "        with pytest.raises(PermissionError):\n"
+        "        with pytest.raises(OSError):\n"
         "            open(run.parent / name, 'a').write('x')\n"
     )
     result = verify(project, tmp_path, {"tests/test_tamper.py": code}, "tests/test_tamper.py")
     assert result.observation.passed, result.log_path.read_text()
-
-
-@pytest.mark.parametrize(
-    "bad", ['/tmp/a"b', "/tmp/a(b", "/tmp/a\\\\b", "/tmp/a\nb", "/tmp/é", "/tmp/a\n"]
-)
-def test_profile_paths_cannot_rewrite_the_policy(bad):
-    with pytest.raises(sandbox.SandboxError):
-        sandbox.sbpl_path(bad)
-
-
-def test_profile_resolves_symlinked_paths(tmp_path):
-    real = tmp_path / "real"
-    real.mkdir()
-    (tmp_path / "link").symlink_to(real)
-    profile = sandbox.build_profile((), (tmp_path / "link",), home=tmp_path)
-    assert str(real.resolve()) in profile.text
-    assert "(deny network*)" in profile.text and "(deny default)" in profile.text
-
-
-@pytest.mark.parametrize("root", ["/", "/Users", "/private/tmp", "HOME", "HOME_PARENT"])
-def test_broad_roots_are_refused(tmp_path, root):
-    home = tmp_path / "home"
-    home.mkdir()
-    path = {"HOME": home, "HOME_PARENT": tmp_path}.get(root, root)
-    with pytest.raises(sandbox.SandboxError):
-        sandbox.build_profile((Path(path),), (), home=home)
-
-
-@pytest.mark.sandbox
-def test_trailing_credential_deny_wins_inside_an_allowed_root(tmp_path):
-    """SBPL: the last matching rule wins. A credential path under an allowed read root
-    must stay unreadable (a reviewer claimed first-match-wins; this pins the behaviour)."""
-    import subprocess
-
-    home = tmp_path / "home"
-    keychains = home / "Library" / "Keychains"
-    keychains.mkdir(parents=True)
-    (keychains / "login.db").write_text("KEY\n")
-    (home / "Library" / "ok.txt").write_text("OK\n")
-    profile = sandbox.build_profile((home / "Library",), (), home=home)
-    path = tmp_path / "p.sb"
-    path.write_text(profile.text)
-    run = lambda target: subprocess.run(  # noqa: E731
-        sandbox.wrap(["/bin/cat", str(target)], path), capture_output=True, text=True
-    )
-    assert run(home / "Library" / "ok.txt").stdout == "OK\n"
-    denied = run(keychains / "login.db")
-    assert denied.returncode != 0 and "KEY" not in denied.stdout
 
 
 @pytest.mark.sandbox
@@ -208,17 +169,20 @@ def test_child_cannot_rewrite_its_log_through_stdout(project, tmp_path):
     assert "test_rewrite" in log or "passed" in log or "failed" in log
 
 
-def test_probe_requires_a_real_denial(monkeypatch):
-    sandbox.available.cache_clear()
-    monkeypatch.setattr(sandbox, "_probe", lambda policy: 0)
-    try:
-        assert sandbox.available() is False
-    finally:
-        sandbox.available.cache_clear()
-
-
 @pytest.mark.sandbox
-def test_process_that_leaves_the_group_is_killed_and_fails_the_run(project, tmp_path):
+def test_a_process_that_leaves_the_group_is_contained(project, tmp_path):
+    """A child that escapes the run's process group (start_new_session) must not outlive
+    the run and do work. The backends reach that end differently: Seatbelt cannot reap an
+    escaped session, so it sweeps the survivor by its run token and fails the run (so a
+    worker that leaves a process behind gets no passing verdict); under bwrap the escapee
+    stays in the PID namespace and is SIGKILLed when the namespace tears down, so nothing is
+    left to sweep and the run may pass (see docs/SECURITY.md).
+
+    This witness asserts the invariant both enforce: the escape writes no marker. The marker
+    path is outside the write roots, so on bwrap the read-only root alone already forbids the
+    write — this assertion does not by itself exercise the PID-namespace kill (the write-outside
+    and no-network witnesses, plus the SECURITY.md reasoning, cover that). Making bwrap also
+    fail the run, and a witness that proves the kill directly, are P3 follow-ups."""
     marker = tmp_path / "late"
     child = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('x')"
     code = (
@@ -227,11 +191,13 @@ def test_process_that_leaves_the_group_is_killed_and_fails_the_run(project, tmp_
         f"    subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
     )
     result = verify(project, tmp_path, {"tests/test_daemon.py": code}, "tests/test_daemon.py")
-    assert not result.observation.passed
+    backend = cairnwork_sandbox.platform_backend()
+    if backend is not None and backend.name == "seatbelt":
+        assert not result.observation.passed  # the swept survivor fails the run
     import time
 
     time.sleep(4)
-    assert not marker.exists()
+    assert not marker.exists()  # contained on either backend: the escape did no work
 
 
 def test_python_must_be_an_absolute_path(project, tmp_path):
@@ -258,55 +224,6 @@ def test_tests_can_run_git(project, tmp_path):
     )
     result = verify(project, tmp_path, {"tests/test_git.py": code}, "tests/test_git.py")
     assert result.observation.passed, result.log_path.read_text()
-
-
-@pytest.mark.parametrize(
-    ("path", "allowed"),
-    [
-        ("/Library/Developer/CommandLineTools", True),
-        ("/Applications/Xcode.app/Contents/Developer", True),
-        ("/Applications/Xcode_16.4.app/Contents/Developer", True),
-        ("/Library/Developer", False),
-        ("/Library/Developer/CoreSimulator", False),
-        ("/Applications/XcodeEvil", False),
-        ("/Applications/Xcode.app/Contents", False),
-        ("/tmp", False),
-    ],
-)
-def test_only_standard_developer_dirs_are_readable(path, allowed):
-    assert bool(sandbox._DEVELOPER_DIR.fullmatch(path)) is allowed
-
-
-@pytest.mark.parametrize(
-    ("selected", "readable"),
-    [
-        ("/Library/Developer/CommandLineTools", ("/Library/Developer/CommandLineTools",)),
-        ("/Applications/Xcode_26.6.app/Contents/Developer", ("/Applications/Xcode_26.6.app",)),
-        ("/Applications/Xcode.app/Contents", ()),
-    ],
-)
-def test_developer_dirs_maps_xcode_to_its_bundle(monkeypatch, selected, readable):
-    import subprocess
-
-    done = subprocess.CompletedProcess([], 0, stdout=selected + "\n", stderr="")
-    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: done)
-    monkeypatch.setattr(sandbox.os.path, "realpath", lambda p: p)
-    monkeypatch.setattr(sandbox.os.path, "isdir", lambda p: True)
-    sandbox.developer_dirs.cache_clear()
-    try:
-        assert sandbox.developer_dirs() == readable
-    finally:
-        sandbox.developer_dirs.cache_clear()
-
-
-@pytest.mark.parametrize(
-    ("dirs", "licensed"),
-    [(("/Applications/Xcode.app",), True), (("/Library/Developer/CommandLineTools",), False)],
-)
-def test_xcode_license_plist_only_with_a_full_xcode(monkeypatch, tmp_path, dirs, licensed):
-    monkeypatch.setattr(sandbox, "developer_dirs", lambda: dirs)
-    profile = sandbox.build_profile((), (tmp_path / "w",), home=tmp_path / "home")
-    assert (sandbox.XCODE_LICENSE_PLIST in profile.text) is licensed
 
 
 @pytest.mark.sandbox
@@ -336,7 +253,7 @@ _NEXT_TO_REPO = (
     "def test_not_above_the_run():\n"
     "    try:\n"
     "        (repo.parent.parent / 'escaped').write_text('no')\n"
-    "    except PermissionError:\n"
+    "    except OSError:\n"
     "        return\n"
     "    raise AssertionError('wrote outside its work directory')\n"
 )
@@ -368,3 +285,33 @@ def test_a_replaced_checkout_fails_the_run(project, tmp_path):
     result = verify(project, tmp_path, {"tests/test_swap.py": code}, "tests/test_swap.py")
     assert not result.observation.passed
     assert "checkout replaced" in result.mutated
+
+
+@pytest.mark.sandbox
+def test_named_credentials_are_masked(project, tmp_path, monkeypatch):
+    """A fake home holds canary credentials; inside the sandbox none of them is readable
+    (denied, missing or emptied), whichever backend confines the run."""
+    home = tmp_path / "fakehome"
+    canaries = [".ssh/id_test", ".aws/credentials", ".config/gh/hosts.yml", ".netrc"]
+    for rel in canaries:
+        (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / rel).write_text("CANARY-SECRET\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CW_CANARIES", ":".join(str(home / rel) for rel in canaries))
+    import cairnwork.verifiers as verifiers
+
+    monkeypatch.setattr(verifiers, "_ENV_KEEP", (*verifiers._ENV_KEEP, "CW_CANARIES"))
+    code = (
+        "import os\n"
+        "def test_masked():\n"
+        "    paths = os.environ['CW_CANARIES'].split(':')\n"
+        "    assert len(paths) == 4\n"
+        "    for path in paths:\n"
+        "        try:\n"
+        "            data = open(path).read()\n"
+        "        except OSError:\n"
+        "            continue\n"
+        "        assert 'CANARY-SECRET' not in data, path\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_masked.py": code}, "tests/test_masked.py")
+    assert result.observation.passed, result.log_path.read_text()
