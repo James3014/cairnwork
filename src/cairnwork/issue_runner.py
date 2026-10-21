@@ -48,9 +48,7 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
 )
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-ORIGIN = re.compile(
-    r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([^/:@\s]+/[^/:@\s]+)"
-)
+ORIGIN = re.compile(r"https://github\.com/([^/:@\s]+/[^/:@\s]+)")
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
 
 
@@ -128,15 +126,19 @@ class GitHub:
         ).strip()  # fmt: skip
 
 
-def _verify_origin(clone: Path, repo: str) -> None:
-    """Fetch and push URLs of the clone's origin must both be github.com/<repo> (any form)."""
-    for flags in ((), ("--push",)):
-        url = _git(clone, "remote", "get-url", *flags, "origin").strip()
-        found = ORIGIN.fullmatch(url)
-        if not found:
-            raise RuntimeError(f"LINEAGE_REMOTE_UNKNOWN: origin {url!r} is not a github.com URL")
-        if found[1].removesuffix(".git").lower() != repo.lower():
-            raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
+def _verify_origin(clone: Path, repo: str) -> str:
+    """Every fetch and push URL of origin must be https://github.com/<repo>; returns that URL."""
+    for flags in (("--all",), ("--push", "--all")):
+        urls = _git(clone, "remote", "get-url", *flags, "origin").splitlines()
+        if not any(urls):
+            raise RuntimeError("LINEAGE_REMOTE_UNKNOWN: origin has no URL")
+        for url in urls:
+            found = ORIGIN.fullmatch(url)
+            if not found:
+                raise RuntimeError(f"LINEAGE_REMOTE_UNKNOWN: origin {url!r} is not a github URL")
+            if found[1].removesuffix(".git").lower() != repo.lower():
+                raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
+    return f"https://github.com/{repo}.git"
 
 
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
@@ -268,10 +270,10 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     existing = github.find_pr(branch)
     if existing:  # a previous pass opened it; only the labels were left to do
         return existing
-    _verify_origin(clone, github.repo)  # the remote may have changed since take()
+    url = _verify_origin(clone, github.repo)  # re-checked: the remote may have changed
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
-         "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
+         url, f"{commit}:refs/heads/{branch}")  # fmt: skip
     body = (
         f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
         f"- Cairnwork task `{status['task_id']}`，attempt `{attempt}`\n"
