@@ -65,6 +65,10 @@ Rules:
 - Do not create, delete or rename any other file. Do not run commands.
 - Make the smallest change that fixes the task; keep the existing style.
 - Do not modify tests.
+- Work alone and edit the file yourself in this turn: do not start subagents, researchers
+  or background tasks (in this mode they never report back).
+- The tests that will judge your fix are not in this repository; do not look for them.
+  Read the source you need directly.
 """
 
 

@@ -71,3 +71,17 @@ def test_an_unmarked_process_holding_the_output_fails_the_run(tmp_path):
     with pytest.raises(AgyWorkerError, match="holds its output"):
         AgyWorker(agy=agy).run(workdir, TASK)
     assert time.monotonic() - started < 30
+
+
+def test_the_prompt_asks_agy_to_work_alone(tmp_path):
+    """nexus-learning#114 pilot: agy started a researcher subagent and waited for it until
+    the print timeout, twice, changing nothing; told to work alone it edited the file."""
+    seen = tmp_path / "argv.json"
+    agy = fake_agy(tmp_path, f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))")
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    AgyWorker(agy=agy).run(workdir, TASK)
+    argv = json.loads(seen.read_text())
+    prompt = argv[argv.index("-p") + 1]
+    assert "do not start subagents" in prompt
+    assert "not in this repository; do not look for them" in prompt
