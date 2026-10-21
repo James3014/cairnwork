@@ -58,3 +58,7 @@ uv run lint-imports
 uv run python scripts/check_size.py
 uv run pytest
 ```
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 James3014.
