@@ -80,6 +80,19 @@ chmod 0440 "$SUDOERS.tmp"
 visudo -cf "$SUDOERS.tmp" >/dev/null
 mv "$SUDOERS.tmp" "$SUDOERS"
 
+# The account path does not mask the owner's home credentials (a different uid cannot enter a
+# 0700 home, and the uid boundary denies them). If the owner's home is traversable by others,
+# a world-readable secret under it would be readable by the verifier — warn so the operator
+# tightens it. Correctly-private secrets (0600/0700) stay protected regardless.
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6)"
+if [ -n "$OWNER_HOME" ] && [ -d "$OWNER_HOME" ]; then
+  perm="$(stat -c '%a' "$OWNER_HOME" 2>/dev/null || echo 700)"
+  case "$perm" in
+    *[1-7][0-9] | *[0-9][1-7]) echo "WARNING: $OWNER_HOME is group/other-accessible ($perm);" \
+      "world-readable secrets under it would be readable by $VERIFIER. Prefer chmod 700." >&2 ;;
+  esac
+fi
+
 echo "verifier account: $(id "$VERIFIER")"
 echo "shared root:      $(ls -ld "$ROOT")"
 echo "sudo rule:        $(cat "$SUDOERS")"

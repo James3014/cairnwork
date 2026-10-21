@@ -21,14 +21,27 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
 **Run adversarial or untrusted third-party code on Linux only under the dedicated verifier
 account.** It is now available: `scripts/setup_verifier_user_linux.sh` creates an unprivileged
 `cairnwork-verifier` user (the counterpart of the macOS `setup_verifier_user.sh`), and with it
-the readable set inside the sandbox is that account's, which owns nothing — closing the
-read-isolation gap below. The CI job `test-linux-verifier-account` proves it on a real runner.
+the readable set inside the sandbox is that account's, which owns nothing. Unlike the macOS
+Seatbelt allow-list this is still a whole-root read bind, so it closes the read-isolation gap
+below only for the owner's files that their own permissions keep private (`0600`/`0700`); a
+world-readable file is readable whatever the account (see the note after the trade-off). The CI
+job `test-linux-verifier-account` proves it on a real runner.
 
 The shared root (`/var/lib/cairnwork`) is group-readable by the verifier (that is how the
 account reads its Python and each run's inputs), so **keep owner secrets out of it** — it is for
 verifier inputs and the account's interpreter, never credentials. The per-run verifier log stays
 owner-only (`0600`). The installer refuses to adopt a pre-existing `cairnwork-verifier` name that
 maps to root or the owner, has a login shell, or carries extra group memberships.
+
+Under the dedicated account the owner-home credential masks (the `--tmpfs`/`/dev/null` list that
+the launching-account path applies) are **not** applied: the sandbox runs as a uid that cannot
+enter the owner's `0700` home, so those mounts would fail, and the uid boundary already denies
+the owner's credentials. This relies on the owner's secrets having ordinary private permissions
+(`0600`/`0700`). A **world-readable** secret in the owner's home (e.g. a `0644` token under a
+`0755` home) stays readable by the verifier — as it already is by every local process — so the
+account is not a substitute for keeping the owner's credentials private. Masking only the
+reachable (and thus leakable) owner-home paths under the account is tracked as a hardening
+follow-up.
 
 ### Trade-off without the dedicated account (the launching-account fallback)
 

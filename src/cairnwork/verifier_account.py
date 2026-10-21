@@ -103,7 +103,7 @@ class VerifierAccount:
             policy_file = Path(name)
             os.write(fd, policy.text.encode())
             os.close(fd)
-            os.chmod(policy_file, 0o644)  # seatbelt reads the profile as the account
+            os.chmod(policy_file, 0o640)  # group-readable: seatbelt reads it as the account
             probe = self.wrap([py, "-P", "-c", "import pytest"], policy_file)
             done = subprocess.run(  # noqa: S603 - fixed argv
                 probe, capture_output=True, timeout=60, check=False, cwd=self.root
