@@ -81,17 +81,35 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
 
 def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
     # A reachable Docker/Podman/containerd socket is root-equivalent and a read-only root bind
-    # does not stop connect(), so an existing one is replaced with /dev/null; an absent one adds
-    # no flag (a bind over a missing path would fail on the read-only root).
+    # does not stop connect(), so an existing one is replaced with /dev/null at its canonical
+    # path; an absent one adds no flag (a bind over a missing path would fail on the read-only
+    # root), and duplicate paths (the /var/run -> /run symlink) collapse to one.
+    import os
+
     home = _home(tmp_path)
     present = tmp_path / "docker.sock"
     present.write_text("")  # stands in for the socket inode
+    real_present = os.path.realpath(present)
     absent = tmp_path / "podman.sock"
-    monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", (str(present), str(absent)))
+    monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", (str(present), real_present, str(absent)))
     lines = bwrap.BACKEND.policy((), (), home=home).text.splitlines()
-    masked = lines.index(str(present))
-    assert lines[masked - 2 : masked + 1] == ["--ro-bind", "/dev/null", str(present)]
-    assert str(absent) not in lines
+    masked = lines.index(real_present)
+    assert lines[masked - 2 : masked + 1] == ["--ro-bind", "/dev/null", real_present]
+    assert lines.count(real_present) == 1  # the duplicate entry collapsed
+    assert str(absent) not in lines and os.path.realpath(absent) not in lines
+
+
+def test_user_runtime_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
+    # /run/user/<uid> holds the systemd user bus (a systemd-run --user escape) and the session
+    # agent sockets; a tmpfs empties the whole class. Masked only when the dir exists.
+    import os
+
+    monkeypatch.setattr(bwrap.os, "getuid", lambda: 4242)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == "/run/user/4242" or real_isdir(p))
+    lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
+    i = lines.index("/run/user/4242")
+    assert lines[i - 1] == "--tmpfs"
 
 
 def test_absent_credentials_are_not_masked(tmp_path):

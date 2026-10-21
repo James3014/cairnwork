@@ -91,6 +91,8 @@ _DANGEROUS_SOCKETS = (
     "/run/podman/podman.sock",
     "/run/containerd/containerd.sock",
     "/var/run/containerd/containerd.sock",
+    "/run/dbus/system_bus_socket",  # system D-Bus
+    "/var/run/dbus/system_bus_socket",
 )
 
 # Unshare a user + pid namespace, drop all capabilities, disable nested userns, bind the root
@@ -207,9 +209,22 @@ def build_policy(
             flags += ["--ro-bind", "/dev/null", target]
     # Mask root-equivalent daemon sockets (Docker/Podman/containerd): a read-only root bind
     # does not stop connect() to a pathname socket, and no network namespace covers it.
+    # Bind over the canonical path (realpath collapses the /var/run -> /run symlink and the
+    # duplicate entries to one existing socket; binding /dev/null onto the symlink path itself
+    # makes bwrap try to create a mountpoint through it and fail). Only an existing socket is
+    # masked: exists() follows the link, so an absent or dangling one adds no flag.
+    masked_socks: set[str] = set()
     for sock in _DANGEROUS_SOCKETS:
-        if os.path.lexists(sock):
-            flags += ["--ro-bind", "/dev/null", sock]
+        real = _safe(sock) if os.path.exists(sock) else None
+        if real and real not in masked_socks:
+            masked_socks.add(real)
+            flags += ["--ro-bind", "/dev/null", real]
+    # Empty the per-user runtime dir with a tmpfs: it holds the systemd user bus (a
+    # `systemd-run --user` would start a process outside the sandbox), the SSH/keyring agent
+    # socket and other session IPC. A tmpfs covers the whole class rather than a path at a time.
+    runtime_dir = f"/run/user/{os.getuid()}"
+    if os.path.isdir(runtime_dir):
+        flags += ["--tmpfs", _safe(runtime_dir)]
     return Policy("\n".join(flags) + "\n")
 
 

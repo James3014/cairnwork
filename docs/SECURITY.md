@@ -29,15 +29,21 @@ directories are protected by ordinary POSIX permissions.
 Two consequences of the whole-root read-only bind are mitigated, not fully closed, before P4:
 
 - **Pathname sockets.** A read-only bind does not stop `connect()` to an `AF_UNIX` pathname
-  socket, and the network namespace covers only abstract sockets. A reachable root-equivalent
-  daemon socket (Docker/Podman/containerd) would hand the candidate the host. Those sockets are
-  replaced with `/dev/null` (`_DANGEROUS_SOCKETS`). The general pathname-socket surface — any
-  other service the account can reach over a filesystem socket — closes only with P4's own
-  account. The SSH agent is already out of reach: the candidate environment is scrubbed to
-  `PATH`/`LANG`/`LC_ALL` (`_ENV_KEEP`), so it carries no `SSH_AUTH_SOCK`.
+  socket, and the network namespace covers only abstract sockets. A reachable privileged local
+  socket hands the candidate the host — the container daemons (Docker/Podman/containerd), the
+  system D-Bus, and the **systemd user bus** under `/run/user/<uid>` (a `systemd-run --user`
+  there starts a process *outside* the sandbox). The daemon and system-bus sockets are replaced
+  with `/dev/null` (`_DANGEROUS_SOCKETS`); the whole per-user runtime dir `/run/user/<uid>` is
+  emptied with a tmpfs, which also removes the SSH/keyring **agent** socket that lives there.
+  An agent socket an operator put at some *other* path is still reachable by a candidate that
+  guesses it (scrubbing `SSH_AUTH_SOCK` from the environment hides the usual pointer but not the
+  path itself) — this residual, and any privileged socket not in the list above, closes only
+  with the P4 dedicated account.
 - So "writes and network are confined" holds for ordinary filesystem writes and IP networking;
-  a filesystem socket to a privileged local service is the residual the daemon-socket mask and
-  P4 address.
+  a filesystem socket to a privileged local service is the residual the masks above and P4
+  address. **Run genuinely adversarial third-party code only under the P4 dedicated account**,
+  not the launching account: the whole-root read bind means the deny-list cannot be proven
+  complete, and the account's own files and sockets are the trust boundary until then.
 
 CI on `ubuntu-24.04` lifts the AppArmor `apparmor_restrict_unprivileged_userns` restriction
 with sysctl; an end user's machine needs an AppArmor profile that grants `userns` to bwrap.
