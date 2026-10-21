@@ -4,6 +4,7 @@ import time
 
 import pytest
 from conftest import commit_change, git
+from core_http_server import core_http_server
 from product.adapters.generic_verification import verify_generic_changeset
 
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
@@ -14,6 +15,7 @@ from cairnwork.notary import (
     NotaryInputError,
     NotarySchemaMismatch,
 )
+from cairnwork_protocol.http import http_core_verify
 
 PASS = (VerifierObservation("pytest", "artifact-1", "sha256:" + "e" * 64, True),)
 FAIL = (VerifierObservation("pytest", "artifact-1", "sha256:" + "e" * 64, False),)
@@ -37,9 +39,14 @@ def head_of(repo):
     return git(repo, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def notary(tmp_path):
-    return Notary(tmp_path / "notary.sqlite")
+@pytest.fixture(params=["in-process", "http"])
+def notary(request, tmp_path):
+    """Every behaviour test runs against Core in-process and over its HTTP protocol."""
+    if request.param == "in-process":
+        yield Notary(tmp_path / "notary.sqlite")
+        return
+    with core_http_server(tmp_path) as (url, token_file):
+        yield Notary(tmp_path / "notary.sqlite", core_verify=http_core_verify(url, token_file))
 
 
 def test_in_scope_change_with_passing_verifier_is_verified(repo, notary):

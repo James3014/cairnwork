@@ -12,6 +12,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from cairnwork.changeset import GitChangeSet
+from cairnwork_protocol import (
+    GENERIC_VERIFICATION_REQUEST_SCHEMA_ID,
+    PUBLIC_PROTOCOL_VERSION,
+    acceptance_contract_hash,
+    change_manifest_hash,
+    change_set_hash,
+    verification_plan_hash,
+)
 
 
 @dataclass(frozen=True)
@@ -38,15 +46,6 @@ def build_core_request(
     *,
     attempt_id: str,
 ) -> dict[str, Any]:
-    from product.protocol import PUBLIC_PROTOCOL_VERSION
-    from product.protocol.generic_verification import (
-        GENERIC_VERIFICATION_REQUEST_SCHEMA_ID,
-        acceptance_contract_hash,
-        change_manifest_hash,
-        change_set_hash,
-        verification_plan_hash,
-    )
-
     manifest = {
         "source_tree": f"git-tree:{change.base_tree}",
         "target_tree": f"git-tree:{change.candidate_tree}",
