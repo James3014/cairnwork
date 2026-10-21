@@ -25,3 +25,14 @@ def test_long_function_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "SCANNED", [tmp_path / "src"])
     problems = module.check(tmp_path)
     assert any("too_long" in p for p in problems)
+
+
+def test_verify_package_total_is_capped(tmp_path, monkeypatch):
+    module = _load()
+    pkg = tmp_path / "src" / "cairnwork_verify"
+    pkg.mkdir(parents=True)
+    for index in range(3):
+        (pkg / f"m{index}.py").write_text("x = 1\n" * 250, encoding="utf-8")
+    monkeypatch.setattr(module, "VERIFY", pkg)
+    monkeypatch.setattr(module, "SCANNED", [tmp_path / "src"])
+    assert any("cairnwork_verify total" in p for p in module.check(tmp_path))

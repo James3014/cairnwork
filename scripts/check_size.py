@@ -1,5 +1,6 @@
 """Enforce Cairnwork size limits: file <=400 lines, function <=80 lines, core <=5000 lines,
-and the trusted sandbox package (src/cairnwork_sandbox) <=1200 lines of its own."""
+the trusted sandbox package (src/cairnwork_sandbox) <=1200 lines of its own, and
+src/cairnwork_verify <=600 lines."""
 
 from __future__ import annotations
 
@@ -10,11 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ROOT / "src" / "cairnwork"
 SANDBOX = ROOT / "src" / "cairnwork_sandbox"
+VERIFY = ROOT / "src" / "cairnwork_verify"
 SCANNED = [ROOT / "src", ROOT / "experimental", ROOT / "scripts", ROOT / "tests"]
 MAX_FILE_LINES = 400
 MAX_FUNCTION_LINES = 80
 MAX_CORE_LINES = 5000
 MAX_SANDBOX_LINES = 1200
+MAX_VERIFY_LINES = 600
 
 
 def _python_files(base: Path) -> list[Path]:
@@ -23,7 +26,7 @@ def _python_files(base: Path) -> list[Path]:
 
 def check(root: Path = ROOT) -> list[str]:
     problems: list[str] = []
-    core_total = sandbox_total = 0
+    core_total = sandbox_total = verify_total = 0
     for base in SCANNED:
         for path in _python_files(base):
             text = path.read_text(encoding="utf-8")
@@ -35,6 +38,8 @@ def check(root: Path = ROOT) -> list[str]:
                 core_total += lines
             if SANDBOX in path.parents:
                 sandbox_total += lines
+            if VERIFY in path.parents:
+                verify_total += lines
             for node in ast.walk(ast.parse(text, filename=str(path))):
                 if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                     length = (node.end_lineno or node.lineno) - node.lineno + 1
@@ -45,6 +50,8 @@ def check(root: Path = ROOT) -> list[str]:
         problems.append(f"src/cairnwork total {core_total} lines > {MAX_CORE_LINES}")
     if sandbox_total > MAX_SANDBOX_LINES:
         problems.append(f"src/cairnwork_sandbox total {sandbox_total} lines > {MAX_SANDBOX_LINES}")
+    if verify_total > MAX_VERIFY_LINES:
+        problems.append(f"src/cairnwork_verify total {verify_total} lines > {MAX_VERIFY_LINES}")
     return problems
 
 

@@ -6,8 +6,10 @@ in the sandbox, and a Core verdict bound to the exact commit.
 No worker runs and nothing is bound in the ownership ledger, so the deployer's in-flight
 count never sees it. The run holds the shared run lock, as any run does, so ``recover``
 cannot mistake its verifier processes for a dead run's. Like ``submit`` it is refused
-while the state is drained, and when the state names a ``mirror`` it works only in that
-mirror (the base and the candidate are fetched into it from --repo-path). The Core record
+while the state is drained (checked again once the run lock is held). Every check runs in
+a scratch clone of the state's ``mirror`` (or of --repo-path when there is none) that this
+run alone owns; the external candidate is fetched into the scratch clone only, never into
+the shared mirror or the caller's repository. The Core record
 goes to the state's notary under a one-off ``verify-`` task id.
 
 A run marks itself with a locked file in ``<state>/verify-runs/``; the kernel drops the
@@ -20,16 +22,18 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
+import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from cairnwork import runlock
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.deferred_tests import TestCommitRejected, lay_tests_over, never_seen
-from cairnwork.gitcmd import OID
-from cairnwork.intake import Intake, IntakeRefused, mirror_base
+from cairnwork.gitcmd import OID, GitCommandError, run_git
+from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.ownership import request_digest
 from cairnwork.pipeline import (
     TaskRejected,
@@ -71,19 +75,19 @@ def verify_candidate(
     specs = check_task(task)  # the same scope, protected-file and verifier rules
     if not OID.fullmatch(candidate):
         raise TaskRejected("BAD_CANDIDATE", "candidate must be a 40-hex commit id")
-    if not intake.accepting():
-        raise IntakeRefused("VERIFY_NOT_ACCEPTING", "Cairnwork takes no new work (drained)")
+    _require_accepting(intake)
+    source = _source(intake, repo)
     intake.prepare()
-    task = _in_mirror(intake, task, candidate)
     cleanup(intake)
     result = TaskResult(task.idempotency_key, f"a{secrets.token_hex(8)}", "FAILED")
     notary = intake.notary
     verifying = (intake.verifier_account(), intake.config()["verifier_python"])
     status = "FAILED"
     with runlock.held(intake.state / "ownership.sqlite", exclusive=False):
+        _require_accepting(intake)  # a drain that came in while we waited for the lock
         with _marked(intake, result.attempt_id):
             try:
-                _judge(task, specs, candidate, notary, intake.run_root, result, verifying)
+                _judge(intake, task, source, specs, candidate, notary, result, verifying)
             except (CandidateRejected, TestCommitRejected, WorkspaceError) as exc:
                 result.reason, status = str(exc), "REFUSED"
     judged = result.candidate_commit or candidate
@@ -100,26 +104,74 @@ def verify_candidate(
     }
 
 
-def _in_mirror(intake: Intake, task: TaskSpec, candidate: str) -> TaskSpec:
-    """With a configured mirror everything happens in the mirror, never in the caller's
-    repository: fetch the base and the candidate into it, as submit does for the base."""
+def _require_accepting(intake: Intake) -> None:
+    if not intake.accepting():
+        raise IntakeRefused("VERIFY_NOT_ACCEPTING", "Cairnwork takes no new work (drained)")
+
+
+def _source(intake: Intake, repo: Path) -> Path:
+    """The repository the worker path would use as task.repo: the state's mirror when it
+    names one, else the caller's. It is only read."""
     mirror = intake.config()["mirror"]
-    if not mirror:
-        return task
-    if not Path(mirror).is_dir():
+    if mirror and not Path(mirror).is_dir():
         raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
-    if Path(mirror).resolve() != task.repo.resolve():
-        for commit in (task.base_commit, candidate):
-            mirror_base(Path(mirror), task.repo, commit)
-    return TaskSpec(
-        task.idempotency_key, task.card_hash, task.title, task.instructions, Path(mirror),
-        task.base_commit, task.allowed_files, task.verifiers, test_commit=task.test_commit,
-    )  # fmt: skip
+    return Path(mirror) if mirror else repo
 
 
-def _judge(task, specs, candidate, notary, run_root, result, verifying) -> None:
+@contextmanager
+def _scratch(intake: Intake, source: Path, repo: Path, task: TaskSpec, candidate: str, name: str):
+    """A clone of source for this run alone. The candidate comes from outside, so it is
+    fetched into this clone only, never into the shared mirror (objects there would later
+    make a test commit look already seen). Its origin is source's origin, so a deferred
+    test commit is fetched from the same place as on the worker path."""
+    path = intake.state / "verify-scratch" / name
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    try:
+        run_git(path.parent, "clone", "--quiet", "--no-local", "--no-checkout", str(source), name)
+        try:
+            run_git(
+                path,
+                "remote",
+                "set-url",
+                "origin",
+                run_git(source, "remote", "get-url", "origin").strip(),
+            )
+        except GitCommandError:
+            run_git(path, "remote", "remove", "origin")  # source has none: neither do we
+        run_git(path, "fetch", "--quiet", "--no-tags", str(repo), task.base_commit, candidate)
+    except GitCommandError as exc:
+        shutil.rmtree(path, ignore_errors=True)
+        raise WorkspaceError(f"cannot prepare a scratch clone: {exc}") from exc
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _check_parent(repo: Path, base: str, candidate: str) -> None:
+    """In the caller's repository, read-only and before anything is fetched anywhere: the
+    candidate must be one commit directly on the base. A candidate built on top of a hidden
+    test commit is refused here, so it can never bring that commit into a store Cairnwork
+    checks (and so cannot make the commit look already seen)."""
+    try:
+        parents = run_git(repo, "rev-list", "--parents", "-n", "1", candidate).split()[1:]
+    except GitCommandError as exc:
+        raise WorkspaceError(f"cannot read {candidate} in {repo}: {exc}") from exc
+    if parents != [base]:
+        raise CandidateRejected("NOT_ONE_COMMIT_ON_BASE", f"parents of {candidate} are {parents}")
+
+
+def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> None:
+    run_root = intake.run_root
+    _check_parent(task.repo, task.base_commit, candidate)
     if task.test_commit:
-        never_seen(task.repo, task.test_commit)
+        never_seen(source, task.test_commit)  # the object store the worker path checks
+    with _scratch(intake, source, task.repo, task, candidate, result.attempt_id) as scratch:
+        task = replace(task, repo=scratch)
+        _judge_in(task, specs, candidate, notary, run_root, result, verifying)
+
+
+def _judge_in(task, specs, candidate, notary, run_root, result, verifying) -> None:
     clone = create_attempt_clone(task.repo, candidate, run_root, result.attempt_id)
     try:
         attempt = Attempt(clone.attempt_id, task.base_commit, clone.path, clone.refs_before)
@@ -142,14 +194,33 @@ def _judge(task, specs, candidate, notary, run_root, result, verifying) -> None:
             result.logs.append(f"cleanup failed: {exc}")
 
 
+def _gap() -> None:
+    """Between opening a marker and locking it; tests widen it to show the race is closed."""
+
+
+def _same_file(fd: int, path: Path) -> bool:
+    try:
+        now, held = os.stat(path, follow_symlinks=False), os.fstat(fd)
+    except FileNotFoundError:
+        return False
+    return (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
+
+
 @contextmanager
 def _marked(intake: Intake, attempt_id: str) -> Iterator[None]:
-    """Hold a locked marker file for the duration of a run."""
+    """Hold a locked marker file for the duration of a run. The lock is taken before the
+    marker counts, and only if the path still names the file we locked (a cleaner may
+    have removed it in between): otherwise try again."""
     path = intake.state / "verify-runs" / attempt_id
     path.parent.mkdir(mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        _gap()
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if _same_file(fd, path):
+            break
+        os.close(fd)
+    try:
         yield
     finally:
         path.unlink(missing_ok=True)
@@ -157,19 +228,27 @@ def _marked(intake: Intake, attempt_id: str) -> Iterator[None]:
 
 
 def cleanup(intake: Intake) -> dict[str, Any]:
-    """Remove what runs that died left behind: their orphan processes, clones and
-    baseline directories. A run that is still alive holds its marker's lock and is left
-    alone."""
+    """Remove what runs that died left behind: their orphan processes, clones, scratch
+    clones and baseline directories. A run that is still alive holds its marker's lock and
+    is left alone; a marker is only removed by whoever holds its lock and still sees the
+    same file at that path."""
     markers = intake.state / "verify-runs"
     cleaned: list[str] = []
     for marker in sorted(markers.iterdir()) if markers.is_dir() else []:
         if marker.is_symlink() or not ATTEMPT_ID.fullmatch(marker.name):
             continue
-        fd = os.open(marker, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fd = os.open(marker, os.O_RDWR | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _gap()
+            if not _same_file(fd, marker):
+                continue  # replaced by a run that started meanwhile
             sweep_marked(ATTEMPT_ENV, marker.name)
             remove_leftovers(intake.run_root, marker.name)
+            shutil.rmtree(intake.state / "verify-scratch" / marker.name, ignore_errors=True)
             marker.unlink(missing_ok=True)
             cleaned.append(marker.name)
         except BlockingIOError:

@@ -359,6 +359,3 @@ def _mirror_base(mirror: Path, source: Path, base: str) -> None:
         )  # fmt: skip
     except GitCommandError as exc:
         raise IntakeRefused("BAD_REQUEST", f"cannot fetch {base} from {source}") from exc
-
-
-mirror_base = _mirror_base  # public name for cairnwork_verify
