@@ -125,11 +125,8 @@ class AgyWorker:
         fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         env = {key: os.environ[key] for key in ENV_KEEP if key in os.environ}
         env[ATTEMPT_ENV] = workdir.name
-        status_path = workdir.parent / f"{workdir.name}.agy.status"
-        status_file = None
-        if dispatch is not None:  # its status line is read from a file the cap cannot cut
+        if dispatch is not None:
             env.update(agy_dispatch.tuning_env())
-            status_file = agy_dispatch.open_status(status_path)
         log = os.fdopen(fd, "wb")
         process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv,
@@ -137,11 +134,13 @@ class AgyWorker:
             env=env,
             stdin=subprocess.DEVNULL if dispatch is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT if status_file is None else status_file,
+            stderr=subprocess.STDOUT if dispatch is None else subprocess.PIPE,
             start_new_session=True,
         )
-        if status_file is not None:
-            status_file.close()
+        reader = None
+        if dispatch is not None:
+            reader = agy_dispatch.StatusReader(process.stderr)
+            reader.start()
             threading.Thread(target=_feed, args=(process, prompt), daemon=True).start()
         copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
         copier.start()
@@ -153,14 +152,16 @@ class AgyWorker:
                 agy_dispatch.ask_to_stop(process)  # lets it release its lease
             raise AgyWorkerError("agy timed out") from exc
         finally:
-            held = _stop(process, copier, workdir.name)
+            held = _stop(process, copier, workdir.name, reader)
             if not held:  # else the copier still reads: leave both open rather than hang
                 process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
                 log.close()
         if held:
             raise AgyWorkerError("a process agy started outlived it and holds its output")
-        if dispatch is not None:
-            agy_dispatch.raise_if_exhausted(status_path, process.returncode, log_path)
+        if reader is not None:
+            agy_dispatch.raise_if_exhausted(reader.status(), process.returncode, log_path)
         if process.returncode != 0:
             raise AgyWorkerError(f"agy exited {process.returncode}; log {log_path}")
 
@@ -177,7 +178,7 @@ def _feed(process, prompt: str) -> None:
             pass
 
 
-def _stop(process, copier, attempt: str) -> bool:
+def _stop(process, copier, attempt: str, reader=None) -> bool:
     """Kill agy's group and anything it started outside it that still carries the
     attempt marker; return True if something still holds agy's output pipe."""
     try:
@@ -187,4 +188,6 @@ def _stop(process, copier, attempt: str) -> bool:
     process.wait()
     sweep_marked(ATTEMPT_ENV, attempt, skip_group=process.pid)
     copier.join(timeout=10)
-    return copier.is_alive()
+    if reader is not None:
+        reader.join(timeout=10)
+    return copier.is_alive() or (reader is not None and reader.is_alive())

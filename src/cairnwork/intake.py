@@ -191,6 +191,9 @@ class Intake:
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
+        model = loaded.get("model", DEFAULT_CONFIG["model"])
+        if not isinstance(model, str) or not model or any(c in model for c in "\n\r\0"):
+            raise IntakeRefused("BAD_CONFIG", "model must be a one-line string")
         for key in DEFAULT_CONFIG.keys() & loaded.keys():
             if key.startswith("agy_dispatch_") and not _seconds(loaded[key]):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be a whole number of seconds")

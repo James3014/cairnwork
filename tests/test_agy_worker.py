@@ -125,17 +125,17 @@ def test_the_dispatcher_gets_a_pinned_argv_and_the_prompt_on_stdin(tmp_path):
     argv, stdin, cwd = json.loads(seen.read_text())
     assert argv == [
         path,
-        "--cwd", str(workdir),
-        "--mode", "accept-edits",
-        "--model", "m-1",
-        "--timeout", "900",
-        "--pool-wait-timeout", "600",
-        "--max-calls", "1",
-        "--provider-stall-seconds", "900",
-        "--stream-no-progress-seconds", "900",
-        "--write-path", "a.py",
-        "--write-path", "b/z.py",
-    ]  # fmt: skip
+        f"--cwd={workdir}",
+        "--mode=accept-edits",
+        "--model=m-1",
+        "--timeout=900",
+        "--pool-wait-timeout=600",
+        "--max-calls=1",
+        "--provider-stall-seconds=900",
+        "--stream-no-progress-seconds=900",
+        "--write-path=a.py",
+        "--write-path=b/z.py",
+    ]
     assert "Task: t" in stdin and "a.py, b/z.py" in stdin
     assert cwd == str(workdir.resolve())
 
@@ -151,9 +151,9 @@ def test_dispatcher_timing_settings_reach_its_argv(tmp_path):
     )
     worker.run(workdir, TASK)
     argv = json.loads(seen.read_text())
-    assert argv[argv.index("--pool-wait-timeout") + 1] == "11"
-    assert argv[argv.index("--provider-stall-seconds") + 1] == "22"
-    assert argv[argv.index("--stream-no-progress-seconds") + 1] == "33"
+    assert "--pool-wait-timeout=11" in argv
+    assert "--provider-stall-seconds=22" in argv
+    assert "--stream-no-progress-seconds=33" in argv
 
 
 def test_dispatcher_environment_is_trimmed_but_keeps_pool_tuning(tmp_path, monkeypatch):
@@ -246,7 +246,6 @@ def test_without_a_dispatcher_the_agy_argv_is_unchanged(tmp_path):
         "--print-timeout", "900s",
     ]  # fmt: skip
     assert stdin_seen.read_text() == "''"  # still no stdin
-    assert not (tmp_path / "attempt1.agy.status").exists()
 
 
 def test_a_timed_out_dispatcher_gets_sigterm_first_to_release_its_lease(tmp_path):
@@ -278,3 +277,49 @@ def test_a_timed_out_raw_agy_is_killed_without_sigterm(tmp_path):
     with pytest.raises(AgyWorkerError, match="timed out"):
         AgyWorker(agy=agy, timeout_seconds=-57).run(workdir, TASK)
     assert not marker.exists()
+
+
+EXHAUSTED = 'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\\n\')\n'
+
+
+def test_the_last_status_line_wins(tmp_path):
+    body = (
+        EXHAUSTED + 'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "failed"}\\n\')\nsys.exit(75)'
+    )
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyWorkerError) as raised:
+        worker.run(workdir, TASK)
+    assert type(raised.value) is AgyWorkerError
+
+
+def test_a_non_executable_dispatcher_fails_with_the_usual_reason(tmp_path):
+    worker, workdir, path = _dispatched(tmp_path, "pass")
+    os.chmod(path, 0o644)
+    with pytest.raises(AgyWorkerError, match=f"{path} not found or not executable"):
+        worker.run(workdir, TASK)
+
+
+def test_exhaustion_is_found_after_a_flood_of_trailing_diagnostics(tmp_path):
+    from cairnwork.workers.agy_dispatch import AgyPoolExhausted
+
+    body = EXHAUSTED + f"sys.stderr.write('d' * {MAX_LOG_BYTES * 2} + '\\n')\nsys.exit(75)"
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyPoolExhausted):
+        worker.run(workdir, TASK)
+
+
+def test_dispatcher_stderr_never_reaches_the_disk(tmp_path):
+    body = f"sys.stderr.write(('e' * 1000 + '\\n') * {MAX_LOG_BYTES // 100})"
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    worker.run(workdir, TASK)
+    assert sum(f.stat().st_size for f in tmp_path.rglob("*") if f.is_file()) < MAX_LOG_BYTES
+
+
+def test_a_file_named_like_an_option_stays_a_value(tmp_path):
+    seen = tmp_path / "seen.json"
+    task = SimpleNamespace(title="t", instructions="i", allowed_files=("-x.py",))
+    worker, workdir, _ = _dispatched(
+        tmp_path, f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))", task
+    )
+    worker.run(workdir, task)
+    assert "--write-path=-x.py" in json.loads(seen.read_text())

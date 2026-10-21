@@ -16,12 +16,13 @@ import json
 import os
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 
 STATUS_PREFIX = "NEXUS_AGY_DISPATCH "
 TUNING_ENV_PREFIX = "NEXUS_AGY_"  # the pool's own tuning; passed through, nothing else is
 EXHAUSTED_EXIT = 75
-STATUS_TAIL_BYTES = 64 << 10
+STATUS_LINE_BYTES = 64 << 10
 TERM_GRACE_SECONDS = 15
 
 
@@ -38,27 +39,19 @@ class Dispatch:
 
 
 def argv(dispatch: Dispatch, workdir, model: str, timeout_seconds: int, allowed_files) -> list[str]:
+    """Every value is attached with '=' so a value that starts with '-' is never an option."""
     out = [
         dispatch.path,
-        "--cwd",
-        str(workdir),
-        "--mode",
-        "accept-edits",
-        "--model",
-        model,
-        "--timeout",
-        str(timeout_seconds),
-        "--pool-wait-timeout",
-        str(dispatch.pool_wait_seconds),
-        "--max-calls",
-        "1",
-        "--provider-stall-seconds",
-        str(dispatch.provider_stall_seconds),
-        "--stream-no-progress-seconds",
-        str(dispatch.stream_no_progress_seconds),
+        f"--cwd={workdir}",
+        "--mode=accept-edits",
+        f"--model={model}",
+        f"--timeout={timeout_seconds}",
+        f"--pool-wait-timeout={dispatch.pool_wait_seconds}",
+        "--max-calls=1",
+        f"--provider-stall-seconds={dispatch.provider_stall_seconds}",
+        f"--stream-no-progress-seconds={dispatch.stream_no_progress_seconds}",
     ]
-    for name in sorted(allowed_files):
-        out += ["--write-path", name]
+    out += [f"--write-path={name}" for name in sorted(allowed_files)]
     return out
 
 
@@ -66,26 +59,43 @@ def tuning_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k.startswith(TUNING_ENV_PREFIX)}
 
 
-def open_status(path):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    return os.fdopen(fd, "wb")
+class StatusReader(threading.Thread):
+    """Reads the dispatcher's stderr as it comes and keeps only the last status line (at
+    most STATUS_LINE_BYTES of it), so nothing a chatty child prints reaches the disk or
+    grows in memory, and the status line is found however much diagnostics follow it.
+
+    Only the final status line counts. The dispatcher prints it last on every exit-75 path
+    and the agy child's stderr cannot follow it; a forged earlier or later line could at
+    worst change the failure label (pool exhausted or not), never turn a failure into
+    success: the exit code and the snapshot of the clone still decide everything else."""
+
+    def __init__(self, stream) -> None:
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.last = b""
+
+    def run(self) -> None:
+        for line in iter(lambda: self.stream.readline(STATUS_LINE_BYTES), b""):
+            if line.startswith(STATUS_PREFIX.encode()):
+                self.last = line
+
+    def status(self) -> dict:
+        return read_status(self.last.decode("utf-8", "replace"))
 
 
 def read_status(text: str) -> dict:
-    """The last status line, or {} when there is none or it is not a JSON object."""
-    for line in reversed(text.splitlines()):
-        if line.startswith(STATUS_PREFIX):
-            try:
-                status = json.loads(line[len(STATUS_PREFIX) :])
-            except ValueError:
-                return {}
-            return status if isinstance(status, dict) else {}
-    return {}
+    """The JSON object after the status prefix, or {} when there is none."""
+    if not text.startswith(STATUS_PREFIX):
+        return {}
+    try:
+        status = json.loads(text[len(STATUS_PREFIX) :])
+    except ValueError:
+        return {}
+    return status if isinstance(status, dict) else {}
 
 
-def raise_if_exhausted(status_path, returncode: int, log_path) -> None:
-    text = status_path.read_bytes()[-STATUS_TAIL_BYTES:].decode("utf-8", "replace")
-    if returncode == EXHAUSTED_EXIT and read_status(text).get("status") == "pool_exhausted":
+def raise_if_exhausted(status: dict, returncode: int, log_path) -> None:
+    if returncode == EXHAUSTED_EXIT and status.get("status") == "pool_exhausted":
         raise AgyPoolExhausted(
             "POOL_EXHAUSTED: no account in the pool has quota left; "
             f"no other model was tried; log {log_path}"
