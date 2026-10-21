@@ -162,8 +162,9 @@ class Intake:
                 check_core_url(loaded["core_url"])
             except CoreHttpError as exc:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
-            if not loaded.get("core_token_file"):
-                raise IntakeRefused("BAD_CONFIG", "core_url needs core_token_file")
+            token_file = loaded.get("core_token_file")
+            if not token_file or not os.access(token_file, os.R_OK):
+                raise IntakeRefused("BAD_CONFIG", "core_url needs a readable core_token_file")
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:

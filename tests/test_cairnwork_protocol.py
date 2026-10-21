@@ -4,6 +4,11 @@ and drift detection on the constants and canonicalization rules."""
 
 from __future__ import annotations
 
+import json
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 from core_http_server import core_http_server
 from hypothesis import given, settings
@@ -165,3 +170,62 @@ def test_the_request_vector_gets_the_same_answer_over_http(tmp_path):
 
     with core_http_server(tmp_path) as (url, token_file):
         assert http_core_verify(url, token_file)(request) == verify_generic_changeset(request)
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """Records every request it gets; answers per the server's `reply` attribute."""
+
+    def _handle(self):
+        self.server.seen.append((self.command, self.path, self.headers.get("Authorization")))
+        status, headers, body = self.server.reply
+        self.send_response(status)
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _handle  # noqa: N815
+
+    def log_message(self, *args):
+        pass
+
+
+@contextmanager
+def _recorder(reply):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recorder)
+    server.seen, server.reply = [], reply
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_redirect_is_not_followed_and_the_token_stays_home(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("SECRET")
+    verified = (200, {}, json.dumps({"status": "VERIFIED"}).encode())
+    with _recorder(verified) as (elsewhere, other_url):
+        moved = (302, {"Location": other_url + "/v1/changesets/verify"}, b"")
+        with _recorder(moved) as (_core, core_url):
+            with pytest.raises(CoreHttpError):
+                http_core_verify(core_url, token_file)({})
+    assert elsewhere.seen == []
+
+
+def test_proxy_settings_are_ignored(tmp_path, monkeypatch):
+    with _recorder((502, {}, b"")) as (proxy, proxy_url):
+        for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, proxy_url)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        with core_http_server(tmp_path) as (url, token_file):
+            status, _body = http_core_verify(url, token_file)({})
+    assert status == 422 and proxy.seen == []
+
+
+def test_userinfo_with_only_a_password_is_refused():
+    with pytest.raises(CoreHttpError):
+        check_core_url("http://:pw@127.0.0.1:1")

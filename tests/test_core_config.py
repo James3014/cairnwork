@@ -19,6 +19,10 @@ def _intake(tmp_path, config):
         {"core_url": "http://10.0.0.5:8080", "core_token_file": "/x/token"},
         {"core_url": "http://127.0.0.1:8080"},  # no token file
         {"core_url": "http://127.0.0.1:8080", "core_token_file": "relative/token"},
+        {"core_url": "http://127.0.0.1:8080", "core_token_file": "/nonexistent/core.token"},
+        {"core_url": "http://localhost:bad", "core_token_file": "/x/token"},
+        {"core_url": "http://[::1", "core_token_file": "/x/token"},
+        {"core_url": 8080, "core_token_file": "/x/token"},
     ],
 )
 def test_bad_core_settings_are_refused(tmp_path, config):
