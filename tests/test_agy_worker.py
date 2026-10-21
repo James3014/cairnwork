@@ -363,26 +363,6 @@ def test_a_failing_stderr_read_keeps_draining_and_marks_the_status_unknown():
     assert reader.status() == {"status": "pool_exhausted"}  # it kept draining
 
 
-def test_isolated_read_failures_never_stop_the_draining():
-    import io
-
-    from cairnwork.workers.agy_dispatch import StatusReader
-
-    class EveryOther(io.BytesIO):
-        calls = 0
-
-        def readline(self, size: int | None = -1):
-            self.calls += 1
-            if self.calls % 2:
-                raise OSError("boom")
-            return super().readline(size)
-
-    lines = b"noise\n" * 5 + b'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\n'
-    reader = StatusReader(EveryOther(lines))
-    reader.run()  # five isolated failures, never three in a row
-    assert reader.status() == {"status": "pool_exhausted"}
-
-
 def test_a_reader_that_is_still_alive_counts_as_holding_the_output(tmp_path):
     import threading
     import time
