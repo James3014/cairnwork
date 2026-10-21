@@ -77,6 +77,8 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 
 ## 切換與回退順序
 
+（停車中：日後重開 route 時才照這個順序做；2026-10-20 已經線上演練過一次，見開頭說明與 #39。）
+
 1. Gateway 端改動合併並部署，開關設為「影子」。觀察 `check` 的紀錄，確認試點類型判斷正確。
 2. Cairnwork `accept`，Gateway 開關改為「轉送」。
 3. **線上見證**：一筆真實的小 bug 任務經過 Gateway 進入 Cairnwork，結果是 COMPLETED 而且 Core VERIFIED，同時 Gateway 的 status 查得到。
