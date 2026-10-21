@@ -33,20 +33,20 @@ Run the sandbox tests for real on macOS: `CAIRNWORK_REQUIRE_SANDBOX=1 uv run pyt
 
 ## Merging
 
-Same as the other Nexus repos: independent review (a Claude-family reviewer other than the author; high-risk paths add a Codex or Gemini record), review record posted on the PR with head SHA and verdict, required checks green, then the author merges with `gh pr merge N --squash --match-head-commit <sha>`. PR bodies carry the NEXUS_ISSUE_INTENT_V1 block when they close an Issue.
+Same as the other Nexus repos: independent review (either a record from a Claude-family agent that is not the author, named in the record, or a submitted GitHub APPROVED review by a human maintainer; high-risk paths additionally need a cross-model Codex or Gemini record), review record posted on the PR with head SHA and verdict, required checks green, then the author merges with `gh pr merge N --squash --match-head-commit <sha>`. PR bodies carry the NEXUS_ISSUE_INTENT_V1 block when they close an Issue.
 
 ### PR body and review record
 
 - Every PR body carries one `Cairnwork:` line (`Cairnwork: 受影響`, `不受影響` or `尚無對應`, optionally with a short reason) and, when it closes an Issue, the `NEXUS_ISSUE_INTENT_V1` block. `Closes #N` in the body, the commit message and the intent block must agree; a custom squash message cannot fix a mismatch, so fix the commit message.
-- The independent record must come from a Claude-family reviewer named in the record (or be a submitted GitHub APPROVED review) and be a different agent from the author. Post it as a PR comment whose section header names the reviewer family, with a verdict line naming the full head SHA:
+- The independent review is either (a) a record from a Claude-family agent that is not the author, named in the record, or (b) a submitted GitHub APPROVED review by a human maintainer. A record is a PR comment whose section header names the reviewer family, with a verdict line naming the full head SHA:
   ```
   ## Independent review (Claude Opus)
   Verdict: ACCEPT@<full 40-character head sha>
   ```
-- High-risk paths additionally need a cross-model record (Codex or Gemini, same format with that family in the header; at most three rounds). High risk means verification or gate logic, `.github/workflows/`, `scripts/ops/`, `scripts/ci/`, `pyproject.toml`, `uv.lock`, `ruff.toml`, `pytest.ini`, `pyrightconfig.json` and this file. Headless reviewers cannot use tools, so put the full diff in the prompt.
+- High-risk paths additionally need a cross-model (Codex or Gemini) record (same format with that family in the header; at most three rounds). High risk means verification or gate logic, `.github/workflows/`, `scripts/ops/`, `scripts/ci/`, `pyproject.toml`, `uv.lock`, `ruff.toml`, `pytest.ini`, `pyrightconfig.json` and this file. Headless reviewers cannot use tools, so put the full diff in the prompt.
 - A record is bound to one head SHA. Any commit that changes the PR's content needs a fresh review of the new head. Only a merge of `main` with zero diff on the PR's own paths may be carried forward, and the new record must say so: "delta since review: merge of main only, zero diff on PR paths". Re-posting an old record or pushing an empty commit does not satisfy review.
 - After posting a record, wait a minute or two: `Review record present (advisory)` re-evaluates on PR comments and usually turns green by itself.
-- To close an Issue, put the Issue marker and intent block in the PR body (use `KEEP_OPEN` instead of `CLOSE` to leave it open):
+- To close an Issue, put the Issue marker and intent block in the PR body:
   ```
   Closes #N
   <!-- NEXUS_CORE_ISSUE: N -->
@@ -54,6 +54,7 @@ Same as the other Nexus repos: independent review (a Claude-family reviewer othe
   [{"issue": N, "on_merge": "CLOSE"}]
   NEXUS_ISSUE_INTENT_V1 -->
   ```
+  To leave the Issue open, write `Refs #N` instead of `Closes #N` (in the body and commit messages) and use `"on_merge": "KEEP_OPEN"`.
 
 ### Required checks and merging
 
