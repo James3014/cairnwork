@@ -125,3 +125,37 @@ def test_pyproject_pyright_table_change_fails_closed(tmp_path: Path) -> None:
     assert _run(base, _report(base, []), head, _report(head, [])) == 2
     (head / "pyproject.toml").write_text("[tool.ruff]\nline-length = 1\n", encoding="utf-8")
     assert _run(base, _report(base, []), head, _report(head, [])) == 0
+
+
+def test_extends_in_either_config_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    for side in (base, head):
+        for other in (base, head):
+            (other / "pyrightconfig.json").unlink(missing_ok=True)
+            (other / "pyproject.toml").unlink(missing_ok=True)
+        (side / "pyrightconfig.json").write_text('{"extends": "./x.json"}', encoding="utf-8")
+        assert _run(base, _report(base, []), head, _report(head, [])) == 2
+        (side / "pyrightconfig.json").unlink()
+        (side / "pyproject.toml").write_text('[tool.pyright]\nextends = "x.json"\n')
+        assert _run(base, _report(base, []), head, _report(head, [])) == 2
+
+
+def test_identical_extends_on_both_sides_still_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    for root in (base, head):
+        (root / "pyrightconfig.json").write_text('{"extends": "./x.json"}', encoding="utf-8")
+    assert _run(base, _report(base, []), head, _report(head, [])) == 2
+    for root in (base, head):
+        (root / "pyrightconfig.json").unlink()
+        (root / "pyproject.toml").write_text('[tool.pyright]\nextends = "x.json"\n')
+    assert _run(base, _report(base, []), head, _report(head, [])) == 2
+
+
+def test_missing_generaldiagnostics_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    bad = tmp_path / "nodiag.json"
+    bad.write_text(json.dumps({"summary": {"filesAnalyzed": 3}}), encoding="utf-8")
+    assert _run(base, bad, head, _report(head, [])) == 2
