@@ -50,14 +50,18 @@ def _init(args) -> int:
     if args.verifier_python is not None and not os.path.isabs(args.verifier_python):
         print("error: --verifier-python must be an absolute path", file=sys.stderr)
         return 2
-    if (state / "config.json").exists():
-        # Never overwrite an existing config.json — it may hold a mirror / Core setup.
-        print(f"error: {state} is already configured; use a new --dir", file=sys.stderr)
-        return 2
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(state, 0o700)  # tighten an existing dir too; Intake.prepare() requires 0700
     config = {"verifier_account": args.verifier_account, "verifier_python": args.verifier_python}
-    (state / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    try:
+        # O_EXCL: create config.json atomically, so a pre-existing one (a mirror / Core setup) is
+        # never overwritten even if two inits race on the same dir.
+        fd = os.open(state / "config.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        print(f"error: {state} is already configured; use a new --dir", file=sys.stderr)
+        return 2
+    with os.fdopen(fd, "w") as handle:
+        handle.write(json.dumps(config, indent=2) + "\n")
     (state / "ACCEPTING").touch(mode=0o600)
     print(f"state ready: {state}")
     print(f"  config.json: {json.dumps(config)}")
