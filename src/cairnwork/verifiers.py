@@ -200,9 +200,9 @@ def _run_all(
         work = Path(run_root) / f"{clone_id}.work"
         work.parent.mkdir(parents=True, exist_ok=True)
         work.mkdir(mode=0o700)
-        if account is not None:
-            os.chmod(work, 0o3770)
         try:
+            if account is not None:
+                os.chmod(work, 0o3770)
             checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
             if account is not None:
                 account.grant_read(checkout)  # whatever the caller's umask was
@@ -281,9 +281,10 @@ def _run_one(
     else:
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
-    mutated = tuple(tree_differences(repo, candidate_commit, checkout))
-    if not _same_directory(checkout, before):  # e.g. renamed away, a symlink put in place
-        mutated = ("checkout replaced", *mutated)
+    if _same_directory(checkout, before):  # not renamed away, no symlink put in place
+        mutated = tuple(tree_differences(repo, candidate_commit, checkout))
+    else:
+        mutated = ("checkout replaced",)
     verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     passed = (

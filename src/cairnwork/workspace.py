@@ -271,10 +271,14 @@ def _parents(repo: Path, commit: str) -> list[str]:
 
 
 def _make_tree_writable(path: Path) -> None:
-    """A worker may chmod directories away; give them back before removal (no symlinks)."""
-    path.chmod(stat.S_IRWXU)
-    for current, dirnames, _ in os.walk(path, followlinks=False):
-        for name in dirnames:
-            child = Path(current) / name
-            if not child.is_symlink():
-                child.chmod(stat.S_IRWXU)
+    """A worker may chmod directories away; give them back before removal. Never follows
+    a symlink, even one swapped in while this runs: the top is changed with lchmod and
+    opened O_NOFOLLOW, and everything below is reached through directory descriptors."""
+    os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
+    top = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for _, dirnames, _, dir_fd in os.fwalk(".", dir_fd=top):
+            for name in dirnames:
+                os.chmod(name, stat.S_IRWXU, dir_fd=dir_fd, follow_symlinks=False)
+    finally:
+        os.close(top)
