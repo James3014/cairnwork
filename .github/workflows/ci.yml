@@ -78,14 +78,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap
           bwrap --version
-      - name: Observe the probe under the default AppArmor userns restriction
+      - name: The default AppArmor userns restriction must make the probe fail closed
         run: |
-          uv run python -c "from cairnwork_sandbox import bwrap; print('restricted available():', bwrap.available())"
+          uv run python -c "from cairnwork_sandbox import bwrap; assert bwrap.available() is False, 'restricted host must not be available'"
       - name: Lift the restriction (end users load an AppArmor profile instead)
         run: |
+          # || true: an older kernel may lack this key. If the lift silently fails the next
+          # step's assert that available() is True reddens with a clear message instead.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - name: Observe the probe after lifting the restriction
+      - name: The probe must pass once the restriction is lifted
         run: |
-          uv run python -c "from cairnwork_sandbox import bwrap; print('lifted available():', bwrap.available())"
+          uv run python -c "from cairnwork_sandbox import bwrap; assert bwrap.available() is True, 'lifted host must be available'"
       - name: Gate — bwrap must be able to nest namespaces (unguarded)
         run: bwrap --unshare-pid --unshare-user --cap-drop ALL --ro-bind / / --proc /proc true
+      - name: Sandbox witnesses on real bwrap
+        run: CAIRNWORK_REQUIRE_SANDBOX=1 uv run pytest -q tests/test_sandbox.py

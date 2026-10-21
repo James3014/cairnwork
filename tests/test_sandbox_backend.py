@@ -71,7 +71,7 @@ def test_verifier_account_argv_is_unchanged(tmp_path, monkeypatch):
 
 
 def test_no_backend_fails_closed(monkeypatch):
-    monkeypatch.setattr(cairnwork_sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(cairnwork_sandbox.sys, "platform", "win32")
     assert cairnwork_sandbox.platform_backend() is None
     assert cairnwork_sandbox.select() is None
     import cairnwork.verifier_account as module
