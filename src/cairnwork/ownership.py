@@ -28,7 +28,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-OWNERS = frozenset({"cairnwork", "nexus-new"})
+OWNER = "cairnwork"  # the one identity this system binds, runs and cancels as
+OWNERS = frozenset({OWNER, "nexus-new"})
 INACTIVE_STATUSES = frozenset({"SUPERSEDED", "CANCELLED"})
 TRANSITIONS: dict[str, frozenset[str]] = {
     "BOUND": frozenset({"DISPATCHED", "FAILED", "CANCELLED", "SUPERSEDED"}),

@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 from conftest import commit_change, git
 
+from cairnwork.ownership import OwnershipLedger
+
 pytestmark = pytest.mark.sandbox
 
 FIX = "def add(a, b):\n    return a + b\n"
@@ -70,6 +72,14 @@ def route(state, *args, stdin=None, cwd=None):
     return done.returncode, json.loads(done.stdout)
 
 
+def test_route_cancel_refuses_another_owners_task(state):
+    ledger = OwnershipLedger(state / "ownership.sqlite")
+    task = ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    code, refused = route(state, "cancel", "--task-id", task)
+    assert code == 2 and refused["error"] == "OWNER_MISMATCH"
+    assert ledger.get(task_id=task).status == "BOUND"
+
+
 def request(project, key="gw-1"):
     return {
         "idempotency_key": key,
@@ -118,10 +128,8 @@ def test_submitted_task_is_fixed_and_core_verified(state, project):
     other = {**request(project), "title": "something else"}
     code, clash = route(state, "submit", stdin=other)
     assert code == 2 and clash["error"] == "KeyReusedWithDifferentRequest"
-    code, refused = route(state, "cancel", "--task-id", out["task_id"], "--owner", "cairnwork")
+    code, refused = route(state, "cancel", "--task-id", out["task_id"])
     assert code == 2 and refused["error"] == "NOT_CANCELLABLE"
-    code, refused = route(state, "cancel", "--task-id", out["task_id"], "--owner", "nexus-new")
-    assert code == 2 and refused["error"] == "OWNER_MISMATCH"
 
 
 def test_a_wrong_fix_has_a_candidate_but_is_not_core_verified(state, project):

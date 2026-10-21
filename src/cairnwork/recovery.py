@@ -25,7 +25,7 @@ from cairnwork import runlock
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import OwnershipLedger, OwnershipRecord
+from cairnwork.ownership import OWNER, OwnershipLedger, OwnershipRecord
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.workspace import ATTEMPT_ID, WorkspaceError, remove_attempt_clone
 
@@ -55,6 +55,11 @@ def recover(
             with verifier_account.exclusive():
                 verifier_account.require_idle()  # a dead run's verifier ran as that account
         for record in ledger.in_flight():
+            if record.owner != OWNER:  # not ours: report it, never settle it
+                decisions.append(
+                    Decision(record.task_id, "", record.status, record.status, "FOREIGN_OWNER")
+                )
+                continue
             try:
                 decisions.append(_settle(record, ledger, notary, journal, run_root))
             except Exception as exc:  # noqa: BLE001 - one bad record must not stop the others

@@ -122,6 +122,16 @@ def test_task_bound_without_a_journal_entry_ends_failed(project, tmp_path):
     ]
 
 
+def test_recovery_leaves_another_owners_task_untouched(tmp_path):
+    ledger, _, _ = stores(tmp_path)
+    task = ledger.bind("k8", {"x": 1}, "nexus-new", "card-8").record.task_id
+    decisions, ledger = settle(tmp_path)
+    assert [(d.task_id, d.new_status, d.reason) for d in decisions] == [
+        (task, "BOUND", "FOREIGN_OWNER")
+    ]
+    assert ledger.get(task_id=task).status == "BOUND"
+
+
 def test_recovery_refuses_while_a_run_holds_the_lock(project, tmp_path):
     proc = subprocess.Popen(
         [sys.executable, str(DRIVER), str(project), str(tmp_path), GOOD, "orphan"],

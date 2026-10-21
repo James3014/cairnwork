@@ -66,9 +66,9 @@ def test_the_runner_inherits_the_run_lock_so_recovery_waits(intake, repo):
 
 def test_a_task_not_started_can_be_cancelled_and_is_then_never_run(intake, repo):
     out = intake.submit(payload(repo))
-    assert intake.cancel(out["task_id"], "cairnwork")["status"] == "CANCELLED"
+    assert intake.cancel(out["task_id"])["status"] == "CANCELLED"
     with pytest.raises(IntakeRefused, match="NOT_CANCELLABLE"):
-        intake.cancel(out["task_id"], "cairnwork")
+        intake.cancel(out["task_id"])
     result = run_bound_task(
         intake.load_request(out["task_id"]),
         out["task_id"],
@@ -112,20 +112,18 @@ def test_bad_config_is_refused(intake):
         intake.config()
 
 
-def test_cancel_refuses_another_owner_and_an_unknown_owner_and_leaves_the_task_bound(intake):
+def test_cancel_refuses_a_task_another_owner_holds_and_leaves_it_bound(intake):
     task = intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8).record.task_id
-    for owner in ("cairnwork", "nobody", ""):
-        with pytest.raises(IntakeRefused, match="OWNER_MISMATCH"):
-            intake.cancel(task, owner)
-        assert intake.status(task_id=task)["status"] == "BOUND"
-    assert intake.cancel(task, "nexus-new")["status"] == "CANCELLED"
+    with pytest.raises(IntakeRefused, match="OWNER_MISMATCH"):
+        intake.cancel(task)
+    assert intake.status(task_id=task)["status"] == "BOUND"
 
 
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first
     with pytest.raises(IntakeRefused, match="NOT_CANCELLABLE"):
-        intake.cancel(out["task_id"], "cairnwork")
+        intake.cancel(out["task_id"])
     assert intake.status(task_id=out["task_id"])["status"] == "DISPATCHED"
 
 
