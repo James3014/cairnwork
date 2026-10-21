@@ -7,7 +7,7 @@ Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first.
 - Get scope from the integration owner before starting; at most two agent sessions develop Cairnwork at the same time. Find the owner in `README.md` or a CODEOWNERS file; if nothing names one, open an Issue and mention @James3014 (the maintainer) to get scope before starting.
 - One worktree per session; the main clone at `~/workspace/cairnwork` is read-only.
 - Do not copy Nexus-new code wholesale. Every capability enters under one of three classes (README): safeguard, experimental (`experimental/`, default off, owner + expiry), or formal (beat the bare core in Cairnwork's own A/B).
-- Experimental capabilities live in `experimental/<name>/` with `__init__.py`, the module, `OWNER` and `EXPIRES` (ISO date); default off, 14-day expiry, never imported by core. Not-yet-wired code belongs there, not in `src/cairnwork`: `experimental/` still obeys the file and function limits but does not count toward the 5,000-line core cap.
+- Experimental capabilities live in `experimental/<name>/` with `__init__.py`, the module, `OWNER` and `EXPIRES` (ISO date); default off, 14-day expiry, never imported by core. Not-yet-wired code belongs there, not in `src/cairnwork`: `experimental/` still obeys the file and function limits but does not count toward the 5,000-line core budget.
 - Never put the names or task ids of private evaluation task banks in public Issues, PRs or comments; refer to them only by Issue number.
 - No experimental capability is moved in until the bare core passes the four drills: normal, failure, restart, rollback.
 - Never modify an evaluation's measurement environment (its pinned task set, harness, models or environment) without the maintainer's explicit approval, whether or not a run is in progress.
@@ -17,7 +17,8 @@ Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first.
 - A failure in a safeguard, in verification or in a Core call must never produce a success state or an unauthorised side effect. Allowed degradations are listed in the contract, not improvised in `except` blocks.
 - Every task has exactly one owning system, bound before dispatch by a durable, atomic record (idempotency key, request digest, owner, task id). Resend, query, cancel and recovery route by that record; unknown ownership stops dispatch.
 - Only a nexus-core VERIFIED verdict marks a task complete.
-- Limits are enforced in CI: file ≤400 lines, function ≤80 lines, `src/cairnwork` ≤5,000 lines, no import cycles, core never imports `experimental`.
+- Limits enforced in CI (blocking): file ≤400 lines, function ≤80 lines, per-package caps (`cairnwork_sandbox` ≤1,200, `cairnwork_verify` ≤600), no import cycles, core never imports `experimental`.
+- `src/cairnwork` 5,000 lines is a warning budget, not a hard limit: above it CI prints WARNING (not a failure) and the PR must briefly state the reason, alternatives considered (existing implementation, contract or adapter), responsibility (no second authority or duplicated state), cost, and verification. Placement follows responsibility: never create a new `cairnwork_*` package to avoid the counter; a new package needs an explainable boundary, one-way dependencies and an independently verifiable interface. `scripts/check_size.py` prints the per-package table.
 
 ## Verification
 
@@ -64,9 +65,9 @@ Same as the other Nexus repos: independent review (either a record from a Claude
 
 ### Common failure modes
 
-- Core over 5,000 lines after another PR merged first: merge `origin/main`, re-run the checks, or move not-wired code to `experimental/`.
+- Core over the 5,000-line budget: this is a warning, not a failure. State reason, alternatives, responsibility, cost and verification in the PR; move not-wired code to `experimental/`; do not refactor or split packages just to get under the number.
 - Sandbox tests silently skipped locally: set `CAIRNWORK_REQUIRE_SANDBOX=1`.
 - macOS temp directories under `/var/folders/...` are symlinks into `/private`: call `.resolve()` on run roots, or the sandbox sees a different real path and denies access.
 - A stale `.venv` can fail with an `xcode-select`/`xcrun` error: run `uv sync --locked`, or work from a fresh worktree.
 
-Merge on current main, not a stale base. A PR's checks run against main as it was when they last ran, but some limits are additive across PRs: the core size cap (`src/cairnwork` ≤ 5000) and any other whole-repo total. Two PRs that each pass alone can break main together — this happened when #29 and #30 each measured under 5000 but their sum was 5048, turning main red. So before you merge, if main has advanced since your checks last ran, merge `origin/main` into the branch (same rule as "whoever merges second rebases" in the other repos) and let CI re-run; the `--match-head-commit` SHA is that re-run head. `ci.yml` also runs `check_size` on every push to `main`, so a breach that slips through still turns main red at once rather than silently — but prevent it by re-running on current main first, especially when the core is near the limit.
+Merge on current main, not a stale base. A PR's checks run against main as it was when they last ran, but some limits are additive across PRs: the per-package caps and any other whole-repo total (the core 5,000-line budget now only warns, but it was a hard limit when #29 and #30 each measured under 5000 but summed to 5048 and turned main red). So before you merge, if main has advanced since your checks last ran, merge `origin/main` into the branch (same rule as "whoever merges second rebases" in the other repos) and let CI re-run; the `--match-head-commit` SHA is that re-run head. `ci.yml` also runs `check_size` on every push to `main`, so a blocking breach that slips through still turns main red at once rather than silently — prevent it by re-running on current main first, especially when a package is near its cap.
