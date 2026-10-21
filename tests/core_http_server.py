@@ -16,6 +16,8 @@ TOKEN = "test-core-token"
 
 
 class _Handler(BaseHTTPRequestHandler):
+    tamper = None  # optional hook: response dict -> response dict, set per server
+
     def do_POST(self):  # noqa: N802 - http.server API
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             return self._reply(401, {"error": {"code": "UNAUTHORIZED"}})
@@ -23,6 +25,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(404, {"error": {"code": "NOT_FOUND"}})
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         status, response = verify_generic_changeset(json.loads(body))
+        if self.tamper is not None:
+            response = self.tamper(response)
         return self._reply(status, response)
 
     def _reply(self, status, payload):
@@ -38,8 +42,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def core_http_server(tmp_path: Path):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+def core_http_server(tmp_path: Path, tamper=None):
+    handler = type("Handler", (_Handler,), {"tamper": staticmethod(tamper) if tamper else None})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     token_file = tmp_path / "core.token"

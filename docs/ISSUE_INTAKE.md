@@ -61,3 +61,11 @@
   4. 內文、commit 訊息或留言引用原 Issue／PR，而且說是要修正它 → 算，即使改的是別處。
   5. 其他（包括只是提到原 PR、沒說要修正它）→ 不算。
 - **記錄**：每次交付一列，放在該 state 目錄的交付紀錄裡（欄位：repo、Issue、原 PR、合併時間、返工 PR 編號或空白、判定日期）。合併滿 7 天後補填一次，不回頭重算。交付紀錄的格式由 Cairnwork 整合負責人定義。
+
+## Upgrading Core
+
+The notary compares every stored verdict with the Core identity it is configured to
+expect (`core_identity` in `config.json`, else the Core installed beside Cairnwork), at
+read time. After a Core upgrade, rows recorded under the old Core read as not verified
+(`CORE_IDENTITY_MISMATCH`). Drain in-flight tasks before upgrading, and update the pin
+together with the Core.
