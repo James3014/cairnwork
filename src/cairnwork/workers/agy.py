@@ -65,6 +65,14 @@ Rules:
 - Do not create, delete or rename any other file. Do not run commands.
 - Make the smallest change that fixes the task; keep the existing style.
 - Do not modify tests.
+- Work alone and edit the allowed files yourself in this turn: do not start subagents,
+  researchers or background tasks (in this mode they never report back).
+{hidden_tests}"""
+
+# Only true for a task with deferred tests (test_commit): otherwise the judging tests are
+# the repository's own, which the worker may and should read.
+HIDDEN_TESTS = """- The tests that will judge your fix are not in this repository; do not look for
+  them. Read the source you need directly.
 """
 
 
@@ -86,6 +94,7 @@ class AgyWorker:
             title=task.title,
             instructions=task.instructions,
             allowed=", ".join(sorted(task.allowed_files)),
+            hidden_tests=HIDDEN_TESTS if getattr(task, "test_commit", "") else "",
         )
         argv = [
             binary,

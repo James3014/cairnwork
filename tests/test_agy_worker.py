@@ -71,3 +71,26 @@ def test_an_unmarked_process_holding_the_output_fails_the_run(tmp_path):
     with pytest.raises(AgyWorkerError, match="holds its output"):
         AgyWorker(agy=agy).run(workdir, TASK)
     assert time.monotonic() - started < 30
+
+
+def _prompt(tmp_path, task):
+    seen = tmp_path / "argv.json"
+    agy = fake_agy(tmp_path, f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))")
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    AgyWorker(agy=agy).run(workdir, task)
+    argv = json.loads(seen.read_text())
+    return argv[argv.index("-p") + 1]
+
+
+def test_the_prompt_asks_agy_to_work_alone(tmp_path):
+    """nexus-learning#114 pilot: agy started a researcher subagent and waited for it until
+    the print timeout, twice, changing nothing; told to work alone it edited the file."""
+    assert "do not start subagents" in _prompt(tmp_path, TASK)
+
+
+@pytest.mark.parametrize(("test_commit", "said"), [("a" * 40, True), ("", False)])
+def test_hidden_tests_are_mentioned_only_when_the_task_has_them(tmp_path, test_commit, said):
+    """Without a test_commit the judging tests are the repository's own: reading them helps."""
+    task = SimpleNamespace(**vars(TASK), test_commit=test_commit)
+    assert ("not in this repository; do not look for" in _prompt(tmp_path, task)) is said
