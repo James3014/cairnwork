@@ -222,3 +222,28 @@ def test_a_strict_caller_umask_does_not_break_the_account_run(project):
     finally:
         os.umask(old)
     assert result.observation.passed, result.log_path.read_text()
+
+
+def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
+    """The account does not own the checkout; git in it must still work (Nexus-new #2760
+    pilot: 'detected dubious ownership'), and only that checkout is trusted.
+
+    Checked through the test outcome and the untouched checkout, not the whole
+    observation: with a full Xcode (macOS CI) /usr/bin/git goes through xcodebuild, and
+    launchd starts the account's /usr/sbin/distnoted, which the run counts as a process
+    left behind (cairnwork#37). Hosts with only the Command Line Tools do not start it.
+    """
+    code = (
+        "import subprocess\n"
+        "def test_git():\n"
+        "    git = '/usr/bin/git'\n"
+        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, text=True)\n"
+        "    assert done.returncode == 0, done.stderr\n"
+        "    out = subprocess.run([git, 'config', '--get-all', 'safe.directory'],\n"
+        "                         capture_output=True, text=True).stdout.split()\n"
+        "    assert out and '*' not in out\n"
+    )
+    result = verify(project, {"tests/test_git.py": code}, "tests/test_git.py")
+    log = result.log_path.read_text()
+    assert result.outcomes == {"tests/test_git.py::test_git": "passed"}, log
+    assert result.returncode == 0 and not result.timed_out and result.mutated == (), log
