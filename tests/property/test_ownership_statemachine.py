@@ -12,7 +12,9 @@ Invariants asserted after every step:
   I3  status only ever moves along TRANSITIONS;
   I4  an identical resend returns the same record and never re-runs (FAILED stays FAILED);
   I5  get/route never guesses — unknown ids raise OwnershipUnknown;
-  I6  in_flight() is exactly the BOUND/DISPATCHED records.
+  I6  in_flight() is exactly the BOUND/DISPATCHED records;
+  I7  an identical request under a new key and another card is refused while one is active
+      (REPLAY_FORBIDDEN if COMPLETED/FAILED, else RECONCILIATION_REQUIRED).
 
 Run: pytest tests/property/ -q   (or with mutmut to check these actually bite).
 """
@@ -32,6 +34,8 @@ from cairnwork.ownership import (
     OwnerMismatch,
     OwnershipLedger,
     OwnershipUnknown,
+    ReconciliationRequired,
+    ReplayForbidden,
     request_digest,
 )
 
@@ -111,7 +115,23 @@ class OwnershipModel(RuleBasedStateMachine):
             assert result.record.task_id == existing["task_id"], "I4: resend returns same task"
             assert result.record.status == existing["status"], "I4: resend never re-runs"
             return
-        # new key
+        # new key: an active task with the same request on another card is a replay
+        twins = [
+            r["status"]
+            for r in self.by_key.values()
+            if r["digest"] == digest and r["card"] != card and _active(r["status"])
+        ]
+        if twins:
+            expected = (
+                ReplayForbidden
+                if any(t in {"COMPLETED", "FAILED"} for t in twins)
+                else ReconciliationRequired
+            )
+            try:
+                self.ledger.bind(key, req, owner, card)
+            except expected:
+                return
+            raise AssertionError(f"I7: replay of an active request must raise {expected.__name__}")
         active_key = self._active_card_owner(card)
         if active_key is not None:
             try:

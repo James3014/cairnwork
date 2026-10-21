@@ -48,7 +48,7 @@ from cairnwork.pipeline import (
     judge_candidate,
     tests_with_teeth,
 )
-from cairnwork.recovery import remove_leftovers
+from cairnwork.recovery import _remove_leftovers
 from cairnwork.workspace import (
     ATTEMPT_ID,
     Attempt,
@@ -283,7 +283,7 @@ def cleanup(intake: Intake) -> dict[str, Any]:
             if not _same_file(fd, marker):
                 continue  # replaced by a run that started meanwhile
             sweep_marked(ATTEMPT_ENV, marker.name)
-            remove_leftovers(intake.run_root, marker.name)
+            _remove_leftovers(intake.run_root, marker.name)
             shutil.rmtree(intake.state / "verify-scratch" / marker.name, ignore_errors=True)
             marker.unlink(missing_ok=True)
             cleaned.append(marker.name)

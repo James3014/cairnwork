@@ -38,7 +38,7 @@ from cairnwork.deferred_tests import (
     test_paths,
 )
 from cairnwork.gitcmd import OID
-from cairnwork.journal import Journal
+from cairnwork.journal import AlreadyDispatched, Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
 from cairnwork.protected_paths import path_refusal
@@ -200,7 +200,11 @@ def _execute(task, specs, record, ledger, notary, journal, worker, run_root, ver
     """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
     attempt_id = f"a{secrets.token_hex(8)}"
     steps = _Steps(journal, record.task_id, attempt_id)
-    steps.reach("DISPATCHED", str(Path(run_root).resolve()))
+    try:
+        steps.reach("DISPATCHED", str(Path(run_root).resolve()))
+    except AlreadyDispatched:  # another runner took this task first
+        status = ledger.get(task_id=record.task_id).status
+        return TaskResult(record.task_id, "", status, reason="NOT_BOUND")
     ledger.set_status(record.task_id, "DISPATCHED")
     result = TaskResult(record.task_id, attempt_id, "FAILED")
     try:

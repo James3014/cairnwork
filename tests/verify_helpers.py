@@ -58,7 +58,7 @@ def verify(state, project, base, cand, *extra, allowed=("src/calc.py",), tests=(
     for command in tests:
         args += ["--verifier", command]
     done = subprocess.run(
-        [sys.executable, "-I", "-m", "cairnwork_verify.cli", "--state", str(state), "run", *args]
+        [sys.executable, "-I", "-m", "cairnwork.verify_cli", "--state", str(state), "run", *args]
         + list(extra),
         capture_output=True, text=True, timeout=300, check=False,
     )  # fmt: skip
@@ -71,7 +71,7 @@ def base_of(project):
 
 def cli(state, *args):
     done = subprocess.run(
-        [sys.executable, "-I", "-m", "cairnwork_verify.cli", "--state", str(state), *args],
+        [sys.executable, "-I", "-m", "cairnwork.verify_cli", "--state", str(state), *args],
         capture_output=True, text=True, timeout=120, check=False,
     )  # fmt: skip
     return done.returncode, json.loads(done.stdout)
@@ -100,7 +100,7 @@ def has_object(repo, sha):
 
 def in_process(project, state, base, cand):
     from cairnwork.intake import Intake
-    from cairnwork_verify.verify import verify_candidate
+    from cairnwork.verify_candidate import verify_candidate
 
     return verify_candidate(
         Intake(state),

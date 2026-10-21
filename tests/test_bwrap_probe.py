@@ -10,6 +10,10 @@ import pytest
 from cairnwork_sandbox import bwrap, platform_backend
 from cairnwork_sandbox.backend import SandboxError
 
+# Captured before the autouse fixture neutralises the module attribute, so a test can check the
+# real masked-socket list.
+_REAL_DANGEROUS_SOCKETS = tuple(bwrap._DANGEROUS_SOCKETS)
+
 
 @pytest.fixture(autouse=True)
 def _host_independent_ipc_masks(monkeypatch):
@@ -21,9 +25,10 @@ def _host_independent_ipc_masks(monkeypatch):
     import os
 
     real_isdir = os.path.isdir
+    masked_dirs = {"/run/user", bwrap._X11_SOCKET_DIR, "/run/libvirt", "/var/run/libvirt"}
     monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", ())
     monkeypatch.setattr(
-        bwrap.os.path, "isdir", lambda p: False if p == "/run/user" else real_isdir(p)
+        bwrap.os.path, "isdir", lambda p: False if p in masked_dirs else real_isdir(p)
     )
 
 
@@ -135,21 +140,61 @@ def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
 def test_user_runtime_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
     # The whole /run/user tree (systemd user bus — a systemd-run --user escape — and session
     # agent sockets) is emptied with a tmpfs, for every uid at once. Masked only when it exists.
-    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: "/run/user")
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == "/run/user")
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
     i = lines.index("/run/user")
     assert lines[i - 1] == "--tmpfs"
 
 
-def test_user_runtime_dir_masks_the_whole_tree_not_one_uid(monkeypatch):
-    # Regression (round-3 review): the tree, not /run/user/<launcher-uid>, so a P4 account uid's
-    # /run/user/<uid>/bus is covered too. The helper must not depend on os.getuid().
+def test_socket_dirs_mask_the_whole_tree_not_one_uid(monkeypatch):
+    # Regression (round-3 review): the tree /run/user, not /run/user/<launcher-uid>, so a P4
+    # account uid's /run/user/<uid>/bus is covered too. Must not depend on os.getuid().
     monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == "/run/user")
-    assert bwrap._user_runtime_dir() == "/run/user"
+    assert bwrap._socket_dirs_to_empty() == ["/run/user"]
 
 
-def test_user_runtime_dir_absent_adds_no_tmpfs(tmp_path, monkeypatch):
-    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: None)
+def test_policy_always_dies_with_parent():
+    # Escaped-process cleanup relies on --die-with-parent together with --new-session: if the
+    # verifier dies, bwrap and the namespace go with it. It must always be in the policy.
+    lines = bwrap.BACKEND.policy((), (), home=Path("/home/x")).text.splitlines()
+    assert "--die-with-parent" in lines
+
+
+def test_dangerous_sockets_cover_the_root_equivalent_services():
+    # The real list must mask the known root-equivalent daemon socket files (#85). libvirt's
+    # sockets are covered by the /run/libvirt directory tmpfs instead (see the next test).
+    required = {
+        "/run/docker.sock",
+        "/run/dbus/system_bus_socket",
+        "/var/snap/lxd/common/lxd/unix.socket",
+        "/var/lib/incus/unix.socket",
+        "/run/incus/unix.socket",
+    }
+    assert required <= set(_REAL_DANGEROUS_SOCKETS)
+
+
+def test_socket_dirs_cover_runtime_x11_and_libvirt(monkeypatch):
+    # /run/user, /tmp/.X11-unix and /run/libvirt (all its daemon sockets) are emptied as whole
+    # trees. Patch them all present so the pure function returns the full set it would mask.
+    trees = {"/run/user", bwrap._X11_SOCKET_DIR, "/run/libvirt"}
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p in trees)
+    assert set(bwrap._socket_dirs_to_empty()) == trees
+
+
+def test_x11_socket_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
+    # A reachable X server socket (/tmp/.X11-unix/X*) lets a candidate inject input / run commands
+    # outside the sandbox on a desktop; the whole dir is emptied with a tmpfs when it exists.
+    import os
+
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == bwrap._X11_SOCKET_DIR)
+    lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
+    real_x11 = os.path.realpath(bwrap._X11_SOCKET_DIR)  # _safe() resolves /tmp on macOS
+    i = lines.index(real_x11)
+    assert lines[i - 1] == "--tmpfs"
+
+
+def test_socket_dirs_absent_add_no_tmpfs(tmp_path, monkeypatch):
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: False)
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
     assert "--tmpfs" not in lines
 

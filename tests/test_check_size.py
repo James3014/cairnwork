@@ -27,17 +27,6 @@ def test_long_function_is_reported(tmp_path, monkeypatch):
     assert any("too_long" in p for p in problems)
 
 
-def test_verify_package_total_is_capped(tmp_path, monkeypatch):
-    module = _load()
-    pkg = tmp_path / "src" / "cairnwork_verify"
-    pkg.mkdir(parents=True)
-    for index in range(3):
-        (pkg / f"m{index}.py").write_text("x = 1\n" * 250, encoding="utf-8")
-    monkeypatch.setattr(module, "VERIFY", pkg)
-    monkeypatch.setattr(module, "SCANNED", [tmp_path / "src"])
-    assert any("cairnwork_verify total" in p for p in module.check(tmp_path))
-
-
 def _tree(tmp_path, monkeypatch, module, packages):
     """Build a temp src/ tree ({package: [lines per file]}) and point the checker at it."""
     for pkg, sizes in packages.items():
@@ -47,7 +36,6 @@ def _tree(tmp_path, monkeypatch, module, packages):
             (base / f"m{index}.py").write_text("x = 1\n" * size, encoding="utf-8")
     monkeypatch.setattr(module, "CORE", tmp_path / "src" / "cairnwork")
     monkeypatch.setattr(module, "SANDBOX", tmp_path / "src" / "cairnwork_sandbox")
-    monkeypatch.setattr(module, "VERIFY", tmp_path / "src" / "cairnwork_verify")
     monkeypatch.setattr(module, "SCANNED", [tmp_path / "src"])
     monkeypatch.setattr(module, "ROOT", tmp_path)
 
@@ -109,11 +97,10 @@ def test_over_limit_package_blocks_even_with_core_warning(tmp_path, monkeypatch,
         tmp_path,
         monkeypatch,
         module,
-        {"cairnwork": [300] * 17, "cairnwork_sandbox": [300] * 5, "cairnwork_verify": [300] * 3},
+        {"cairnwork": [300] * 17, "cairnwork_sandbox": [300] * 5},
     )
     problems = module.check(tmp_path)
     assert any("cairnwork_sandbox total 1500" in p for p in problems)
-    assert any("cairnwork_verify total 900" in p for p in problems)
     assert module.main(tmp_path) == 1
     assert "WARNING: src/cairnwork total" in capsys.readouterr().out
 

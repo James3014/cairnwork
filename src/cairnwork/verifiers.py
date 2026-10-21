@@ -282,7 +282,7 @@ def _run_one(
             argv, profile_path, checkout, env, timeout, log_path, account, backend
         )
     else:
-        _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
+        _write_new(log_path, b"no sandbox backend available: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
     if _same_directory(checkout, before):  # not renamed away, no symlink put in place
         mutated = tuple(tree_differences(repo, candidate_commit, checkout))
