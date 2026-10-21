@@ -56,6 +56,16 @@ Same as the other Nexus repos: independent review (either a record from a Claude
   ```
   To leave the Issue open, write `Refs #N` instead of `Closes #N` (in the body and commit messages) and use `"on_merge": "KEEP_OPEN"`.
 
+### Review speed and risk tiers
+
+Approved by the maintainer on 2026-10-21. These rules speed review up; they do not relax the record format, head-SHA binding or carry-forward rules above.
+
+- Keep PRs small. Before requesting review run `ruff check`, `ruff format --check`, `lint-imports`, `scripts/check_size.py` and the full test suite. A cheap first-pass model scan of the diff is encouraged to catch obvious problems before the reviews.
+- Review in parallel: send the same head to the independent Claude-family reviewer and, for HIGH risk, the cross-model reviewer at the same time, and merge both results into one fix round. Do not queue them one after the other.
+- Round 1 reviews the whole PR. From round 2, review only the delta since the reviewed head plus whether the previous round's findings are really fixed. Minor findings that are not about safety become follow-up Issues instead of another round. Maximum three rounds; after that, remaining points get a written rebuttal in the PR, not more code. Real defects (correctness or security) are the exception: always fix them or track them in an Issue.
+- HIGH risk (independent Claude review plus a cross-model Codex or Gemini record): anything under `src/cairnwork/` (core); verification, notary and protocol (`src/cairnwork_protocol/`, `src/cairnwork_verify/`); the sandbox (`src/cairnwork_sandbox/`); permissions; dispatch and ownership; protected paths; and every path the review-record check already treats as high-risk: `.github/workflows/`, `scripts/ops/`, `scripts/ci/`, `pyproject.toml`, `uv.lock`, `ruff.toml`, `pytest.ini`, `pyrightconfig.json` and `AGENTS.md`.
+- LOW risk (independent Claude review only): `docs/` (but not `AGENTS.md`), changes only under `tests/`, `experimental/`, demo material, and developer tooling under `scripts/` that is not a gate. When in doubt, treat the PR as HIGH.
+
 ### Required checks and merging
 
 - The ruleset requires `test (3.11)`, `test (3.12)`, `test (3.13)`, `test-macos`, `Review record present (advisory)` and `Bindings preflight (default branch)`. Other jobs (`pyright`, `hypothesis`, CodeQL) are not required but should not be red without a written disposition (pre-existing or accepted) in a PR comment (the review record, or a separate comment when the independent review is a human APPROVED review).
