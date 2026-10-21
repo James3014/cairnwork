@@ -340,3 +340,59 @@ def test_the_parent_is_checked_in_the_callers_repository_before_any_clone(
     git(project, "checkout", "-q", "main")
     out = in_process(project, state, base, second)
     assert out["status"] == "REFUSED" and out["reason"].startswith("NOT_ONE_COMMIT_ON_BASE")
+
+
+@sandbox
+def test_a_test_commit_is_burned_by_the_run_that_uses_it(project, state):
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    verifier = " ".join(CHECK[0][1])
+    bad = candidate(project, base, {"src/calc.py": FIX, "src/other.py": "x = 1\n"})
+    code, out = verify(state, project, base, bad, "--test-commit", test_commit, tests=(verifier,))
+    assert out["reason"].startswith("OUT_OF_SCOPE")  # refused before the tests were fetched
+    good = candidate(project, base, {"src/calc.py": FIX})
+    code, out = verify(state, project, base, good, "--test-commit", test_commit, tests=(verifier,))
+    assert code == 0, out
+    assert test_commit in (state / "verify-burned-tests").read_text().split()
+    other = candidate(project, base, {"src/calc.py": FIX + "# again\n"})
+    code, out = verify(state, project, base, other, "--test-commit", test_commit, tests=(verifier,))
+    assert code == 2 and out["reason"].startswith("TEST_COMMIT_ALREADY_EXPOSED")
+
+
+@sandbox
+def test_the_burn_is_written_before_the_tests_are_fetched_and_survives_a_crash(
+    project, state, monkeypatch
+):
+    import cairnwork_verify.verify as module
+    from cairnwork.intake import Intake
+
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    verifier = tuple(" ".join(CHECK[0][1]).split())
+    cand = candidate(project, base, {"src/calc.py": FIX})
+
+    def crash(*_args):
+        raise RuntimeError("power cut")
+
+    monkeypatch.setattr(module, "tests_with_teeth", crash)
+    with pytest.raises(RuntimeError):
+        module.verify_candidate(
+            Intake(state), repo=project, base=base, candidate=cand,
+            allowed_files=("src/calc.py",), verifiers=(("v", verifier),), test_commit=test_commit,
+        )  # fmt: skip
+    monkeypatch.undo()
+    code, out = verify(
+        state, project, base, cand, "--test-commit", test_commit, tests=(" ".join(verifier),)
+    )
+    assert code == 2 and out["reason"].startswith("TEST_COMMIT_ALREADY_EXPOSED")
+
+
+@sandbox
+def test_a_relative_origin_still_reaches_the_deferred_tests(project, state):
+    import os
+
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    absolute = git(project, "remote", "get-url", "origin")
+    git(project, "remote", "set-url", "origin", os.path.relpath(absolute, project))
+    cand = candidate(project, base, {"src/calc.py": FIX})
+    verifier = " ".join(CHECK[0][1])
+    code, out = verify(state, project, base, cand, "--test-commit", test_commit, tests=(verifier,))
+    assert code == 0, out

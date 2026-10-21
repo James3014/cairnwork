@@ -134,7 +134,7 @@ def _scratch(intake: Intake, source: Path, repo: Path, task: TaskSpec, candidate
                 "remote",
                 "set-url",
                 "origin",
-                run_git(source, "remote", "get-url", "origin").strip(),
+                _absolute(run_git(source, "remote", "get-url", "origin").strip(), source),
             )
         except GitCommandError:
             run_git(path, "remote", "remove", "origin")  # source has none: neither do we
@@ -161,23 +161,52 @@ def _check_parent(repo: Path, base: str, candidate: str) -> None:
         raise CandidateRejected("NOT_ONE_COMMIT_ON_BASE", f"parents of {candidate} are {parents}")
 
 
+def _absolute(url: str, source: Path) -> str:
+    """A relative origin (../upstream.git) means relative to the source repository; the
+    scratch clone lives elsewhere, so give it the absolute path."""
+    if "://" in url or os.path.isabs(url) or ":" in url.split("/")[0]:
+        return url  # a URL, an absolute path, or scp-style host:path
+    return str((source / url).resolve())
+
+
+def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
+    """The deferred tests stay hidden from whoever supplies candidates: once a verify run
+    has fetched them and run candidate code over them (whose logs it returns), they are
+    exposed, as on the worker path. The record is append-only, written and synced before
+    the tests are fetched, so a crash cannot lose it. record=False only checks."""
+    path = intake.state / "verify-burned-tests"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with open(path, encoding="utf-8") as seen:
+            if test_commit in seen.read().split():
+                raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit")
+        if record:
+            os.write(fd, f"{test_commit}\n".encode())
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> None:
     run_root = intake.run_root
     _check_parent(task.repo, task.base_commit, candidate)
     if task.test_commit:
         never_seen(source, task.test_commit)  # the object store the worker path checks
+        _burn(intake, task.test_commit, record=False)
     with _scratch(intake, source, task.repo, task, candidate, result.attempt_id) as scratch:
         task = replace(task, repo=scratch)
-        _judge_in(task, specs, candidate, notary, run_root, result, verifying)
+        _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying)
 
 
-def _judge_in(task, specs, candidate, notary, run_root, result, verifying) -> None:
+def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying) -> None:
     clone = create_attempt_clone(task.repo, candidate, run_root, result.attempt_id)
     try:
         attempt = Attempt(clone.attempt_id, task.base_commit, clone.path, clone.refs_before)
         check_candidate_commit(task.repo, attempt, candidate, task.allowed_files)
         judged, test_files = candidate, ()
         if task.test_commit:
+            _burn(intake, task.test_commit, record=True)  # before the tests are fetched
             test_files = tests_with_teeth(task, specs, run_root, result, verifying)
             judged = lay_tests_over(
                 task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
