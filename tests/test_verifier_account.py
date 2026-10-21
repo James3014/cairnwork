@@ -67,6 +67,7 @@ def test_pytest_runs_as_the_verifier_account(project):
     assert result.observation.passed, result.log_path.read_text()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS KERN_PROCARGS2; Linux uses /proc")
 def test_owner_process_arguments_are_not_readable(project, monkeypatch):
     secret = "CWFAKESECRET" + os.urandom(4).hex()
     owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", secret])
@@ -88,6 +89,43 @@ def test_owner_process_arguments_are_not_readable(project, monkeypatch):
             project,
             {"tests/test_procargs.py": code},
             "tests/test_procargs.py",
+            monkeypatch,
+            ("CW_PID", "CW_SECRET"),
+        )
+    finally:
+        owner.kill()
+        owner.wait()
+    assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc; macOS uses sysctl")
+def test_owner_process_environment_is_not_readable(project, monkeypatch):
+    # The Linux counterpart of the macOS sysctl witness: a secret in another uid's environment
+    # (/proc/<pid>/environ is 0400, owned by that uid) must not be readable by the candidate.
+    # The bwrap pid namespace also hides the owner's pid outright, so the read fails either way.
+    secret = "CWFAKESECRET" + os.urandom(4).hex()
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        env={**os.environ, "CW_OWNER_SECRET": secret},
+    )
+    monkeypatch.setenv("CW_PID", str(owner.pid))
+    monkeypatch.setenv("CW_SECRET", secret)
+    code = (
+        "import os\n"
+        "def test_environ():\n"
+        "    data = b''\n"
+        "    try:\n"
+        "        with open('/proc/' + os.environ['CW_PID'] + '/environ', 'rb') as handle:\n"
+        "            data = handle.read()\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    assert os.environ['CW_SECRET'].encode() not in data\n"
+    )
+    try:
+        result = verify(
+            project,
+            {"tests/test_environ.py": code},
+            "tests/test_environ.py",
             monkeypatch,
             ("CW_PID", "CW_SECRET"),
         )

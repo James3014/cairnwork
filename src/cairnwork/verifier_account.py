@@ -1,16 +1,19 @@
-"""Run verifiers as a dedicated, unprivileged macOS account (Issue #9).
+"""Run verifiers as a dedicated, unprivileged account (Issue #9 on macOS, #84 on Linux).
 
-Inside Seatbelt, a process can still read the arguments of other processes that
-run as the same user (sysctl KERN_PROCARGS2); macOS refuses that across users. So
-verifiers run as ``cairnwork-verifier`` (created by scripts/setup_verifier_user.sh):
+A sandbox alone is not complete read isolation: inside Seatbelt a process can still read
+the arguments of other processes that run as the same user (sysctl KERN_PROCARGS2), and
+under the Linux bwrap backend the whole root is bound read-only, so anything the running
+account can read is readable. Running verifiers as a different, unprivileged account closes
+both: the readable set becomes that account's, which owns nothing. The account is created by
+scripts/setup_verifier_user.sh (macOS) or scripts/setup_verifier_user_linux.sh:
 
-    sudo -n -u cairnwork-verifier -- /usr/bin/sandbox-exec -f <profile>
-         /usr/bin/env -i <scrubbed environment> <python> -P -m pytest ...
+    sudo -n -u cairnwork-verifier -- <sandbox> /usr/bin/env -i <env> <python> -P -m pytest ...
 
-The sudoers rule lets the owner run sandbox-exec, kill and rm as that account.
-sandbox-exec takes any profile, so in effect any process running as the owner can
-run code as the account, unsandboxed: the account protects the owner from the
-verifier, not the other way round. The account has no privileges of its own.
+where ``<sandbox>`` is sandbox-exec on macOS and bwrap on Linux (both from the backend).
+The sudoers rule lets the owner run the sandbox binary, kill and rm as that account. The
+sandbox binary takes any policy, so in effect any process running as the owner can run code
+as the account: the account protects the owner from the verifier, not the other way round.
+The account has no privileges of its own.
 
 Every verifier process belongs to that account, so after each run ``kill -9 -1``
 as the account ends all of them, including anything that started its own
@@ -25,6 +28,7 @@ import fcntl
 import os
 import pwd
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,7 +38,12 @@ from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
 DEFAULT_USER = "cairnwork-verifier"
-DEFAULT_ROOT = Path("/Users/Shared/cairnwork")
+# The shared root lives where the platform keeps shared service data: /Users/Shared on macOS,
+# /var/lib on Linux. scripts/setup_verifier_user.sh (macOS) and setup_verifier_user_linux.sh
+# create it there; the account machinery is otherwise identical on both.
+DEFAULT_ROOT = Path(
+    "/var/lib/cairnwork" if sys.platform.startswith("linux") else "/Users/Shared/cairnwork"
+)
 
 
 class VerifierAccountError(Exception):
@@ -96,8 +105,11 @@ class VerifierAccount:
     def count(self) -> int:
         """How many processes the account is running (-1: cannot tell)."""
         try:
+            # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
+            # procps selects all of a user's processes with -U alone and rejects -x.
+            tty_flag = ["-x"] if sys.platform == "darwin" else []
             done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", "-x", "-U", self.user, "-o", "pid="],
+                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
                 capture_output=True,
                 text=True,
                 timeout=20,
