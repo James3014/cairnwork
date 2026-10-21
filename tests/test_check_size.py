@@ -118,6 +118,14 @@ def test_over_limit_package_blocks_even_with_core_warning(tmp_path, monkeypatch,
     assert "WARNING: src/cairnwork total" in capsys.readouterr().out
 
 
+def test_oversized_file_blocks_even_with_core_warning(tmp_path, monkeypatch, capsys):
+    module = _load()
+    _tree(tmp_path, monkeypatch, module, {"cairnwork": [300] * 17 + [401]})
+    assert any("401 lines > 400" in p for p in module.check(tmp_path))
+    assert module.main(tmp_path) == 1
+    assert "WARNING: src/cairnwork total" in capsys.readouterr().out
+
+
 def test_table_lists_every_package_and_total(tmp_path, monkeypatch, capsys):
     module = _load()
     _tree(

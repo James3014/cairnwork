@@ -27,8 +27,8 @@ def _python_files(base: Path) -> list[Path]:
 
 
 def _top_package(path: Path, root: Path) -> str:
-    parts = path.relative_to(root).parts
-    return parts[1] if parts[0] == "src" and len(parts) > 2 else parts[0]
+    head, *rest = path.relative_to(root).parts
+    return rest[0] if head == "src" and len(rest) > 1 else head
 
 
 def measure(root: Path = ROOT) -> tuple[list[str], list[str], dict[str, int]]:
