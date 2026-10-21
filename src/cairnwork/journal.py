@@ -32,11 +32,17 @@ CREATE TABLE IF NOT EXISTS attempt_journal (
     at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attempt_journal_task ON attempt_journal (task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS attempt_journal_one_dispatch
+    ON attempt_journal (task_id) WHERE phase = 'DISPATCHED';
 CREATE TRIGGER IF NOT EXISTS attempt_journal_no_update BEFORE UPDATE ON attempt_journal
     BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_journal
     BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
 """
+
+
+class AlreadyDispatched(Exception):
+    """A DISPATCHED row already exists for this task: only one attempt may start."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,10 @@ class Journal:
                 " VALUES (?, ?, ?, ?, ?)",
                 (task_id, attempt_id, phase, detail, datetime.now(UTC).isoformat()),
             )
+        except sqlite3.IntegrityError as exc:
+            if phase == "DISPATCHED":
+                raise AlreadyDispatched(task_id) from exc
+            raise
         finally:
             conn.close()
 
