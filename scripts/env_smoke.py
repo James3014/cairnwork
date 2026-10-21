@@ -112,8 +112,12 @@ def _bare_is_green(probe: RepoProbe, commit: str, run_root: Path, timeout: int) 
     except subprocess.TimeoutExpired:
         return None
     finally:
+        # Kill the group by the leader's pid (== pgid under start_new_session), not os.getpgid:
+        # after a normal wait() the leader is already reaped, so getpgid would raise and a child
+        # the test backgrounded would survive. killpg(pid) still reaches the group while a member
+        # lives; suppress only the case where the whole group is already gone.
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         remove_attempt_clone(run_root, clone_id)
 
