@@ -108,7 +108,7 @@ def test_notarize_saying_verified_is_not_enough_without_a_bound_readback(
 
 
 def test_a_cleanup_failure_does_not_overwrite_the_real_reason(project, state, monkeypatch):
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.workspace import WorkspaceError
 
     def broken(*_args):
@@ -158,7 +158,7 @@ def test_a_killed_run_is_cleaned_up(project, state):
     base = base_of(project)
     cand = candidate(project, base, {"src/calc.py": FIX})
     proc = subprocess.Popen(
-        [sys.executable, "-I", "-m", "cairnwork_verify.cli", "--state", str(state), "run",
+        [sys.executable, "-I", "-m", "cairnwork.verify_cli", "--state", str(state), "run",
          "--repo-path", str(project), "--base", base, "--candidate", cand,
          "--allowed-file", "src/calc.py", "--verifier", f"python3 -m pytest -q tests/{name}.py"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -168,7 +168,7 @@ def test_a_killed_run_is_cleaned_up(project, state):
         ps = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
         # the CLI's own argv also names the test file: only count the verifier itself
         return any(
-            name in line and "pytest" in line and "cairnwork_verify" not in line
+            name in line and "pytest" in line and "verify_cli" not in line
             for line in ps.splitlines()
         )
 
@@ -212,7 +212,7 @@ def test_cleanup_stops_a_dead_run_s_orphan_process(state):
 
 
 def test_a_drain_between_the_first_check_and_the_run_lock_is_honoured(project, state, monkeypatch):
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.intake import IntakeRefused
 
     real = module.runlock.held
@@ -234,7 +234,7 @@ def test_a_drain_between_the_first_check_and_the_run_lock_is_honoured(project, s
 def test_a_marker_removed_between_open_and_lock_is_recreated(state, monkeypatch):
     import os
 
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.intake import Intake
 
     intake, calls = Intake(state), []
@@ -252,7 +252,7 @@ def test_a_marker_removed_between_open_and_lock_is_recreated(state, monkeypatch)
 
 
 def test_cleanup_leaves_a_marker_that_was_replaced_while_it_held_the_lock(state, monkeypatch):
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.intake import Intake
 
     markers = state / "verify-runs"
@@ -274,7 +274,7 @@ def test_cleanup_leaves_a_marker_that_was_replaced_while_it_held_the_lock(state,
 def test_cleanup_tolerates_a_marker_that_vanishes_before_it_is_opened(state, monkeypatch):
     import os
 
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.intake import Intake
 
     markers = state / "verify-runs"
@@ -330,7 +330,7 @@ def test_a_candidate_built_on_a_hidden_test_commit_cannot_burn_it(project, state
 def test_the_parent_is_checked_in_the_callers_repository_before_any_clone(
     project, state, monkeypatch
 ):
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
 
     def no_clone(*_args):
         raise AssertionError("a scratch clone was made for a candidate that is not on the base")

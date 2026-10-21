@@ -19,7 +19,7 @@ from typing import Any, NoReturn
 
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.pipeline import TaskRejected
-from cairnwork_verify.verify import cleanup, verify_candidate
+from cairnwork.verify_candidate import cleanup, verify_candidate
 
 
 class _Parser(argparse.ArgumentParser):

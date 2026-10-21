@@ -148,6 +148,3 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
                 remove_attempt_clone(root, name)
             except WorkspaceError:
                 pass  # a leftover directory is disk space, not a wrong status
-
-
-remove_leftovers = _remove_leftovers  # public name for cairnwork_verify

@@ -73,7 +73,7 @@ def test_malformed_input_is_a_usage_error_or_a_refusal(project, state):
     code, out = verify(state, project, base, cand, allowed=("tests/test_calc.py",))
     assert code == 2 and out["error"] == "PROTECTED_VERIFIER_INPUT"
     done = subprocess.run(
-        [sys.executable, "-I", "-m", "cairnwork_verify.cli", "--state", str(state), "run"],
+        [sys.executable, "-I", "-m", "cairnwork.verify_cli", "--state", str(state), "run"],
         capture_output=True, text=True, check=False,
     )  # fmt: skip
     assert done.returncode == 3 and json.loads(done.stdout)["error"] == "USAGE"
