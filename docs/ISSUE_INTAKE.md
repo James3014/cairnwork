@@ -47,3 +47,17 @@
 - 同一時間只會跑一輪（鎖）。收尾時不會重新檢查可信身分（EIA 會），因為 PR 內容完全不用 Issue 的文字。
 - 目標 repo 的測試需要該 repo 自己的依賴和 pytest 設定。依賴：用 `scripts/setup_target_venv.sh` 建 venv，並在 state 的 `config.json` 設 `verifier_python`。一個 state 目錄只有一個 `verifier_python`，所以 `--repo` 一個 repo 就要配一個自己的 state 目錄（見 `docs/GATEWAY_ROUTE.md`）。pytest 設定一律取自 base commit，由 `src/cairnwork/pytest_config.py` 處理。
 - 和 EIA 不重複：`cairnwork:queue` 是另一個標籤。要做 A/B 比較時，再明確把同一張 Issue 兩個標籤都貼上，兩邊各自開 PR，最後只合併一張。
+
+## 常設 KPI：7 天返工率
+
+每一張由 Cairnwork 從 Issue 交付、且已合併的 PR（下稱「原 PR」），都要記「7 天返工率」。它是第一層指標，和一次成功率（送進件的 Issue 中，第一次執行就產出可合併 PR 的比例）一起報告，不單獨拿來下結論。
+
+- **定義**：以 PR 數計。分母是合併已滿 7 天（窗口已走完）的原 PR；分子是其中至少有一個「返工 PR」的原 PR。
+- **時間窗**：比的是後續 PR 的合併時間，落在原 PR 合併時間之後、7×24 小時以內（含整點）。
+- **判定順序**：窗口內每一個後續已合併 PR，依序逐條判定，第一條成立就停：
+  1. 是還原（revert）原 PR 的 commit → 算。
+  2. 只改格式（空白、換行、import 排序、formatter 輸出），沒有其他改動 → 不算。
+  3. 和原 PR 改過的行有任何一行重疊（以 git blame 追到原 PR 的 commit 為準，程式碼和非程式碼檔都一樣）→ 算，不管有沒有引用原 Issue／PR。
+  4. 內文、commit 訊息或留言引用原 Issue／PR，而且說是要修正它 → 算，即使改的是別處。
+  5. 其他（包括只是提到原 PR、沒說要修正它）→ 不算。
+- **記錄**：每次交付一列，放在該 state 目錄的交付紀錄裡（欄位：repo、Issue、原 PR、合併時間、返工 PR 編號或空白、判定日期）。合併滿 7 天後補填一次，不回頭重算。交付紀錄的格式由 Cairnwork 整合負責人定義。
