@@ -170,22 +170,22 @@ def _absolute(url: str, source: Path) -> str:
 
 
 def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
-    """The deferred tests stay hidden from whoever supplies candidates: once a verify run
-    has fetched them and run candidate code over them (whose logs it returns), they are
-    exposed, as on the worker path. The record is append-only, written and synced before
-    the tests are fetched, so a crash cannot lose it. record=False only checks."""
-    path = intake.state / "verify-burned-tests"
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    """The deferred tests stay hidden from whoever supplies candidates: a verify run that
+    uses them runs candidate code over them and returns its logs (and even pass or fail
+    tells a lot), so a test commit is single-use, as on the worker path. Using it is
+    registered by creating ``<state>/verify-used-tests/<sha>`` exclusively, before the tests
+    are fetched and so before any candidate code runs; a crash or a later refusal still
+    counts as used. record=False only checks."""
+    used = intake.state / "verify-used-tests"
+    used.mkdir(mode=0o700, exist_ok=True)
+    marker = used / test_commit  # test_commit was checked to be 40 hex digits
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        with open(path, encoding="utf-8") as seen:
-            if test_commit in seen.read().split():
-                raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit")
         if record:
-            os.write(fd, f"{test_commit}\n".encode())
-            os.fsync(fd)
-    finally:
-        os.close(fd)
+            os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+        elif marker.exists():
+            raise FileExistsError
+    except FileExistsError:
+        raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
 
 
 def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> None:
