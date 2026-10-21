@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
+from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
     KeyReusedWithDifferentRequest,
@@ -60,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         OwnerMismatch,
     ) as exc:
         return _emit({"error": type(exc).__name__, "detail": str(exc)}, 2)
+    except JournalIntegrityViolation as exc:
+        return _emit({"error": exc.code, "detail": str(exc)}, 1)
     except (ReplayForbidden, ReconciliationRequired) as exc:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success

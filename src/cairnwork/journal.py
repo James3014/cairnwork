@@ -41,6 +41,12 @@ CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_
 """
 
 
+class JournalIntegrityViolation(Exception):
+    """The journal already has two DISPATCHED rows for one task; reconcile it by hand."""
+
+    code = "JOURNAL_INTEGRITY_VIOLATION"
+
+
 class AlreadyDispatched(Exception):
     """A DISPATCHED row already exists for this task: only one attempt may start."""
 
@@ -58,6 +64,7 @@ class Journal:
         self._path = Path(path)
         conn = self._connect()
         try:
+            _refuse_double_dispatch(conn)
             conn.executescript(_SCHEMA)
         finally:
             conn.close()
@@ -95,3 +102,19 @@ class Journal:
         finally:
             conn.close()
         return [Entry(*row) for row in rows]
+
+
+def _refuse_double_dispatch(conn: sqlite3.Connection) -> None:
+    """Name the tasks an old journal dispatched twice, before the unique index is built."""
+    try:
+        rows = conn.execute(
+            "SELECT task_id FROM attempt_journal WHERE phase = 'DISPATCHED'"
+            " GROUP BY task_id HAVING count(*) > 1 ORDER BY task_id"
+        ).fetchall()
+    except sqlite3.OperationalError:  # no table yet: a new journal
+        return
+    if rows:
+        tasks = ", ".join(r[0] for r in rows)
+        raise JournalIntegrityViolation(
+            f"{JournalIntegrityViolation.code}: dispatched twice: {tasks}"
+        )

@@ -283,7 +283,8 @@ def _refuse_replay(conn: sqlite3.Connection, digest: str, card_hash: str) -> Non
         return
     task_id, status = row
     if status in ("COMPLETED", "FAILED"):
-        raise ReplayForbidden(f"{task_id} is {status}; supersede it, then use a new key")
+        hint = "supersede it, then use a new key" if status == "FAILED" else "it is not resent"
+        raise ReplayForbidden(f"{task_id} is {status}; {hint}")
     raise ReconciliationRequired(f"{task_id} is {status}")
 
 

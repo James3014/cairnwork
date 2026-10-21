@@ -114,3 +114,11 @@ def test_existing_state_with_two_rows_of_one_digest_still_opens(tmp_path):
     conn.close()
     assert OwnershipLedger(path).get(task_id="t2").status == "COMPLETED"
     assert first.path == path
+
+
+def test_completed_replay_message_does_not_offer_supersede(ledger):
+    first = ledger.bind("k1", REQUEST, "cairnwork", "card-1").record
+    finish(ledger, first.task_id, "COMPLETED")
+    with pytest.raises(ReplayForbidden) as raised:
+        ledger.bind("k2", REQUEST, "cairnwork", "card-2")
+    assert "supersede" not in str(raised.value)
