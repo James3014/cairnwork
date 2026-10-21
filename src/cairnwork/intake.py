@@ -124,6 +124,15 @@ def _verifier_shape(value: Any) -> bool:
     )
 
 
+def _has_token(token_file: Any) -> bool:
+    """A regular file holding a token; it is read again at each Core call (rotation)."""
+    try:
+        path = Path(token_file)
+        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 @dataclass(frozen=True)
 class Intake:
     state: Path
@@ -162,9 +171,8 @@ class Intake:
                 check_core_url(loaded["core_url"])
             except CoreHttpError as exc:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
-            token_file = loaded.get("core_token_file")
-            if not token_file or not os.access(token_file, os.R_OK):
-                raise IntakeRefused("BAD_CONFIG", "core_url needs a readable core_token_file")
+            if not _has_token(loaded.get("core_token_file")):
+                raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:
