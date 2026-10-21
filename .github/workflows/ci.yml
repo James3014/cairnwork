@@ -27,6 +27,36 @@ jobs:
       - run: uv run pytest -q
       - run: git diff --check
 
+  # Exact-base Pyright gate: fails only on findings the PR adds versus its merge base, matched
+  # by (file, rule, message, source line text) rather than line number. Limitation: the
+  # comparison script comes from the PR head (the base has none on the first PR), so a PR that
+  # edits scripts/pyright_gate.py is judged by its own copy; review that file by hand.
+  pyright:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Pyright on the merge base and on the head
+        run: |
+          base_sha=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          echo "merge base: $base_sha"
+          git worktree add "$RUNNER_TEMP/base" "$base_sha"
+          # pyright exits 1 when it has findings; the gate decides, so tolerate that here.
+          run_pyright() {
+            (cd "$1" && uv sync --locked &&
+              { uvx --from pyright==1.1.414 pyright --pythonpath .venv/bin/python --outputjson \
+                > "$2" || true; })
+          }
+          run_pyright "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
+          run_pyright "$GITHUB_WORKSPACE" "$RUNNER_TEMP/head.json"
+          python3 scripts/pyright_gate.py "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/base" \
+            "$RUNNER_TEMP/head.json" "$GITHUB_WORKSPACE"
+
   # The verifier sandbox (macOS Seatbelt) is only proven on macOS. Nexus-new's
   # sandbox could not run pytest for weeks because nothing ran it for real, so
   # this job cannot skip: a missing sandbox-exec fails it.

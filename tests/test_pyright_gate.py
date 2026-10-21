@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from scripts import pyright_gate as gate
+
+
+def _tree(root: Path, source: str) -> Path:
+    root.mkdir()
+    (root / "m.py").write_text(source, encoding="utf-8")
+    return root
+
+
+def _report(root: Path, findings: list[tuple[int, str]], name: str = "r.json") -> Path:
+    diagnostics = [
+        {
+            "file": str(root / "m.py"),
+            "severity": "error",
+            "message": message,
+            "range": {"start": {"line": line, "character": 0}},
+            "rule": "reportGeneralTypeIssues",
+        }
+        for line, message in findings
+    ]
+    path = root.parent / f"{root.name}-{name}"
+    path.write_text(json.dumps({"generalDiagnostics": diagnostics}), encoding="utf-8")
+    return path
+
+
+def _run(base: Path, base_report: Path, head: Path, head_report: Path) -> int:
+    return gate.main([str(base_report), str(base), str(head_report), str(head)])
+
+
+def test_line_shift_is_not_new(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "import os\n\nx: int = 'a'\n")
+    code = _run(base, _report(base, [(0, "bad")]), head, _report(head, [(2, "bad")]))
+    assert code == 0
+
+
+def test_edited_line_text_is_new(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "x: int = 'b'\n")
+    code = _run(base, _report(base, [(0, "bad")]), head, _report(head, [(0, "bad")]))
+    assert code == 1
+    assert "NEW m.py" in capsys.readouterr().out
+
+
+def test_duplicate_of_old_finding_is_new(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "x: int = 'a'\nx: int = 'a'\n")
+    code = _run(base, _report(base, [(0, "bad")]), head, _report(head, [(0, "bad"), (1, "bad")]))
+    assert code == 1
+
+
+def test_removed_finding_is_fine(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x: int = 'a'\n")
+    head = _tree(tmp_path / "head", "x: int = 1\n")
+    assert _run(base, _report(base, [(0, "bad")]), head, _report(head, [])) == 0
+
+
+def test_malformed_json_fails_closed(tmp_path: Path) -> None:
+    base = _tree(tmp_path / "base", "x = 1\n")
+    head = _tree(tmp_path / "head", "x = 1\n")
+    good = _report(head, [])
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert _run(base, bad, head, good) == 2
+    assert _run(base, tmp_path / "missing.json", head, good) == 2
+    bad.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+    assert _run(base, bad, head, good) == 2
