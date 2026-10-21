@@ -324,3 +324,47 @@ def test_plain_python_is_the_verifier_interpreter(project, tmp_path, monkeypatch
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     result = verify(project, tmp_path, {"tests/test_python.py": code}, "tests/test_python.py")
     assert result.observation.passed, result.log_path.read_text()
+
+
+_NEXT_TO_REPO = (
+    "from pathlib import Path\n"
+    "repo = Path(__file__).resolve().parents[1]\n"
+    "def test_next_to_repo():\n"
+    "    target = repo.parent / 'nexus-runtime-targets'\n"
+    "    target.mkdir()\n"
+    "    (target / 'x').write_text('ok')\n"
+    "def test_not_above_the_run():\n"
+    "    try:\n"
+    "        (repo.parent.parent / 'escaped').write_text('no')\n"
+    "    except PermissionError:\n"
+    "        return\n"
+    "    raise AssertionError('wrote outside its work directory')\n"
+)
+
+
+@pytest.mark.sandbox
+def test_tests_may_write_next_to_their_repo_but_not_above_the_run(project, tmp_path):
+    """Nexus-new tests create <repo parent>/nexus-runtime-targets (cairnwork#38): that
+    lands in the run's own work directory, which is removed afterwards."""
+    result = verify(project, tmp_path, {"tests/test_next.py": _NEXT_TO_REPO}, "tests/test_next.py")
+    assert result.observation.passed, result.log_path.read_text()
+    runs = tmp_path / "runs"
+    assert not (runs / "escaped").exists()
+    assert not list(runs.glob("*.work")), "work directory left behind"
+
+
+@pytest.mark.sandbox
+def test_a_replaced_checkout_fails_the_run(project, tmp_path):
+    """The child may write the work directory, so it could move its checkout away and put a
+    symlink in its place; the owner then must not compare (or trust) another tree."""
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_swap():\n"
+        "    repo = Path(__file__).resolve().parents[1]\n"
+        "    os.rename(repo, repo.parent / 'moved')\n"
+        "    os.symlink(repo.parent / 'moved', repo)\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_swap.py": code}, "tests/test_swap.py")
+    assert not result.observation.passed
+    assert "checkout replaced" in result.mutated

@@ -316,3 +316,20 @@ def test_leftover_cleanup_removes_whole_base_test_runs(tmp_path):
     _remove_leftovers(tmp_path, "a1")
     assert not base_run.exists()
     assert (verify_run / "verifier.log").exists() and not (verify_run / "run").exists()
+
+
+def test_leftover_cleanup_removes_verifier_work_directories(tmp_path):
+    """#40 layout: <attempt>-v-v0.work/<attempt>-v-v0 is the checkout; recovery removes it
+    whole and still keeps the verifier log next to it."""
+    from cairnwork.recovery import _remove_leftovers
+
+    for kind in ("v", "b"):
+        work = tmp_path / f"a1-{kind}-v0.work"
+        (work / f"a1-{kind}-v0" / "tests").mkdir(parents=True)
+        (work / "nexus-runtime-targets").mkdir()
+    verify_run = tmp_path / "a1-v-v0.def"
+    (verify_run / "run").mkdir(parents=True)
+    (verify_run / "verifier.log").write_text("log")
+    _remove_leftovers(tmp_path, "a1")
+    assert not list(tmp_path.glob("*.work"))
+    assert (verify_run / "verifier.log").exists() and not (verify_run / "run").exists()

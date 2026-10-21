@@ -53,6 +53,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -193,10 +194,18 @@ def _run_all(
     runs = []
     for index, spec in enumerate(specs):
         clone_id = f"{run_id}-v{index}"
-        checkout = create_attempt_clone(repo, candidate_commit, run_root, clone_id).path
-        if account is not None:
-            account.grant_read(checkout)  # whatever the caller's umask was
+        # The checkout sits alone in its own work directory, which the tests may write:
+        # some create files next to their repository (Nexus-new: nexus-runtime-targets),
+        # and that must stay inside this run. Sticky: the account cannot move the checkout.
+        work = Path(run_root) / f"{clone_id}.work"
+        work.parent.mkdir(parents=True, exist_ok=True)
+        work.mkdir(mode=0o700)
         try:
+            if account is not None:
+                os.chmod(work, 0o3770)
+            checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
+            if account is not None:
+                account.grant_read(checkout)  # whatever the caller's umask was
             runs.append(
                 _run_one(
                     repo,
@@ -212,9 +221,10 @@ def _run_all(
             )
         finally:
             try:
-                remove_attempt_clone(run_root, clone_id)
+                remove_attempt_clone(work, clone_id)
             except WorkspaceError:
                 pass  # the run's verdict stands; a leftover directory is only disk space
+            _remove_scratch((work,), account)
     return tuple(runs)
 
 
@@ -241,7 +251,7 @@ def _run_one(
 ) -> VerifierRun:
     plugins = pytest_config.installed_plugins(python)
     ini_text = settings.ini_text(checkout, plugins)
-    private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent))
+    private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent.parent))
     log_path, ini, profile_path = (
         private / "verifier.log",
         private / "pytest.ini",
@@ -253,29 +263,16 @@ def _run_one(
     if attempt_id:
         env[ATTEMPT_ENV] = attempt_id
     argv = [
-        python,
-        "-P",
-        "-m",
-        "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
-        "-c",
-        str(ini),
-        f"--rootdir={checkout}",
-        f"--confcutdir={checkout}",
-        "-o",
-        "addopts=",
-        *settings.args(plugins),
-        "-p",
-        report_guard.MODULE,
-        *spec.targets,
-    ]
+        python, "-P", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", str(ini),
+        f"--rootdir={checkout}", f"--confcutdir={checkout}", "-o", "addopts=",
+        *settings.args(plugins), "-p", report_guard.MODULE, *spec.targets,
+    ]  # fmt: skip
+    before = os.lstat(checkout)
     profile = None
     if sandbox.available():
         profile = sandbox.build_profile(
             read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
-            write_roots=(checkout, run_dir),
+            write_roots=(checkout.parent, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
         returncode, timed_out, survivors = _execute(
@@ -284,7 +281,10 @@ def _run_one(
     else:
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
-    mutated = tuple(tree_differences(repo, candidate_commit, checkout))
+    if _same_directory(checkout, before):  # not renamed away, no symlink put in place
+        mutated = tuple(tree_differences(repo, candidate_commit, checkout))
+    else:
+        mutated = ("checkout replaced",)
     verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     passed = (
@@ -316,6 +316,15 @@ def _run_one(
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes
     )
+
+
+def _same_directory(path: Path, before: os.stat_result) -> bool:
+    try:
+        after = os.lstat(path)
+    except OSError:
+        return False
+    same = (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    return same and stat.S_ISDIR(after.st_mode)
 
 
 def _execute(argv, profile_path, checkout, env, timeout, log_path, account):

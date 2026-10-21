@@ -247,3 +247,81 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     log = result.log_path.read_text()
     assert result.outcomes == {"tests/test_git.py::test_git": "passed"}, log
     assert result.returncode == 0 and not result.timed_out and result.mutated == (), log
+
+
+def test_account_may_write_next_to_the_repo_but_not_move_the_checkout(project):
+    """cairnwork#38 under the account: the sticky work directory takes new files, but the
+    checkout (owner's) cannot be renamed away or replaced."""
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "repo = Path(__file__).resolve().parents[1]\n"
+        "def test_layout():\n"
+        "    (repo.parent / 'nexus-runtime-targets').mkdir()\n"
+        "    try:\n"
+        "        os.rename(repo, repo.parent / 'moved')\n"
+        "    except PermissionError:\n"
+        "        return\n"
+        "    raise AssertionError('moved the checkout')\n"
+    )
+    result = verify(project, {"tests/test_layout.py": code}, "tests/test_layout.py")
+    log = result.log_path.read_text()
+    assert result.outcomes == {"tests/test_layout.py::test_layout": "passed"}, log
+    assert result.mutated == (), log
+    clone_id = result.log_path.parent.name.split(".")[0]
+    assert not (ACCOUNT.run_root / f"{clone_id}.work").exists(), "work directory left behind"
+
+
+def test_account_files_without_permissions_are_still_removed(project):
+    """The account can leave a directory it closed to itself; cleanup reopens it first."""
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_lock():\n"
+        "    locked = Path(__file__).resolve().parents[1].parent / 'locked'\n"
+        "    (locked / 'inner').mkdir(parents=True)\n"
+        "    (locked / 'inner' / 'f').write_text('x')\n"
+        "    os.chmod(locked / 'inner', 0)\n"
+        "    os.chmod(locked, 0)\n"
+    )
+    result = verify(project, {"tests/test_lock.py": code}, "tests/test_lock.py")
+    assert result.outcomes == {"tests/test_lock.py::test_lock": "passed"}, (
+        result.log_path.read_text()
+    )
+    clone_id = result.log_path.parent.name.split(".")[0]
+    assert not (ACCOUNT.run_root / f"{clone_id}.work").exists()
+
+
+def test_account_cannot_swap_its_scratch_directories(project):
+    """run/ is sticky: the account cannot rename the owner's home/ away (to plant a symlink
+    the owner's cleanup would follow)."""
+    code = (
+        "import os\n"
+        "def test_swap_home():\n"
+        "    home = os.environ['HOME']\n"
+        "    try:\n"
+        "        os.rename(home, home + '.x')\n"
+        "    except PermissionError:\n"
+        "        return\n"
+        "    raise AssertionError('renamed home')\n"
+    )
+    result = verify(project, {"tests/test_home.py": code}, "tests/test_home.py")
+    assert result.outcomes == {"tests/test_home.py::test_swap_home": "passed"}, (
+        result.log_path.read_text()
+    )
+
+
+def test_remove_does_not_follow_a_symlink(tmp_path):
+    target = ACCOUNT.run_root / ("keep-" + os.urandom(4).hex())
+    link = ACCOUNT.run_root / ("link-" + os.urandom(4).hex())
+    target.mkdir()
+    os.chmod(target, 0o2770)  # the account could delete what is inside
+    (target / "evidence").write_text("keep")
+    try:
+        link.symlink_to(target)
+        ACCOUNT.remove(link)
+        assert (target / "evidence").exists()
+    finally:
+        link.unlink(missing_ok=True)
+        (target / "evidence").unlink(missing_ok=True)
+        target.rmdir()
