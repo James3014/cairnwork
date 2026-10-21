@@ -275,6 +275,7 @@ def _run_one(
         profile = backend.policy(
             read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
             write_roots=(checkout.parent, run_dir),
+            mask_home_credentials=account is None,  # account uid can't enter the owner's home
         )
         _write_new(profile_path, profile.text.encode())
         returncode, timed_out, survivors = _execute(

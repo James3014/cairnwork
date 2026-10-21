@@ -6,7 +6,8 @@
 # Run as the owner, without sudo: zsh scripts/setup_verifier_python.sh
 set -euo pipefail
 
-ROOT="/Users/Shared/cairnwork"
+# The shared root matches verifier_account.DEFAULT_ROOT; override for Linux (/var/lib/cairnwork).
+ROOT="${CAIRNWORK_VERIFIER_ROOT:-/Users/Shared/cairnwork}"
 HERE="${0:A:h}"
 PYTEST=$(awk '/^name = "pytest"$/ {getline; gsub(/[^0-9.]/, ""); print; exit}' "$HERE/../uv.lock")
 [[ -n "$PYTEST" ]] || { echo "pytest version not found in uv.lock"; exit 1; }

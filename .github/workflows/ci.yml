@@ -130,3 +130,32 @@ jobs:
         run: bwrap --unshare-pid --unshare-user --cap-drop ALL --ro-bind / / --proc /proc true
       - name: Sandbox witnesses on real bwrap
         run: CAIRNWORK_REQUIRE_SANDBOX=1 uv run pytest -q tests/test_sandbox.py
+
+  # Linux P4 (Issue #84): verifiers run as a dedicated unprivileged account, as on macOS.
+  # Creates the account, then runs the account witnesses on real bwrap with the account
+  # required — a missing or unusable account fails the job (it cannot silently skip).
+  test-linux-verifier-account:
+    runs-on: ubuntu-24.04
+    env:
+      CAIRNWORK_REQUIRE_SANDBOX: "1"
+      CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT: "1"
+      CAIRNWORK_VERIFIER_ROOT: "/var/lib/cairnwork"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - name: Install bubblewrap and zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap zsh
+          bwrap --version
+      - name: Lift the AppArmor userns restriction (end users load a profile instead)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Create the verifier account (Issue #84) and its Python
+        run: |
+          sudo sh scripts/setup_verifier_user_linux.sh "$USER"
+          zsh scripts/setup_verifier_python.sh
+      - name: Account witnesses on real bwrap, as the dedicated account
+        run: uv run pytest -q -m verifier_account
