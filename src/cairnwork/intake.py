@@ -6,7 +6,7 @@ in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
     config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror",
-                        "core_url", "core_token_file", "core_identity"}
+                        "core_url", "core_token_file", "core_identity", "test_roots"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -36,6 +36,7 @@ from typing import Any
 
 from cairnwork import runlock
 from cairnwork.gitcmd import GitCommandError, run_git
+from cairnwork.issue_task import check_test_roots
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import (
@@ -80,6 +81,8 @@ DEFAULT_CONFIG = {
     # Core installed beside Cairnwork.
     "core_identity": None,
     "core_token_file": None,
+    # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
+    "test_roots": ["tests"],
 }
 
 
@@ -90,7 +93,7 @@ class IntakeRefused(Exception):
         self.detail = detail
 
 
-def task_from_payload(payload: Any) -> TaskSpec:
+def task_from_payload(payload: Any, test_roots: tuple[str, ...] = ("tests",)) -> TaskSpec:
     """A closed schema: unknown or missing fields are refused, never ignored."""
     if not isinstance(payload, dict) or not FIELDS <= set(payload) <= FIELDS | {"test_commit"}:
         got = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
@@ -119,6 +122,7 @@ def task_from_payload(payload: Any) -> TaskSpec:
         allowed_files=tuple(files),
         verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
         test_commit=payload.get("test_commit", ""),
+        test_roots=test_roots,
     )
 
 
@@ -187,6 +191,10 @@ class Intake:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
             if not _has_token(loaded.get("core_token_file")):
                 raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
+        try:
+            check_test_roots(loaded.get("test_roots", ["tests"]))
+        except ValueError as exc:
+            raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:
@@ -226,7 +234,8 @@ class Intake:
             os.close(fd)
 
     def submit(self, payload: Any) -> dict[str, Any]:
-        task = task_from_payload(payload)
+        roots = tuple(self.config()["test_roots"])
+        task = task_from_payload(payload, roots)
         check_task(task)
         mirror = self.config()["mirror"]  # a bad config is refused here, not by the runner
         source = task.repo
@@ -234,7 +243,7 @@ class Intake:
             if not Path(mirror).is_dir():
                 raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
             payload = {**payload, "repo": mirror}
-            task = task_from_payload(payload)
+            task = task_from_payload(payload, roots)
         with self._intake_lock():
             return self._bind_and_start(task, payload, source)
 
@@ -271,7 +280,7 @@ class Intake:
 
     def load_request(self, task_id: str) -> TaskSpec:
         path = self.state / "requests" / f"{task_id}.json"
-        return task_from_payload(json.loads(path.read_text()))
+        return task_from_payload(json.loads(path.read_text()), tuple(self.config()["test_roots"]))
 
     def _start_runner(self, task_id: str, lock_fd: int) -> None:
         log = self.run_root / f"{task_id}.runner.log"
