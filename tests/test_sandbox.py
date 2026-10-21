@@ -136,7 +136,7 @@ def test_without_sandbox_nothing_runs_and_the_verifier_fails(project, tmp_path, 
     )
     assert not result.observation.passed
     assert not marker.exists()
-    assert "unavailable" in result.log_path.read_text()
+    assert "not executed" in result.log_path.read_text()  # backend-neutral: see verifiers.py
 
 
 @pytest.mark.sandbox
@@ -292,7 +292,7 @@ def test_named_credentials_are_masked(project, tmp_path, monkeypatch):
     """A fake home holds canary credentials; inside the sandbox none of them is readable
     (denied, missing or emptied), whichever backend confines the run."""
     home = tmp_path / "fakehome"
-    canaries = [".ssh/id_test", ".aws/credentials", ".config/gh/hosts.yml", ".netrc"]
+    canaries = [".ssh/id_test", ".aws/credentials", ".config/gh/hosts.yml", ".netrc", ".Xauthority"]
     for rel in canaries:
         (home / rel).parent.mkdir(parents=True, exist_ok=True)
         (home / rel).write_text("CANARY-SECRET\n")
@@ -305,7 +305,7 @@ def test_named_credentials_are_masked(project, tmp_path, monkeypatch):
         "import os\n"
         "def test_masked():\n"
         "    paths = os.environ['CW_CANARIES'].split(':')\n"
-        "    assert len(paths) == 4\n"
+        "    assert len(paths) == 5\n"
         "    for path in paths:\n"
         "        try:\n"
         "            data = open(path).read()\n"
@@ -314,4 +314,39 @@ def test_named_credentials_are_masked(project, tmp_path, monkeypatch):
         "        assert 'CANARY-SECRET' not in data, path\n"
     )
     result = verify(project, tmp_path, {"tests/test_masked.py": code}, "tests/test_masked.py")
+    assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.sandbox
+def test_x11_and_daemon_sockets_are_masked(project, tmp_path, monkeypatch):
+    """X11 server sockets and root-equivalent daemon sockets (libvirt/LXD/Docker, #85) are
+    masked, so a candidate cannot reach one that exists on the host. The real paths vary and a
+    CI runner has none, so point the (bwrap) mask lists at canary paths under tmp and witness
+    them unreadable inside the sandbox (under bwrap's whole-root bind they would be readable
+    without the mask; Seatbelt denies them by its allow-list anyway)."""
+    import cairnwork_sandbox.bwrap as bwrap_mod
+
+    x11 = tmp_path / ".X11-unix"
+    x11.mkdir()
+    (x11 / "X0").write_text("CANARY-X11\n")
+    sock = tmp_path / "libvirt-sock"
+    sock.write_text("CANARY-SOCK\n")
+    monkeypatch.setattr(bwrap_mod, "_X11_SOCKET_DIR", str(x11))
+    monkeypatch.setattr(bwrap_mod, "_DANGEROUS_SOCKETS", (str(sock),))
+    monkeypatch.setenv("CW_X11", str(x11 / "X0"))
+    monkeypatch.setenv("CW_SOCK", str(sock))
+    import cairnwork.verifiers as verifiers
+
+    monkeypatch.setattr(verifiers, "_ENV_KEEP", (*verifiers._ENV_KEEP, "CW_X11", "CW_SOCK"))
+    code = (
+        "import os\n"
+        "def test_masked():\n"
+        "    for key in ('CW_X11', 'CW_SOCK'):\n"
+        "        try:\n"
+        "            data = open(os.environ[key]).read()\n"
+        "        except OSError:\n"
+        "            continue\n"
+        "        assert 'CANARY' not in data, key\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_sock.py": code}, "tests/test_sock.py")
     assert result.observation.passed, result.log_path.read_text()
