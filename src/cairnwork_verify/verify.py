@@ -31,7 +31,12 @@ from typing import Any
 
 from cairnwork import runlock
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
-from cairnwork.deferred_tests import TestCommitRejected, lay_tests_over, never_seen
+from cairnwork.deferred_tests import (
+    TestCommitRejected,
+    check_roots_on_base,
+    lay_tests_over,
+    never_seen,
+)
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.ownership import request_digest
@@ -201,6 +206,7 @@ def _judge(intake, task, source, specs, candidate, notary, result, verifying) ->
 
 
 def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying) -> None:
+    check_roots_on_base(task.repo, task.base_commit, task.test_roots)
     clone = create_attempt_clone(task.repo, candidate, run_root, result.attempt_id)
     try:
         attempt = Attempt(clone.attempt_id, task.base_commit, clone.path, clone.refs_before)

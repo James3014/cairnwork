@@ -29,6 +29,7 @@ from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
 from cairnwork.deferred_tests import (
     TestCommitRejected,
+    check_roots_on_base,
     ensure_test_commit,
     failed_on_base,
     lay_tests_over,
@@ -329,6 +330,11 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except TestCommitRejected as exc:
             result.reason = str(exc)
             return
+    try:
+        check_roots_on_base(task.repo, task.base_commit, task.test_roots)
+    except TestCommitRejected as exc:
+        result.reason = str(exc)
+        return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:

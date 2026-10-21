@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import commit_change
+from conftest import commit_change, git
 from test_deferred_tests import make_test_commit
 from verify_helpers import FIX, base_of, candidate, verify
 
 from cairnwork.deferred_tests import TestCommitRejected as Rejected
-from cairnwork.deferred_tests import ensure_test_commit
+from cairnwork.deferred_tests import check_roots_on_base, ensure_test_commit
 from cairnwork.deferred_tests import test_paths as _paths
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.issue_task import IssueRefused, check_test_roots, parse_task_block
@@ -76,6 +76,8 @@ BAD_ROOTS = [
     ["pkg/../tests"], ["pkg/./tests"], ["tests/"], ["pkg//tests"], ["tests", "tests"],
     ["pkg/*"], ["pkg/te?ts"], ["pkg/[ab]"], ["pkg/tests\n"], ["pkg tests"], [".hidden/tests"],
     [".github"], [".github/tests"], ["docs/governance"], ["tasks"], [5], [None], [["tests"]],
+    ["src"], ["pyfiglet"], ["pkg/tests2"], ["Tests"], ["pkg/TESTS"], ["pkg/tests/sub"], ["test/x"],
+    ["-tests"], ["-x/tests"], ["pkg/-x/tests"],
     ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"],
 ]  # fmt: skip
 
@@ -97,8 +99,8 @@ def test_good_roots_load_and_the_default_is_tests(tmp_path):
     intake = Intake(tmp_path / "state")
     intake.prepare()
     assert intake.config()["test_roots"] == ["tests"]
-    (intake.state / "config.json").write_text(json.dumps({"test_roots": ["pkg/tests", "t_2"]}))
-    assert intake.config()["test_roots"] == ["pkg/tests", "t_2"]
+    (intake.state / "config.json").write_text(json.dumps({"test_roots": ["pkg/tests", "pkg/test"]}))
+    assert intake.config()["test_roots"] == ["pkg/tests", "pkg/test"]
 
 
 @pytest.fixture
@@ -165,3 +167,84 @@ def test_verify_refuses_targets_outside_the_roots(pkg_project, pkg_state):
         pkg_state, pkg_project, base, cand, tests=("python3 -m pytest -q tests/a.py",)
     )
     assert code == 2 and "VERIFIER_NOT_ALLOWED" in json.dumps(out)
+
+
+@pytest.mark.parametrize("name", ["test", "tests"])
+def test_a_test_root_ends_in_test_or_tests_only(name):
+    assert check_test_roots([f"a/{name}"]) == (f"a/{name}",)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["conftest.py", "sitecustomize.py", "usercustomize.py", "setup.py", "x.pth", "X.PTH",
+     "setup.cfg", "tox.ini", "pytest.ini", "pyproject.toml"],
+)  # fmt: skip
+def test_a_test_commit_refuses_the_names_a_candidate_may_not_touch(pkg_project, name):
+    base, commit = make_test_commit(pkg_project, {f"pkg/tests/{name}": "x = 1\n"})
+    with pytest.raises(Rejected, match="TEST_COMMIT_SCOPE"):
+        paths_of(pkg_project, base, commit, PKG)
+
+
+def test_an_init_file_is_allowed_in_a_test_commit(pkg_project):
+    files = {"pkg/tests/__init__.py": "", "pkg/tests/test_regression.py": PKG_TEST}
+    base, commit = make_test_commit(pkg_project, files)
+    assert len(paths_of(pkg_project, base, commit, PKG)) == 2
+
+
+def _base_with(repo, files, links=None):
+    for path, target in (links or {}).items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).symlink_to(target)
+    commit_change(repo, files)
+    return git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("links", [{"pkg/tests": "../src"}, {"pkg": "src"}])
+def test_a_symlinked_root_or_parent_is_refused_on_the_base(pkg_project, links):
+    git(pkg_project, "rm", "-rq", "pkg")
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, links)
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, PKG)
+
+
+def test_a_root_that_is_a_file_is_refused_and_a_missing_or_real_one_passes(pkg_project):
+    base = _base_with(pkg_project, {"flat/tests": "not a directory\n"})
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, ("flat/tests",))
+    check_roots_on_base(pkg_project, base, ("pkg/tests", "absent/tests", "src/test"))
+
+
+def test_verify_refuses_a_symlinked_root_before_running_anything(pkg_project, pkg_state):
+    git(pkg_project, "rm", "-rq", "pkg")
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"pkg/tests": "../src"})
+    cand = candidate(pkg_project, base, {"src/calc.py": "x = 1\n"})
+    code, out = verify(
+        pkg_state, pkg_project, base, cand, tests=("python3 -m pytest -q pkg/tests/a.py",)
+    )
+    assert code == 2 and "TEST_ROOT_NOT_A_DIRECTORY" in out["reason"]
+
+
+def test_the_worker_path_refuses_a_symlinked_root_before_the_worker_starts(pkg_project, tmp_path):
+    from test_pipeline import EditWorker
+
+    git(pkg_project, "rm", "-rq", "pkg")
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"pkg/tests": "../src"})
+    verifier = (("v", (*RUN, "pkg/tests/test_x.py")),)
+    task = TaskSpec("k", "c", "t", "i", pkg_project, base, ("src/calc.py",), verifier,
+                    test_roots=PKG)  # fmt: skip
+    state = tmp_path / "wstate"
+    state.mkdir()
+    result = _run(task, state, EditWorker({"src/calc.py": "x = 2\n"}))
+    assert "TEST_ROOT_NOT_A_DIRECTORY" in result.reason and not result.verified
+
+
+def _run(task, state, worker):
+    from cairnwork.journal import Journal
+    from cairnwork.notary import Notary
+    from cairnwork.ownership import OwnershipLedger
+    from cairnwork.pipeline import run_task
+
+    return run_task(
+        task, ledger=OwnershipLedger(state / "own.sqlite"), notary=Notary(state / "n.sqlite"),
+        journal=Journal(state / "j.sqlite"), worker=worker, run_root=state / "runs",
+    )  # fmt: skip

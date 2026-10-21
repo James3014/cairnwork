@@ -29,7 +29,14 @@ from cairnwork.workspace import ATTEMPT_REF_PREFIX
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
 _REGULAR = ("100644", "100755")
 # pytest reads these on its own; a test commit carries tests, not configuration.
-_NOT_TEST_FILES = frozenset({"conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml"})
+# Same names the candidate may not touch (verifiers.protected_verifier_inputs). __init__.py
+# stays allowed: it runs only when the tests themselves import their package.
+_NOT_TEST_FILES = frozenset(
+    {
+        "conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml",
+        "setup.py", "sitecustomize.py", "usercustomize.py",
+    }
+)  # fmt: skip
 
 
 class TestCommitRejected(Exception):
@@ -67,6 +74,22 @@ def ensure_test_commit(repo: Path, test_commit: str) -> None:
         raise TestCommitRejected("TEST_COMMIT_UNREADABLE", str(exc)) from exc
 
 
+def check_roots_on_base(repo: Path, base: str, roots: tuple[str, ...]) -> None:
+    """Every part of each configured root that exists on the base must be a real directory:
+    a symlink or file there could point the tests (or verifier targets) outside the root."""
+    for root in roots:
+        parts = root.split("/")
+        for i in range(1, len(parts) + 1):
+            try:
+                entry = run_git(repo, "ls-tree", base, "--", "/".join(parts[:i]))
+            except GitCommandError as exc:
+                raise TestCommitRejected("TEST_ROOT_UNREADABLE", str(exc)) from exc
+            if not entry:
+                break  # absent on the base: nothing to hide behind (a test commit may add it)
+            if not entry.startswith("040000 tree "):
+                raise TestCommitRejected("TEST_ROOT_NOT_A_DIRECTORY", f"{parts[:i]} on the base")
+
+
 def test_paths(
     repo: Path, base: str, test_commit: str, roots: tuple[str, ...] = ("tests",)
 ) -> tuple[str, ...]:
@@ -91,6 +114,7 @@ def test_paths(
             or new_mode not in _REGULAR
             or not path.startswith(tuple(f"{r}/" for r in roots))
             or posix.name.casefold() in _NOT_TEST_FILES
+            or posix.suffix.casefold() == ".pth"
         ):
             raise TestCommitRejected("TEST_COMMIT_SCOPE", f"{status} {new_mode} {path}")
         paths.append(path)

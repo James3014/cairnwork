@@ -33,7 +33,7 @@ TASK_FENCE = re.compile(r"```eia-task[ \t]*\n(.*?)\n```", re.DOTALL)
 ANY_FENCE = re.compile(r"```[A-Za-z0-9_-]*-contract\b")
 SAFE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 DEFAULT_TEST_ROOTS = ("tests",)
-_ROOT = re.compile(r"[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)*")
+_ROOT = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_\-]*/)*(?:tests|test)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MAX_ALLOWED_FILES = 10
 KEYS = frozenset(
@@ -179,7 +179,8 @@ def test_target(roots: tuple[str, ...]) -> re.Pattern[str]:
 
 def check_test_roots(roots: Any) -> tuple[str, ...]:
     """The state config's ``test_roots``: 1 to 8 distinct directories, written as clean
-    relative paths of plain names (no glob, dot or empty part), outside protected paths."""
+    relative paths of plain names (no glob, dot, empty or ``-`` leading part) whose last part
+    is ``tests`` or ``test`` (so a root never holds production code), outside protected paths."""
     if (
         not isinstance(roots, list)
         or not 0 < len(roots) <= 8
