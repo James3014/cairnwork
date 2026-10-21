@@ -48,10 +48,10 @@ PROTECTED_PATHS = (
     "SECURITY.md",
     "ruff.toml",
     "pyrightconfig.json",
-    "src/cairnwork",
-    "src/cairnwork_protocol",
-    "src/cairnwork_sandbox",
-    "src/cairnwork_verify",
+    "scripts/setup_verifier_user.sh",  # run with privilege by CI and the host setup
+    "scripts/setup_verifier_python.sh",
+    "scripts/setup_target_venv.sh",
+    "src/cairnwork*",  # every src/cairnwork package, present or future (prefix match, casefolded)
 )
 PROTECTED_NAMES = (
     "conftest.py",

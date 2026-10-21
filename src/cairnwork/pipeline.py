@@ -122,17 +122,18 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
         raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
     if task.test_commit and not OID.fullmatch(str(task.test_commit)):
         raise TaskRejected("BAD_TEST_COMMIT", "test_commit must be a 40-hex commit id")
-    if not task.allowed_files or len(set(task.allowed_files)) > 10:
+    files = task.allowed_files
+    if not isinstance(files, (tuple, list)) or not files or len(files) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
-    if len(set(task.allowed_files)) != len(task.allowed_files):
-        raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
     blocked: list[str] = []
-    for path in task.allowed_files:
+    for path in files:  # entries are checked before any set() so a malformed one cannot crash
         refusal = path_refusal(path)
         if refusal:
             if refusal[0] == "TASK_ALLOWED_FILES_INVALID":
                 raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
             blocked.append(path)
+    if len(set(files)) != len(files):
+        raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
     protected = protected_verifier_inputs(task.allowed_files, task.test_roots)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))

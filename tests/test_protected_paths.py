@@ -36,6 +36,11 @@ OWN_GATE = [
     "src/cairnwork_sandbox/anything.py",
     "src/cairnwork_protocol/x.py",
     "security.md",
+    "src/cairnwork_tools/gate.py",
+    "src/CairnWork_new/x.py",
+    "scripts/setup_verifier_user.sh",
+    "scripts/setup_verifier_python.sh",
+    "scripts/setup_target_venv.sh",
 ]
 DOTTED = [".env", "src/.env", ".ssh/config", "a/.hidden/b.py", ".git/config"]
 MALFORMED = ["", "/etc/passwd", "../x.py", "a//b.py", "a/./b.py", "a/", "a\\b.py", "a b.py", "x\n"]
@@ -161,3 +166,25 @@ def test_write_through_a_tracked_symlink_is_out_of_scope(repo, tmp_path):
     assert info.value.code == "OUT_OF_SCOPE"
     # naming the target as the allowed file is what lets the change in
     assert collect_candidate(repo, attempt, ("src/a.py",)).paths == ("src/a.py",)
+
+
+@pytest.mark.parametrize("entry", [["a.py"], 7, None, {"a": 1}, ("a.py",)])
+def test_malformed_allowed_files_entries_are_refused_not_a_crash(entry):
+    task = TaskSpec("k", "card", "t", "d", Path("."), "a" * 40, (entry,), VERIFY)  # type: ignore[arg-type]
+    with pytest.raises(TaskRejected) as info:
+        check_task(task)
+    assert info.value.code == "BAD_SCOPE"
+
+
+def test_other_scripts_stay_editable():
+    assert path_refusal("scripts/build.sh") is None and path_refusal("scripts/x.py") is None
+
+
+def test_candidate_check_refuses_a_new_src_cairnwork_package(repo, tmp_path):
+    attempt, clone = _attempt(repo, tmp_path)
+    (clone / "src" / "cairnwork_tools").mkdir()
+    (clone / "src" / "cairnwork_tools" / "gate.py").write_text("x = 1\n")
+    _commit(clone)
+    with pytest.raises(CandidateRejected) as info:
+        collect_candidate(repo, attempt, ("src/cairnwork_tools/gate.py",))
+    assert info.value.code == "PROTECTED_PATH"
