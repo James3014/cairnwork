@@ -162,9 +162,21 @@ def _require_narrow(root: str, real_home: str) -> None:
 
 
 def build_policy(
-    read_roots: tuple[Path, ...], write_roots: tuple[Path, ...], home: Path | None = None
+    read_roots: tuple[Path, ...],
+    write_roots: tuple[Path, ...],
+    home: Path | None = None,
+    mask_home_credentials: bool = True,
 ) -> Policy:
-    """bwrap flags, one argv element per line; later flags override earlier ones."""
+    """bwrap flags, one argv element per line; later flags override earlier ones.
+
+    ``mask_home_credentials`` masks the credential dirs/files under ``home``. It applies only
+    when the sandbox runs as the owner of that home (the launching-account path): under the
+    dedicated verifier account (Issue #84) the sandbox runs as a different uid that cannot
+    even enter the owner's ``0700`` home, so those tmpfs mounts would fail with EPERM — and
+    are unnecessary, because the uid boundary already denies the owner's credentials. The
+    narrow-check still uses the real home, and the system socket / ``/run/user`` masks (which
+    do not touch the owner's home) are always applied.
+    """
     real_home = _safe(home or Path.home())
     # read_roots are validated but never emitted: the whole root is already bound read-only, so
     # (unlike Seatbelt's allow-list) a read root grants no extra scope. Validating still rejects
@@ -199,14 +211,15 @@ def build_policy(
     # there fails on top of the read-only root (no mountpoint to create), and a path that does
     # not exist has nothing to leak. The policy is rebuilt per run, so one created later is
     # masked on the next run.
-    for rel in _CRED_DIRS:
-        target = f"{real_home}/{rel}"
-        if os.path.lexists(target):
-            flags += ["--tmpfs", target]
-    for rel in _CRED_FILES:
-        target = f"{real_home}/{rel}"
-        if os.path.lexists(target):
-            flags += ["--ro-bind", "/dev/null", target]
+    if mask_home_credentials:
+        for rel in _CRED_DIRS:
+            target = f"{real_home}/{rel}"
+            if os.path.lexists(target):
+                flags += ["--tmpfs", target]
+        for rel in _CRED_FILES:
+            target = f"{real_home}/{rel}"
+            if os.path.lexists(target):
+                flags += ["--ro-bind", "/dev/null", target]
     # Mask root-equivalent daemon sockets (Docker/Podman/containerd): a read-only root bind
     # does not stop connect() to a pathname socket, and no network namespace covers it.
     # Bind over the canonical path (realpath collapses the /var/run -> /run symlink and the
@@ -271,8 +284,9 @@ class BwrapBackend:
         read_roots: tuple[Path, ...],
         write_roots: tuple[Path, ...],
         home: Path | None = None,
+        mask_home_credentials: bool = True,
     ) -> Policy:
-        return build_policy(read_roots, write_roots, home)
+        return build_policy(read_roots, write_roots, home, mask_home_credentials)
 
     def wrap(self, argv: list[str], policy_path: Path) -> list[str]:
         return wrap(argv, policy_path)

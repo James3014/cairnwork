@@ -95,6 +95,23 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
     assert lines[netrc - 2 : netrc + 1] == ["--ro-bind", "/dev/null", f"{real_home}/.netrc"]
 
 
+def test_home_credential_masks_are_skipped_when_asked(tmp_path):
+    # Under the dedicated account (#84) the sandbox runs as a uid that cannot enter the owner's
+    # 0700 home, so those tmpfs mounts would EPERM; mask_home_credentials=False skips them. The
+    # narrow-check still uses the real home, and the write bind is unaffected.
+    home, work = _home(tmp_path), tmp_path / "work"
+    work.mkdir()
+    for rel in bwrap._CRED_DIRS:
+        (home / rel).mkdir(parents=True, exist_ok=True)
+    for rel in bwrap._CRED_FILES:
+        (home / rel).write_text("secret\n")
+    lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
+    real_home = str(home.resolve())
+    assert f"{real_home}/.ssh" not in lines and f"{real_home}/.netrc" not in lines
+    assert "--tmpfs" not in lines.splitlines()  # the autouse fixture also clears /run/user
+    assert str(work.resolve()) in lines  # the write bind is still there
+
+
 def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
     # A reachable Docker/Podman/containerd socket is root-equivalent and a read-only root bind
     # does not stop connect(), so an existing one is replaced with /dev/null at its canonical
