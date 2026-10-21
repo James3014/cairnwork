@@ -6,7 +6,7 @@ in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
     config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror",
-                        "core_url", "core_token_file"}
+                        "core_url", "core_token_file", "core_identity"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -71,6 +71,9 @@ DEFAULT_CONFIG = {
     # Nexus Core as an HTTP service (cairnwork_protocol.http) instead of in-process:
     # its root URL and a file holding its bearer token (never the token itself).
     "core_url": None,
+    # The identity (Core's core_identity object) a remote Core must report; None pins the
+    # Core installed beside Cairnwork.
+    "core_identity": None,
     "core_token_file": None,
 }
 
@@ -147,7 +150,9 @@ class Intake:
         if config["core_url"] is None:
             return Notary(self.state / "notary.sqlite")
         verify = http_core_verify(config["core_url"], Path(config["core_token_file"]))
-        return Notary(self.state / "notary.sqlite", core_verify=verify)
+        return Notary(
+            self.state / "notary.sqlite", core_verify=verify, core_identity=config["core_identity"]
+        )
 
     @property
     def journal(self) -> Journal:
@@ -166,6 +171,10 @@ class Intake:
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
+        if loaded.get("core_identity") is not None and not isinstance(
+            loaded["core_identity"], dict
+        ):
+            raise IntakeRefused("BAD_CONFIG", "core_identity must be an object")
         if loaded.get("core_url") is not None:
             try:
                 check_core_url(loaded["core_url"])

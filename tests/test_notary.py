@@ -307,3 +307,90 @@ def test_concurrent_creation_of_a_new_ledger_never_reports_a_schema_mismatch(tmp
         conn = sqlite3.connect(path)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
         conn.close()
+
+
+def _drop(*path):
+    def apply(response):
+        node = response
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+        return response
+
+    return apply
+
+
+def _set(value, *path):
+    def apply(response):
+        node = response
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+        return response
+
+    return apply
+
+
+MANIFEST = ("hashes", "change_manifest_hash")
+UNBOUND = [
+    (_set("sha256:" + "0" * 64, *MANIFEST), "CORE_MANIFEST_HASH_MISMATCH"),
+    (_set("other", "core_identity", "source_digest"), "CORE_IDENTITY_MISMATCH"),
+    (_set("v9", "core_identity", "version"), "CORE_IDENTITY_MISMATCH"),
+    (_drop(*MANIFEST), "CORE_RESPONSE_MALFORMED"),
+    (_drop("core_identity"), "CORE_RESPONSE_MALFORMED"),
+    (_set(12345, *MANIFEST), "CORE_RESPONSE_MALFORMED"),
+    (_set(None, *MANIFEST), "CORE_RESPONSE_MALFORMED"),
+    (_set("not-an-object", "core_identity"), "CORE_RESPONSE_MALFORMED"),
+]
+UNBOUND_IDS = [
+    "manifest-hash-tampered",
+    "identity-digest-wrong",
+    "identity-version-wrong",
+    "manifest-hash-missing",
+    "identity-missing",
+    "manifest-hash-not-a-string",
+    "manifest-hash-null",
+    "identity-not-an-object",
+]
+
+
+def _tampered_notary(transport, tmp_path, tamper):
+    """A Notary whose Core (in-process or over HTTP) answers, then has its reply altered."""
+    if transport == "http":
+        with core_http_server(tmp_path, tamper=tamper) as (url, token_file):
+            yield Notary(tmp_path / "n.sqlite", core_verify=http_core_verify(url, token_file))
+        return
+
+    def altered(request):
+        status, response = verify_generic_changeset(request)
+        return status, tamper(response)
+
+    yield Notary(tmp_path / "n.sqlite", core_verify=altered)
+
+
+@pytest.mark.parametrize("transport", ["in-process", "http"])
+def test_untampered_response_is_bound_and_verified(repo, tmp_path, transport):
+    for notary in _tampered_notary(transport, tmp_path, lambda response: response):
+        verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
+        assert verdict.verified and verdict.reason == ""
+
+
+@pytest.mark.parametrize("transport", ["in-process", "http"])
+@pytest.mark.parametrize(("tamper", "code"), UNBOUND, ids=UNBOUND_IDS)
+def test_response_not_bound_to_the_request_is_not_verified(repo, tmp_path, transport, tamper, code):
+    for notary in _tampered_notary(transport, tmp_path, tamper):
+        verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
+        assert verdict.status == "VERIFIED" and verdict.integrity == "VALID"
+        assert not verdict.verified and verdict.reason == code
+        assert not notary.verdict("task-1", "a1", expected_candidate=head_of(repo)).verified
+
+
+def test_configured_core_identity_is_what_the_response_must_report(repo, tmp_path):
+    from product.protocol import core_identity
+
+    pinned = {**core_identity(), "version": "pinned"}
+    notary = Notary(tmp_path / "n.sqlite", core_identity=pinned)
+    verdict = notarize(notary, repo, {"src/a.py": "x = 2\n"})
+    assert not verdict.verified and verdict.reason == "CORE_IDENTITY_MISMATCH"
+    ok = Notary(tmp_path / "m.sqlite", core_identity=core_identity())
+    assert notarize(ok, repo, {"src/a.py": "x = 3\n"}).verified

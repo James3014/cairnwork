@@ -132,3 +132,32 @@ def change_manifest_hash(value: Mapping[str, Any]) -> str:
     return canonical_hash(
         [CHANGE_MANIFEST_SCHEMA_ID, value["source_tree"], value["target_tree"], rows]
     )
+
+
+MANIFEST_HASH_MISMATCH = "CORE_MANIFEST_HASH_MISMATCH"
+IDENTITY_MISMATCH = "CORE_IDENTITY_MISMATCH"
+RESPONSE_MALFORMED = "CORE_RESPONSE_MALFORMED"
+
+
+def response_binding_problem(
+    request: Mapping[str, Any], response: Mapping[str, Any], expected_identity: Mapping[str, Any]
+) -> str | None:
+    """Why a verify response is not bound to the request it answers, else None.
+
+    The response must echo the change manifest hash computed from the manifest that was
+    sent, and report exactly the Core identity the caller expects. A missing or wrongly
+    typed field is its own code, so it is never read as a match.
+    """
+    hashes, identity = response.get("hashes"), response.get("core_identity")
+    echoed = hashes.get("change_manifest_hash") if isinstance(hashes, dict) else None
+    if not isinstance(echoed, str) or not isinstance(identity, dict):
+        return RESPONSE_MALFORMED
+    try:
+        expected = change_manifest_hash(request["change_manifest"])
+    except (KeyError, TypeError, ValueError):
+        return MANIFEST_HASH_MISMATCH
+    if echoed != expected:
+        return MANIFEST_HASH_MISMATCH
+    if identity != dict(expected_identity):
+        return IDENTITY_MISMATCH
+    return None
