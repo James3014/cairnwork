@@ -219,9 +219,10 @@ def build_policy(
         if real and real not in masked_socks:
             masked_socks.add(real)
             flags += ["--ro-bind", "/dev/null", real]
-    # Empty the per-user runtime dir with a tmpfs: it holds the systemd user bus (a
+    # Empty the whole /run/user runtime tree with a tmpfs: it holds the systemd user bus (a
     # `systemd-run --user` would start a process outside the sandbox), the SSH/keyring agent
-    # socket and other session IPC. A tmpfs covers the whole class rather than a path at a time.
+    # socket and other session IPC. A tmpfs over the tree covers every uid at once, so it is
+    # right whether the candidate runs as the launcher or a different (P4) account uid.
     runtime_dir = _user_runtime_dir()
     if runtime_dir is not None:
         flags += ["--tmpfs", _safe(runtime_dir)]
@@ -229,9 +230,12 @@ def build_policy(
 
 
 def _user_runtime_dir() -> str | None:
-    """The per-user runtime dir (`/run/user/<uid>`) to empty, or None when it does not exist."""
-    path = f"/run/user/{os.getuid()}"
-    return path if os.path.isdir(path) else None
+    """`/run/user` (the per-user runtime tree: systemd user buses, session agent sockets) to
+    empty with a tmpfs, or None when it is absent. The whole tree is masked, not one UID's
+    subdir, so it holds whether the candidate runs as the launching account or (under P4) a
+    dedicated verifier account with a different UID — the policy is built before any account
+    switch, so keying on the launcher's own uid would mask the wrong subdir."""
+    return "/run/user" if os.path.isdir("/run/user") else None
 
 
 def _binary() -> str:

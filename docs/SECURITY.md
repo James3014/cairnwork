@@ -33,8 +33,9 @@ Two consequences of the whole-root read-only bind are mitigated, not fully close
   socket hands the candidate the host — the container daemons (Docker/Podman/containerd), the
   system D-Bus, and the **systemd user bus** under `/run/user/<uid>` (a `systemd-run --user`
   there starts a process *outside* the sandbox). The daemon and system-bus sockets are replaced
-  with `/dev/null` (`_DANGEROUS_SOCKETS`); the whole per-user runtime dir `/run/user/<uid>` is
-  emptied with a tmpfs, which also removes the SSH/keyring **agent** socket that lives there.
+  with `/dev/null` (`_DANGEROUS_SOCKETS`); the whole `/run/user` runtime tree is emptied with a
+  tmpfs — every uid's subdir at once, so it holds under a P4 account uid too — which also removes
+  the SSH/keyring **agent** socket that lives there.
   An agent socket an operator put at some *other* path is still reachable by a candidate that
   guesses it (scrubbing `SSH_AUTH_SOCK` from the environment hides the usual pointer but not the
   path itself) — this residual, and any privileged socket not in the list above, closes only

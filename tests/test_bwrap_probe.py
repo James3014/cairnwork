@@ -14,11 +14,17 @@ from cairnwork_sandbox.backend import SandboxError
 @pytest.fixture(autouse=True)
 def _host_independent_ipc_masks(monkeypatch):
     """Keep the pure-function policy tests independent of the test host: the daemon-socket and
-    /run/user/<uid> masks fire on paths that really exist on the runner (e.g. the system D-Bus
-    socket, the CI user's runtime dir), which would otherwise add host-dependent flags. Tests
-    that exercise those masks re-set these in their own body."""
+    /run/user masks fire on paths that really exist on the runner (the system D-Bus socket, the
+    runtime tree), which would otherwise add host-dependent flags. Tests that exercise those
+    masks re-enable them in their own body. Only /run/user is forced absent, so pytest's own
+    isdir calls are untouched (patching os.getuid globally breaks its tmp-owner check)."""
+    import os
+
+    real_isdir = os.path.isdir
     monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", ())
-    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: None)  # no session IPC by default
+    monkeypatch.setattr(
+        bwrap.os.path, "isdir", lambda p: False if p == "/run/user" else real_isdir(p)
+    )
 
 
 def test_available_is_false_without_bwrap(monkeypatch):
@@ -110,12 +116,19 @@ def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
 
 
 def test_user_runtime_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
-    # /run/user/<uid> holds the systemd user bus (a systemd-run --user escape) and the session
-    # agent sockets; a tmpfs empties the whole class. Masked only when the dir exists.
-    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: "/run/user/4242")
+    # The whole /run/user tree (systemd user bus — a systemd-run --user escape — and session
+    # agent sockets) is emptied with a tmpfs, for every uid at once. Masked only when it exists.
+    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: "/run/user")
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
-    i = lines.index("/run/user/4242")
+    i = lines.index("/run/user")
     assert lines[i - 1] == "--tmpfs"
+
+
+def test_user_runtime_dir_masks_the_whole_tree_not_one_uid(monkeypatch):
+    # Regression (round-3 review): the tree, not /run/user/<launcher-uid>, so a P4 account uid's
+    # /run/user/<uid>/bus is covered too. The helper must not depend on os.getuid().
+    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == "/run/user")
+    assert bwrap._user_runtime_dir() == "/run/user"
 
 
 def test_user_runtime_dir_absent_adds_no_tmpfs(tmp_path, monkeypatch):
