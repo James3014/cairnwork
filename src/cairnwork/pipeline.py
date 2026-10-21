@@ -78,6 +78,7 @@ class TaskSpec:
     verifiers: tuple[tuple[str, tuple[str, ...]], ...]
     allow_deletions: bool = False
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
+    test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -127,13 +128,15 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     for path in task.allowed_files:
         if not _clean_relative_path(path):
             raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
-    protected = protected_verifier_inputs(task.allowed_files)
+    protected = protected_verifier_inputs(task.allowed_files, task.test_roots)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
     if blocked := [p for p in task.allowed_files if is_protected(p)]:
         raise TaskRejected("TASK_ALLOWED_FILES_PROTECTED", ", ".join(blocked))
     try:
-        return tuple(parse_verifier(vid, list(argv)) for vid, argv in task.verifiers)
+        return tuple(
+            parse_verifier(vid, list(argv), task.test_roots) for vid, argv in task.verifiers
+        )
     except VerifierRejected as exc:
         raise TaskRejected(exc.code, str(exc)) from exc
 
@@ -247,7 +250,7 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
     """Check a task's deferred tests once the worker is done: plain test files on the
     base whose test cases really fail there. Returns their paths."""
     ensure_test_commit(task.repo, task.test_commit)
-    paths = test_paths(task.repo, task.base_commit, task.test_commit)
+    paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
     targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse
     runs = run_verifiers(
         task.repo,

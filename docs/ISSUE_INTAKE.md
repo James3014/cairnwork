@@ -46,6 +46,7 @@
 - 推送之前會再檢查一次：commit 格式、是否為 base 的後代、改動的檔案都在 `allowed_files` 裡。開 PR 之前會先查有沒有既有的 PR，所以中途失敗後重跑也不會重複開。
 - 同一時間只會跑一輪（鎖）。收尾時不會重新檢查可信身分（EIA 會），因為 PR 內容完全不用 Issue 的文字。
 - 目標 repo 的測試需要該 repo 自己的依賴和 pytest 設定。依賴：用 `scripts/setup_target_venv.sh` 建 venv，並在 state 的 `config.json` 設 `verifier_python`。一個 state 目錄只有一個 `verifier_python`，所以 `--repo` 一個 repo 就要配一個自己的 state 目錄（見 `docs/GATEWAY_ROUTE.md`）。pytest 設定一律取自 base commit，由 `src/cairnwork/pytest_config.py` 處理。
+- **測試目錄（`test_roots`）**：很多專案的測試放在套件目錄裡（例如 `pkg/tests/`），不是最上層的 `tests/`。state 的 `config.json` 可設 `"test_roots": ["pkg/tests"]`（相對目錄的清單，預設 `["tests"]`，最多 8 個）。它同時決定三件事：verifier 目標（`python3 -m pytest -q pkg/tests/test_x.py`，不在清單內的目錄一律拒絕 `VERIFIER_NOT_ALLOWED`）、延後測試 commit 只能新增或修改哪些目錄下的檔案、以及候選不可改的測試檔（每個根目錄底下的檔案都算，`conftest.py` 等保護檔名在任何位置都照舊不可改，也不可放進測試 commit）。每一項都要是乾淨的相對路徑，只含英數、底線、連字號和 `/`：不能是空的、`.`、絕對路徑、含 `..`、結尾斜線、萬用字元，也不能落在保護路徑（例如 `.github`）；違反就是 `BAD_CONFIG`。沒設時行為與以前完全相同。一個 state 目錄只對應一個目標 repo，所以這個設定也是一個 repo 一份。
 - 和 EIA 不重複：`cairnwork:queue` 是另一個標籤。要做 A/B 比較時，再明確把同一張 Issue 兩個標籤都貼上，兩邊各自開 PR，最後只合併一張。
 
 ## 常設 KPI：7 天返工率

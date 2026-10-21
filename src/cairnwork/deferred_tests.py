@@ -67,7 +67,9 @@ def ensure_test_commit(repo: Path, test_commit: str) -> None:
         raise TestCommitRejected("TEST_COMMIT_UNREADABLE", str(exc)) from exc
 
 
-def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
+def test_paths(
+    repo: Path, base: str, test_commit: str, roots: tuple[str, ...] = ("tests",)
+) -> tuple[str, ...]:
     """The files the test commit adds or changes; refuse anything but plain test files."""
     try:
         parents = run_git(repo, "rev-list", "--parents", "-n", "1", test_commit).split()
@@ -87,7 +89,7 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
         if (
             status not in ("A", "M")
             or new_mode not in _REGULAR
-            or posix.parts[0] != "tests"
+            or not path.startswith(tuple(f"{r}/" for r in roots))
             or posix.name.casefold() in _NOT_TEST_FILES
         ):
             raise TestCommitRejected("TEST_COMMIT_SCOPE", f"{status} {new_mode} {path}")

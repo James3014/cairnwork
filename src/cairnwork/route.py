@@ -65,7 +65,7 @@ def _dispatch(intake: Intake, args) -> Any:
         except json.JSONDecodeError as exc:
             raise IntakeRefused("BAD_REQUEST", "stdin is not JSON") from exc
         if args.command == "check":  # no binding, no files, no runner
-            check_task(task_from_payload(payload))
+            check_task(task_from_payload(payload, tuple(intake.config()["test_roots"])))
             return {"would_accept": intake.accepting()}
         return intake.submit(payload)
     if args.command == "status":

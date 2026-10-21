@@ -169,7 +169,7 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     reason = github.trust(number, QUEUE)
     if reason:  # untrusted queueing: leave the Issue exactly as it is
         return {"skipped": reason}
-    task = parse_task_block(issue.get("body") or "")
+    task = parse_task_block(issue.get("body") or "", tuple(intake.config()["test_roots"]))
     known = _recall(intake, github.repo, number)
     if known and known.get("block_sha256") == task.block_sha256:
         github.relabel(number, RUNNING, QUEUE)  # taken before; only the label was missing
