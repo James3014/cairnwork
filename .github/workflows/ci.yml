@@ -50,3 +50,42 @@ jobs:
           sudo zsh scripts/setup_verifier_user.sh "$USER"
           zsh scripts/setup_verifier_python.sh
       - run: uv run pytest -q
+
+  # P2 draft (Linux bwrap, probe only). This job observes how bwrap behaves on a
+  # GitHub ubuntu-24.04 runner — where an AppArmor rule restricts capability-bearing
+  # user namespaces by default — before the policy/wrap backend and witness tests are
+  # written. It prints available() before and after lifting the restriction and runs
+  # the same unguarded namespace probe (unguarded on purpose: a host that cannot nest
+  # namespaces reddens the leg rather than letting sandbox tests skip silently).
+  test-linux-sandbox:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+      - name: Observe the probe under the default AppArmor userns restriction
+        run: |
+          uv run python -c "from cairnwork_sandbox import bwrap; print('restricted available():', bwrap.available())"
+      - name: Lift the restriction (end users load an AppArmor profile instead)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Observe the probe after lifting the restriction
+        run: |
+          uv run python -c "from cairnwork_sandbox import bwrap; print('lifted available():', bwrap.available())"
+      - name: Gate — bwrap must be able to nest namespaces (unguarded)
+        run: bwrap --unshare-pid --unshare-user --cap-drop ALL --ro-bind / / --proc /proc true
