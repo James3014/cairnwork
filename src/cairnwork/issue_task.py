@@ -18,7 +18,6 @@ edit after that event are trusted actors, and the edit history is complete.
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import json
 import re
@@ -26,12 +25,17 @@ import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import Any
+
+from cairnwork.protected_paths import (  # noqa: F401  (re-exported)
+    PROTECTED_NAMES,
+    PROTECTED_PATHS,
+    is_protected,
+    path_refusal,
+)
 
 TASK_FENCE = re.compile(r"```eia-task[ \t]*\n(.*?)\n```", re.DOTALL)
 ANY_FENCE = re.compile(r"```[A-Za-z0-9_-]*-contract\b")
-SAFE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 DEFAULT_TEST_ROOTS = ("tests",)
 _ROOT = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_\-]*/)*(?:tests|test)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -46,39 +50,6 @@ KEYS = frozenset(
         "summary",
         "test_commit",
     }
-)
-PROTECTED_PATHS = (
-    ".github",
-    ".nexus-core",
-    ".gitmodules",
-    "docs/governance",
-    "docs/agents",
-    "docs/testing/test_impact_map.md",
-    "tasks",
-    "pyproject.toml",
-    "uv.lock",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "GEMINI.md",
-    "MUSE_PROTO.md",
-    "nexus/services/external_intelligence*",
-    "scripts/ops/trusted_*",
-    "scripts/ops/external_intelligence*",
-    "scripts/ops/eia_nightly*",
-    "scripts/ops/com.nexus.eia-nightly*",
-    "pytest.ini",
-    "setup.cfg",
-    "tox.ini",
-    "policy",
-    "Makefile",
-)
-PROTECTED_NAMES = (
-    "conftest.py",
-    "sitecustomize.py",
-    "governance_baseline_manifest*.json",
-    "taskfile*",
-    "makefile",
-    ".pre-commit-config*",
 )
 _LATEST = datetime.max.replace(tzinfo=UTC)
 TRUSTED_ACTORS = frozenset({"James3014", "james3014-nexus-agent[bot]"})
@@ -147,27 +118,9 @@ def parse_task_block(body: str, roots: tuple[str, ...] = DEFAULT_TEST_ROOTS) -> 
 
 
 def _check_path(path: Any) -> None:
-    if not isinstance(path, str) or not SAFE_PATH.fullmatch(path):
-        raise IssueRefused("TASK_ALLOWED_FILES_INVALID", repr(path))
-    parts = PurePosixPath(path).parts
-    if PurePosixPath(path).as_posix() != path or any(p.startswith(".") for p in parts):
-        raise IssueRefused("TASK_ALLOWED_FILES_INVALID", path)
-    if is_protected(path):
-        raise IssueRefused("TASK_ALLOWED_FILES_PROTECTED", path)
-
-
-def is_protected(path: str) -> bool:
-    low = path.casefold()
-    name = PurePosixPath(low).name
-    if any(fnmatch.fnmatchcase(name, pattern) for pattern in PROTECTED_NAMES):
-        return True
-    for rule in (r.casefold() for r in PROTECTED_PATHS):
-        if rule.endswith("*"):
-            if low.startswith(rule[:-1]):
-                return True
-        elif low == rule or low.startswith(rule + "/"):
-            return True
-    return False
+    refusal = path_refusal(path)
+    if refusal:
+        raise IssueRefused(*refusal)
 
 
 def test_target(roots: tuple[str, ...]) -> re.Pattern[str]:

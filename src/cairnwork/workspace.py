@@ -39,6 +39,7 @@ from pathlib import Path
 
 from cairnwork.changeset import ChangeSetError, read_change_set
 from cairnwork.gitcmd import OID, GitCommandError, run_git
+from cairnwork.protected_paths import is_protected
 from cairnwork.treecompare import tree_differences
 
 FORBIDDEN_MODES = frozenset({"120000", "160000"})  # symlink, submodule
@@ -186,6 +187,8 @@ def check_candidate_commit(
     for entry in change.entries:
         if entry.path not in allowed:
             raise CandidateRejected("OUT_OF_SCOPE", entry.path)
+        if is_protected(entry.path):  # defense in depth: scope alone is not enough
+            raise CandidateRejected("PROTECTED_PATH", entry.path)
         if entry.change_type == "DELETE" and not allow_deletions:
             raise CandidateRejected("DELETION_FORBIDDEN", entry.path)
         if entry.after_mode in FORBIDDEN_MODES or entry.before_mode in FORBIDDEN_MODES:
