@@ -277,7 +277,7 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
         # /etc/gitconfig, which is the runner's doing, not the verifier's. Only the per-run
         # value Cairnwork injects (GIT_CONFIG_*) should decide what this run trusts.
         "    env = dict(os.environ, GIT_CONFIG_SYSTEM='/dev/null', GIT_CONFIG_GLOBAL='/dev/null')\n"
-        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, text=True, env=env)\n"
+        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, env=env)\n"
         "    assert done.returncode == 0, done.stderr\n"
         "    out = subprocess.run([git, 'config', '--get-all', 'safe.directory'],\n"
         "                         capture_output=True, text=True, env=env).stdout.split()\n"
