@@ -66,10 +66,10 @@ def test_other_origins_are_refused(tmp_path, urls, pushes, code):
         REAL_VERIFY(clone, "James3014/demo")
 
 
-def test_an_empty_answer_is_refused(monkeypatch):
+def test_an_empty_answer_is_refused(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_git", lambda *a: "")
     with pytest.raises(RuntimeError, match="LINEAGE_REMOTE_UNKNOWN"):
-        REAL_VERIFY(None, "James3014/demo")
+        REAL_VERIFY(tmp_path, "James3014/demo")
 
 
 def test_take_with_a_foreign_origin_dispatches_nothing(setup, monkeypatch):
