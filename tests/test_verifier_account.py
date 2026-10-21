@@ -222,3 +222,20 @@ def test_a_strict_caller_umask_does_not_break_the_account_run(project):
     finally:
         os.umask(old)
     assert result.observation.passed, result.log_path.read_text()
+
+
+def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
+    """The account does not own the checkout; git in it must still work (Nexus-new #2760
+    pilot: 'detected dubious ownership'), and only that checkout is trusted."""
+    code = (
+        "import subprocess\n"
+        "def test_git():\n"
+        "    git = '/usr/bin/git'\n"
+        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, text=True)\n"
+        "    assert done.returncode == 0, done.stderr\n"
+        "    out = subprocess.run([git, 'config', '--get-all', 'safe.directory'],\n"
+        "                         capture_output=True, text=True).stdout.split()\n"
+        "    assert out and '*' not in out\n"
+    )
+    result = verify(project, {"tests/test_git.py": code}, "tests/test_git.py")
+    assert result.observation.passed, result.log_path.read_text()
