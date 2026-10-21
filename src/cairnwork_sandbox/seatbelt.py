@@ -15,7 +15,7 @@ nexus/research/2026-10-19-layer1-policy-sandbox-L1):
 
 Known gap: a confined process can still read the arguments and environment of
 other processes run by the same user (sysctl KERN_PROCARGS2); no Seatbelt rule
-tried blocked it. Running under a separate uid does: see verifier_account.py.
+tried blocked it. Running under a separate uid does: see cairnwork/verifier_account.py.
 
 File metadata (stat) is readable everywhere: Python cannot start without it.
 That leaks names, sizes and times, not contents. Seatbelt is a macOS tool
@@ -24,13 +24,13 @@ Apple documents as legacy; it confines, it is not a portable production sandbox.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import subprocess
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+from cairnwork_sandbox.backend import Policy, SandboxError
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _SAFE = re.compile(r"^/[A-Za-z0-9 _./+@~-]*$")
@@ -58,20 +58,8 @@ CREDENTIAL_HOME_PATHS = (
 )
 
 
-class SandboxError(Exception):
-    code = "SANDBOX_ERROR"
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(f"{self.code}: {detail}")
-
-
-@dataclass(frozen=True)
-class Profile:
-    text: str
-
-    @property
-    def sha256(self) -> str:
-        return hashlib.sha256(self.text.encode()).hexdigest()
+# Seatbelt calls its policy a profile; the type is the backend-neutral Policy.
+Profile = Policy
 
 
 @lru_cache(maxsize=1)
@@ -195,3 +183,33 @@ def _require_narrow(root: str, real_home: str) -> None:
 
 def wrap(argv: list[str], profile_path: Path) -> list[str]:
     return [SANDBOX_EXEC, "-f", str(profile_path), *argv]
+
+
+ALLOW_ALL = "(version 1) (allow default)"
+
+
+class SeatbeltBackend:
+    """The Backend interface over this module. Methods look the module functions up at call
+    time, so a test that monkeypatches e.g. ``available`` here changes what callers see."""
+
+    name = "seatbelt"
+
+    def available(self) -> bool:
+        return available()
+
+    def policy(
+        self,
+        read_roots: tuple[Path, ...],
+        write_roots: tuple[Path, ...],
+        home: Path | None = None,
+    ) -> Policy:
+        return build_profile(read_roots, write_roots, home)
+
+    def wrap(self, argv: list[str], policy_path: Path) -> list[str]:
+        return wrap(argv, policy_path)
+
+    def unconfined(self, argv: list[str]) -> list[str]:
+        return [SANDBOX_EXEC, "-p", ALLOW_ALL, *argv]
+
+
+BACKEND = SeatbeltBackend()
