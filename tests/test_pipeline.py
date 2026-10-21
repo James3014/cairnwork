@@ -8,6 +8,7 @@ from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskRejected, TaskSpec, run_task
+from cairnwork.verifiers import protected_verifier_inputs
 
 VERIFY = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_calc.py")),)
 
@@ -152,6 +153,7 @@ def test_bad_tasks_are_rejected_before_anything_runs(project, stores, tmp_path, 
 
 
 def test_submit_path_refuses_everything_the_issue_path_protects(project, stores, tmp_path):
+    sampled: set[str] = set()
     rules = [r.replace("*", "x") for r in (*PROTECTED_PATHS, *PROTECTED_NAMES)]
     for path in (
         *rules,
@@ -161,7 +163,10 @@ def test_submit_path_refuses_everything_the_issue_path_protects(project, stores,
         assert is_protected(path)
         with pytest.raises(TaskRejected) as info:
             go(project, stores, tmp_path, CrashWorker(), allowed=(path,))
-        assert info.value.code in {"TASK_ALLOWED_FILES_PROTECTED", "PROTECTED_VERIFIER_INPUT"}, path
+        earlier = "PROTECTED_VERIFIER_INPUT" if protected_verifier_inputs((path,)) else None
+        assert info.value.code == (earlier or "TASK_ALLOWED_FILES_PROTECTED"), path
+        sampled.add(info.value.code)
+    assert sampled == {"TASK_ALLOWED_FILES_PROTECTED", "PROTECTED_VERIFIER_INPUT"}
 
 
 class ChmodWorker:
