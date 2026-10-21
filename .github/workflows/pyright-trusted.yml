@@ -5,11 +5,17 @@
 # is never imported, installed or run by us. Dependencies and the gate script come from the
 # default branch. The analysis job has contents:read only; the job that holds statuses:write
 # never touches PR content and echoes only fixed strings.
+#
+# Limits: (a) a same-repository PR can add its own workflow that posts a fake "pyright (trusted)"
+# status; Actions alone cannot prevent that, but it is visible in the diff and workflow changes
+# are high-risk (independent plus cross-model review). (b) A PR that adds dependencies is
+# analyzed with main's lockfile and may need a deps-only PR first. (c) Advancing main does not
+# re-run this check (strict policy is off, same as the other required checks).
 name: pyright-trusted
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
     branches: [main]
 
 concurrency:
@@ -42,10 +48,12 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
+          enable-cache: false
       - name: Pyright on the merge base and on the head
         id: gate
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           rc=0
           trusted/scripts/ci/pyright_trusted.sh trusted head "$BASE_SHA" "$RUNNER_TEMP/work" || rc=$?
