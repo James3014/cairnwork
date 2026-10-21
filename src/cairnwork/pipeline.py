@@ -29,6 +29,7 @@ from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
 from cairnwork.deferred_tests import (
     TestCommitRejected,
+    check_roots_on_base,
     ensure_test_commit,
     failed_on_base,
     lay_tests_over,
@@ -37,10 +38,10 @@ from cairnwork.deferred_tests import (
     test_paths,
 )
 from cairnwork.gitcmd import OID
-from cairnwork.issue_task import is_protected
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
+from cairnwork.protected_paths import path_refusal
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -78,6 +79,7 @@ class TaskSpec:
     verifiers: tuple[tuple[str, tuple[str, ...]], ...]
     allow_deletions: bool = False
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
+    test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -120,34 +122,29 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
         raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
     if task.test_commit and not OID.fullmatch(str(task.test_commit)):
         raise TaskRejected("BAD_TEST_COMMIT", "test_commit must be a 40-hex commit id")
-    if not task.allowed_files or len(set(task.allowed_files)) > 10:
+    files = task.allowed_files
+    if not isinstance(files, (tuple, list)) or not files or len(files) > 10:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
-    if len(set(task.allowed_files)) != len(task.allowed_files):
+    blocked: list[str] = []
+    for path in files:  # entries are checked before any set() so a malformed one cannot crash
+        refusal = path_refusal(path)
+        if refusal:
+            if refusal[0] == "TASK_ALLOWED_FILES_INVALID":
+                raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
+            blocked.append(path)
+    if len(set(files)) != len(files):
         raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
-    for path in task.allowed_files:
-        if not _clean_relative_path(path):
-            raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
-    protected = protected_verifier_inputs(task.allowed_files)
+    protected = protected_verifier_inputs(task.allowed_files, task.test_roots)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
-    if blocked := [p for p in task.allowed_files if is_protected(p)]:
+    if blocked:
         raise TaskRejected("TASK_ALLOWED_FILES_PROTECTED", ", ".join(blocked))
     try:
-        return tuple(parse_verifier(vid, list(argv)) for vid, argv in task.verifiers)
+        return tuple(
+            parse_verifier(vid, list(argv), task.test_roots) for vid, argv in task.verifiers
+        )
     except VerifierRejected as exc:
         raise TaskRejected(exc.code, str(exc)) from exc
-
-
-def _clean_relative_path(path: object) -> bool:
-    if not isinstance(path, str) or not path or path != path.strip():
-        return False
-    parts = path.split("/")
-    return (
-        not path.startswith("/")
-        and all(part not in ("", ".", "..") for part in parts)
-        and all(part.lower() != ".git" for part in parts)
-        and not any(ord(ch) < 32 or ch == "\\" for ch in path)
-    )
 
 
 def run_task(
@@ -246,8 +243,9 @@ class _Steps:
 def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
     """Check a task's deferred tests once the worker is done: plain test files on the
     base whose test cases really fail there. Returns their paths."""
+    check_roots_on_base(task.repo, task.base_commit, task.test_roots)  # before any base run
     ensure_test_commit(task.repo, task.test_commit)
-    paths = test_paths(task.repo, task.base_commit, task.test_commit)
+    paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
     targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse
     runs = run_verifiers(
         task.repo,
@@ -326,6 +324,11 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except TestCommitRejected as exc:
             result.reason = str(exc)
             return
+    try:
+        check_roots_on_base(task.repo, task.base_commit, task.test_roots)
+    except TestCommitRejected as exc:
+        result.reason = str(exc)
+        return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:

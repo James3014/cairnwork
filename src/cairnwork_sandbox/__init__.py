@@ -2,8 +2,8 @@
 
 The Cairnwork core calls only ``select()`` / ``platform_backend()`` and the ``Backend``
 interface (backend.py). This package must not import the core: only the core calls it.
-Today the only backend is macOS Seatbelt (seatbelt.py); on any other platform there is
-no backend, and callers fail closed (nothing runs unconfined).
+Backends: macOS Seatbelt (seatbelt.py) and Linux bubblewrap (bwrap.py); on any other
+platform there is no backend, and callers fail closed (nothing runs unconfined).
 """
 
 from __future__ import annotations
@@ -21,6 +21,10 @@ def platform_backend() -> Backend | None:
         from cairnwork_sandbox import seatbelt
 
         return seatbelt.BACKEND
+    if sys.platform.startswith("linux"):
+        from cairnwork_sandbox import bwrap
+
+        return bwrap.BACKEND
     return None
 
 

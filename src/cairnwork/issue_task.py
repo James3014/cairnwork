@@ -18,7 +18,6 @@ edit after that event are trusted actors, and the edit history is complete.
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import json
 import re
@@ -26,15 +25,19 @@ import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import Any
+
+from cairnwork.protected_paths import (  # noqa: F401  (re-exported)
+    PROTECTED_NAMES,
+    PROTECTED_PATHS,
+    is_protected,
+    path_refusal,
+)
 
 TASK_FENCE = re.compile(r"```eia-task[ \t]*\n(.*?)\n```", re.DOTALL)
 ANY_FENCE = re.compile(r"```[A-Za-z0-9_-]*-contract\b")
-SAFE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
-TEST_TARGET = re.compile(
-    r"tests/(?:[A-Za-z0-9_\-]+/)*[A-Za-z0-9_\-]+\.py(?:::[A-Za-z0-9_\[\]\-]+)*"
-)
+DEFAULT_TEST_ROOTS = ("tests",)
+_ROOT = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_\-]*/)*(?:tests|test)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MAX_ALLOWED_FILES = 10
 KEYS = frozenset(
@@ -47,39 +50,6 @@ KEYS = frozenset(
         "summary",
         "test_commit",
     }
-)
-PROTECTED_PATHS = (
-    ".github",
-    ".nexus-core",
-    ".gitmodules",
-    "docs/governance",
-    "docs/agents",
-    "docs/testing/test_impact_map.md",
-    "tasks",
-    "pyproject.toml",
-    "uv.lock",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "GEMINI.md",
-    "MUSE_PROTO.md",
-    "nexus/services/external_intelligence*",
-    "scripts/ops/trusted_*",
-    "scripts/ops/external_intelligence*",
-    "scripts/ops/eia_nightly*",
-    "scripts/ops/com.nexus.eia-nightly*",
-    "pytest.ini",
-    "setup.cfg",
-    "tox.ini",
-    "policy",
-    "Makefile",
-)
-PROTECTED_NAMES = (
-    "conftest.py",
-    "sitecustomize.py",
-    "governance_baseline_manifest*.json",
-    "taskfile*",
-    "makefile",
-    ".pre-commit-config*",
 )
 _LATEST = datetime.max.replace(tzinfo=UTC)
 TRUSTED_ACTORS = frozenset({"James3014", "james3014-nexus-agent[bot]"})
@@ -101,7 +71,7 @@ class IssueTask:
     test_commit: str = ""  # deferred tests (cairnwork.deferred_tests)
 
 
-def parse_task_block(body: str) -> IssueTask:
+def parse_task_block(body: str, roots: tuple[str, ...] = DEFAULT_TEST_ROOTS) -> IssueTask:
     blocks = TASK_FENCE.findall(body or "")
     if len(blocks) != 1:
         raise IssueRefused("TASK_BLOCK_REQUIRED", "exactly one ```eia-task block")
@@ -140,7 +110,7 @@ def parse_task_block(body: str) -> IssueTask:
     return IssueTask(
         difficulty=difficulty,
         allowed_files=tuple(files),
-        verifiers=tuple(pytest_argv(c) for c in commands),
+        verifiers=tuple(pytest_argv(c, roots) for c in commands),
         summary=" ".join(summary.split())[:400],
         block_sha256=hashlib.sha256(blocks[0].encode()).hexdigest(),
         test_commit=test_commit,
@@ -148,31 +118,36 @@ def parse_task_block(body: str) -> IssueTask:
 
 
 def _check_path(path: Any) -> None:
-    if not isinstance(path, str) or not SAFE_PATH.fullmatch(path):
-        raise IssueRefused("TASK_ALLOWED_FILES_INVALID", repr(path))
-    parts = PurePosixPath(path).parts
-    if PurePosixPath(path).as_posix() != path or any(p.startswith(".") for p in parts):
-        raise IssueRefused("TASK_ALLOWED_FILES_INVALID", path)
-    if is_protected(path):
-        raise IssueRefused("TASK_ALLOWED_FILES_PROTECTED", path)
+    refusal = path_refusal(path)
+    if refusal:
+        raise IssueRefused(*refusal)
 
 
-def is_protected(path: str) -> bool:
-    low = path.casefold()
-    name = PurePosixPath(low).name
-    if any(fnmatch.fnmatchcase(name, pattern) for pattern in PROTECTED_NAMES):
-        return True
-    for rule in (r.casefold() for r in PROTECTED_PATHS):
-        if rule.endswith("*"):
-            if low.startswith(rule[:-1]):
-                return True
-        elif low == rule or low.startswith(rule + "/"):
-            return True
-    return False
+def test_target(roots: tuple[str, ...]) -> re.Pattern[str]:
+    """A verifier target: a .py file under one of the test roots, with optional ::node ids."""
+    top = "|".join(map(re.escape, roots))
+    name = r"[A-Za-z0-9_\-]+"
+    return re.compile(rf"(?:{top})/(?:{name}/)*{name}\.py(?:::[A-Za-z0-9_\[\]\-]+)*")
 
 
-def pytest_argv(command: Any) -> tuple[str, ...]:
-    """``python3 -m pytest [-q] [-p no:cacheprovider] tests/...``; anything else is refused."""
+def check_test_roots(roots: Any) -> tuple[str, ...]:
+    """The state config's ``test_roots``: 1 to 8 distinct directories, written as clean
+    relative paths of plain names (no glob, dot, empty or ``-`` leading part) whose last part
+    is ``tests`` or ``test`` (so a root never holds production code), outside protected paths."""
+    if (
+        not isinstance(roots, list)
+        or not 0 < len(roots) <= 8
+        or len(set(map(str, roots))) < len(roots)
+    ):
+        raise ValueError(f"test_roots must be 1-8 distinct directory paths, got {roots!r}")
+    for root in roots:
+        if not (isinstance(root, str) and _ROOT.fullmatch(root)) or is_protected(root):
+            raise ValueError(f"test_roots entry {root!r} is not a clean unprotected directory")
+    return tuple(roots)
+
+
+def pytest_argv(command: Any, roots: tuple[str, ...] = DEFAULT_TEST_ROOTS) -> tuple[str, ...]:
+    """``python3 -m pytest [-q] [-p no:cacheprovider] <root>/...``; anything else is refused."""
     try:
         argv = shlex.split(command) if isinstance(command, str) else []
     except ValueError as exc:
@@ -181,13 +156,13 @@ def pytest_argv(command: Any) -> tuple[str, ...]:
         argv = ["python3", *argv[1:]]
     if argv[:3] != ["python3", "-m", "pytest"]:
         raise IssueRefused("TASK_VERIFICATION_UNSUPPORTED", command)
-    rest, targets = argv[3:], []
+    rest, targets, target = argv[3:], [], test_target(roots)
     while rest:
         if rest[0] == "-q":
             rest = rest[1:]
         elif rest[:2] == ["-p", "no:cacheprovider"]:
             rest = rest[2:]
-        elif TEST_TARGET.fullmatch(rest[0]):
+        elif target.fullmatch(rest[0]):
             targets.append(rest.pop(0))
         else:
             raise IssueRefused("TASK_VERIFICATION_UNSUPPORTED", command)
