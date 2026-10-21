@@ -2,7 +2,8 @@
 
 Every command prints one JSON object on stdout. Exit codes: 0 done; 2 refused
 (``{"error": code, "detail": ...}``: not accepting, bad request, not cancellable,
-recovery busy, key reused, card already active); 3 unknown task; 1 anything else,
+recovery busy, key reused, card already active, REPLAY_FORBIDDEN,
+RECONCILIATION_REQUIRED); 3 unknown task; 1 anything else,
 including a recovery that could not settle every task. Only NOT_ACCEPTING means
 "not taken, the old system may run it"; after any other answer the caller must
 not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
@@ -25,11 +26,14 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
+from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
     KeyReusedWithDifferentRequest,
     OwnerMismatch,
     OwnershipUnknown,
+    ReconciliationRequired,
+    ReplayForbidden,
 )
 from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
@@ -51,8 +55,16 @@ def main(argv: list[str] | None = None) -> int:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except RunLockBusy as exc:
         return _emit({"error": exc.code, "detail": "a runner is still working"}, 2)
-    except (KeyReusedWithDifferentRequest, DuplicateLogicalTask, OwnerMismatch) as exc:
+    except (
+        KeyReusedWithDifferentRequest,
+        DuplicateLogicalTask,
+        OwnerMismatch,
+    ) as exc:
         return _emit({"error": type(exc).__name__, "detail": str(exc)}, 2)
+    except JournalIntegrityViolation as exc:
+        return _emit({"error": exc.code, "detail": str(exc)}, 1)
+    except (ReplayForbidden, ReconciliationRequired) as exc:
+        return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
     stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
