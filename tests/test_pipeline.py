@@ -194,3 +194,18 @@ def test_bad_base_commit_is_rejected_before_binding(project, stores, tmp_path):
             run_root=tmp_path / "r",
         )
     assert info.value.code == "BAD_BASE"
+
+
+def test_unbound_core_response_reports_its_reason_not_core_verified(project, tmp_path):
+    from product.protocol import core_identity
+
+    pinned = {**core_identity(), "version": "pinned-elsewhere"}
+    stores = (
+        OwnershipLedger(tmp_path / "own.sqlite"),
+        Notary(tmp_path / "notary.sqlite", core_identity=pinned),
+        Journal(tmp_path / "journal.sqlite"),
+    )
+    fix = EditWorker({"src/calc.py": "def add(a, b):\n    return a + b\n"})
+    result = go(project, stores, tmp_path, fix)
+    assert result.status == "FAILED" and not result.verified
+    assert result.reason == "CORE_IDENTITY_MISMATCH"

@@ -229,3 +229,24 @@ def test_proxy_settings_are_ignored(tmp_path, monkeypatch):
 def test_userinfo_with_only_a_password_is_refused():
     with pytest.raises(CoreHttpError):
         check_core_url("http://:pw@127.0.0.1:1")
+
+
+@pytest.mark.parametrize(
+    ("echoed", "expected", "problem"),
+    [
+        ({"git_dirty": False}, {"git_dirty": False}, None),
+        ({"git_dirty": 0}, {"git_dirty": False}, ours.IDENTITY_MISMATCH),
+        ({"git_dirty": True}, {"git_dirty": 1}, ours.IDENTITY_MISMATCH),
+        ({"n": 1.0}, {"n": 1}, ours.IDENTITY_MISMATCH),
+    ],
+    ids=["same", "zero-is-not-false", "one-is-not-true", "float-is-not-int"],
+)
+def test_core_identity_is_compared_type_exactly(echoed, expected, problem):
+    manifest = {"source_tree": "git-tree:a", "target_tree": "git-tree:b", "entries": []}
+    response = {
+        "hashes": {"change_manifest_hash": ours.change_manifest_hash(manifest)},
+        "core_identity": echoed,
+    }
+    assert (
+        ours.response_binding_problem({"change_manifest": manifest}, response, expected) == problem
+    )
