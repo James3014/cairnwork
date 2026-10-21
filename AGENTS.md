@@ -33,7 +33,7 @@ Run the sandbox tests for real on macOS: `CAIRNWORK_REQUIRE_SANDBOX=1 uv run pyt
 
 ## Merging
 
-Same as the other Nexus repos: independent review (either a record from a Claude-family agent that is not the author, named in the record, or a submitted GitHub APPROVED review by a human maintainer; high-risk paths additionally need a cross-model Codex or Gemini record), review record posted on the PR with head SHA and verdict, required checks green, then the author merges with `gh pr merge N --squash --match-head-commit <sha>`. PR bodies carry the NEXUS_ISSUE_INTENT_V1 block when they close an Issue.
+Same as the other Nexus repos: independent review (either a record from a Claude-family agent that is not the author, named in the record, or a submitted GitHub APPROVED review by a human maintainer; high-risk paths additionally need a cross-model Codex or Gemini record), every review record posted on the PR as a comment with head SHA and verdict (a human APPROVED review counts as the independent review itself), required checks green, then the author merges with `gh pr merge N --squash --match-head-commit <sha>`. PR bodies carry the NEXUS_ISSUE_INTENT_V1 block when they close an Issue.
 
 ### PR body and review record
 
@@ -58,7 +58,7 @@ Same as the other Nexus repos: independent review (either a record from a Claude
 
 ### Required checks and merging
 
-- The ruleset requires `test (3.11)`, `test (3.12)`, `test (3.13)`, `test-macos`, `Review record present (advisory)` and `Bindings preflight (default branch)`. Other jobs (`pyright`, `hypothesis`, CodeQL) are not required but should not be red without a written disposition (pre-existing or accepted) in the review record.
+- The ruleset requires `test (3.11)`, `test (3.12)`, `test (3.13)`, `test-macos`, `Review record present (advisory)` and `Bindings preflight (default branch)`. Other jobs (`pyright`, `hypothesis`, CodeQL) are not required but should not be red without a written disposition (pre-existing or accepted) in a PR comment (the review record, or a separate comment when the independent review is a human APPROVED review).
 - When the required checks are green, merge with `gh pr merge N --squash --match-head-commit <head sha>`. A transient 502 may still have started the merge, and an immediate retry then says it is already in progress: poll the PR state until `MERGED` instead of retrying blindly.
 - After merging, delete the remote branch and remove your worktree.
 
