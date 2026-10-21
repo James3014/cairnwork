@@ -38,7 +38,12 @@ from cairnwork import runlock
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import InvalidStatusTransition, OwnershipLedger, OwnershipUnknown
+from cairnwork.ownership import (
+    OWNER,
+    InvalidStatusTransition,
+    OwnershipLedger,
+    OwnershipUnknown,
+)
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
@@ -236,7 +241,7 @@ class Intake:
             _mirror_base(task.repo, source, task.base_commit)  # new work only, under the lock
         fd = runlock.shared_fd(ledger.path)
         try:
-            bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
+            bound = ledger.bind(task.idempotency_key, task.request(), OWNER, task.card_hash)
             record = bound.record
             if not bound.duplicate:
                 try:
@@ -315,7 +320,8 @@ class Intake:
         """Only a task that has not started can be cancelled; a running one finishes.
         Compare-and-set: a runner that dispatched first wins, cancel is refused."""
         ledger = self.ledger
-        ledger.get(task_id=task_id)  # UnknownTask before anything else
+        if ledger.get(task_id=task_id).owner != OWNER:  # UnknownTask first; not ours: refused
+            raise IntakeRefused("OWNER_MISMATCH", f"{task_id} is not owned by {OWNER!r}")
         try:
             record = ledger.set_status(task_id, "CANCELLED", expected_from="BOUND")
         except InvalidStatusTransition as exc:

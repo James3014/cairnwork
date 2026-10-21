@@ -112,6 +112,13 @@ def test_bad_config_is_refused(intake):
         intake.config()
 
 
+def test_cancel_refuses_a_task_another_owner_holds_and_leaves_it_bound(intake):
+    task = intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    with pytest.raises(IntakeRefused, match="OWNER_MISMATCH"):
+        intake.cancel(task)
+    assert intake.status(task_id=task)["status"] == "BOUND"
+
+
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first
