@@ -163,7 +163,8 @@ class AgyWorker:
         if reader is not None:
             agy_dispatch.raise_if_exhausted(reader.status(), process.returncode, log_path)
         if process.returncode != 0:
-            raise AgyWorkerError(f"agy exited {process.returncode}; log {log_path}")
+            why = f"; {reader.describe()}" if reader is not None else ""
+            raise AgyWorkerError(f"agy exited {process.returncode}{why}; log {log_path}")
 
 
 def _feed(process, prompt: str) -> None:

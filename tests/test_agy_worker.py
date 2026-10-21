@@ -323,3 +323,62 @@ def test_a_file_named_like_an_option_stays_a_value(tmp_path):
     )
     worker.run(workdir, task)
     assert "--write-path=-x.py" in json.loads(seen.read_text())
+
+
+def test_the_error_names_the_dispatchers_status_and_failure_kind(tmp_path):
+    body = (
+        "sys.stderr.write('NEXUS_AGY_DISPATCH "
+        '{"status": "failed", "failure_kind": "AGY_WRITE_PATH_OUTSIDE_CWD"}\\n\')\n'
+        "sys.exit(2)"
+    )
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyWorkerError, match=r"exited 2.*failed.*AGY_WRITE_PATH_OUTSIDE_CWD"):
+        worker.run(workdir, TASK)
+
+
+def test_an_error_without_a_status_line_says_so(tmp_path):
+    worker, workdir, _ = _dispatched(tmp_path, "sys.exit(3)")
+    with pytest.raises(AgyWorkerError, match="exited 3; no dispatcher status"):
+        worker.run(workdir, TASK)
+
+
+def test_a_failing_stderr_read_keeps_draining_and_marks_the_status_unknown():
+    import io
+
+    from cairnwork.workers.agy_dispatch import StatusReader
+
+    class Flaky(io.BytesIO):
+        failed = False
+
+        def readline(self, size: int | None = -1):
+            if not self.failed:
+                self.failed = True
+                raise OSError("boom")
+            return super().readline(size)
+
+    stream = Flaky(b'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\n')
+    reader = StatusReader(stream)
+    reader.run()
+    assert reader.unknown and "unknown" in reader.describe()
+    assert reader.status() == {"status": "pool_exhausted"}  # it kept draining
+
+
+def test_a_reader_that_is_still_alive_counts_as_holding_the_output(tmp_path):
+    import threading
+    import time
+
+    from cairnwork.workers.agy import _stop
+
+    class P:
+        pid = 2**22 + 12345  # no such group
+
+        def wait(self):
+            pass
+
+    copier = threading.Thread(target=lambda: None)
+    copier.start()
+    copier.join()
+    stuck = threading.Thread(target=time.sleep, args=(3,), daemon=True)
+    stuck.start()
+    stuck.join = lambda timeout=None: None  # type: ignore[method-assign]
+    assert _stop(P(), copier, "attempt-x", stuck) is True

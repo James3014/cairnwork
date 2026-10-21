@@ -73,11 +73,29 @@ class StatusReader(threading.Thread):
         super().__init__(daemon=True)
         self.stream = stream
         self.last = b""
+        self.unknown = False  # a read failed: the status may be missing or stale
 
     def run(self) -> None:
-        for line in iter(lambda: self.stream.readline(STATUS_LINE_BYTES), b""):
+        failures = 0
+        while failures < 3:
+            try:
+                line = self.stream.readline(STATUS_LINE_BYTES)
+            except Exception:  # noqa: BLE001 - keep draining so the dispatcher never blocks
+                failures += 1
+                self.unknown = True
+                continue
+            if not line:
+                return
             if line.startswith(STATUS_PREFIX.encode()):
                 self.last = line
+
+    def describe(self) -> str:
+        """For error messages: the dispatcher's final status and failure kind, bounded."""
+        if self.unknown:
+            return "dispatcher status unknown (stderr read failed)"
+        status = self.status()
+        shown = {k: str(status.get(k))[:100] for k in ("status", "failure_kind") if k in status}
+        return f"dispatcher status {shown}" if shown else "no dispatcher status"
 
     def status(self) -> dict:
         return read_status(self.last.decode("utf-8", "replace"))
