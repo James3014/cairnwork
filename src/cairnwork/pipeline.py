@@ -37,6 +37,7 @@ from cairnwork.deferred_tests import (
     test_paths,
 )
 from cairnwork.gitcmd import OID
+from cairnwork.issue_task import is_protected
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
@@ -129,6 +130,8 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
     protected = protected_verifier_inputs(task.allowed_files)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
+    if blocked := [p for p in task.allowed_files if is_protected(p)]:
+        raise TaskRejected("TASK_ALLOWED_FILES_PROTECTED", ", ".join(blocked))
     try:
         return tuple(parse_verifier(vid, list(argv)) for vid, argv in task.verifiers)
     except VerifierRejected as exc:
