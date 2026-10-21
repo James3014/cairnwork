@@ -18,14 +18,26 @@ A repo is ENV_OK when its green tests stay green under the sandbox, ENV_COUPLING
 they pass bare but fail under the sandbox (the reason is classified from the verifier
 log), and REPO_TESTS_NOT_GREEN when they do not pass bare — in which case the repo
 cannot serve as an environment probe at all.
+
+Scope and honest limits:
+- This probes the ``account=None`` path (same uid as the caller). Couplings that only
+  appear when verification runs under a separate ``VerifierAccount`` (a different uid) —
+  notably git ``safe.directory`` ownership and file-permission handoffs — are NOT covered
+  here and can still surface on a real dispatch. A cross-uid probe is route (b), deferred.
+- The bare run happens first and in no sandbox, so a test that writes a global resource
+  (a fixed host port, ``/tmp/app.sock``, a shared cache) can leave state the sandbox run
+  then reuses; and parallel probes can contend on such fixed resources. Keep tests
+  hermetic, or lower ``workers`` / run serially when they are not.
 """
 
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextlib
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -71,8 +83,8 @@ def _head(repo: Path) -> str:
 def _bare_is_green(probe: RepoProbe, commit: str, run_root: Path, timeout: int) -> bool | None:
     """Run the repo's tests with no sandbox in a clean checkout. None if it times out.
 
-    The timeout kills only the direct child; a test that spawns a detached daemon can outlive it.
-    That is acceptable for a manual onboarding probe."""
+    Runs in its own session and, on timeout, kills the whole process group, so a test that
+    spawns a background process does not leave an orphan holding the checkout open."""
     clone_id = f"bare-{secrets.token_hex(6)}"
     checkout = create_attempt_clone(probe.repo, commit, run_root, clone_id)
     home = run_root / f"home-{secrets.token_hex(6)}"
@@ -86,15 +98,24 @@ def _bare_is_green(probe: RepoProbe, commit: str, run_root: Path, timeout: int) 
     )
     env.update(HOME=str(home), TMPDIR=str(home), PYTHONDONTWRITEBYTECODE="1")
     argv = [probe.python, "-m", "pytest", "-q", *probe.targets]
+    process = subprocess.Popen(  # noqa: S603 - argv from parse_verifier shape, no shell
+        argv,
+        cwd=checkout.path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     try:
-        done = subprocess.run(  # noqa: S603 - argv from parse_verifier shape, no shell
-            argv, cwd=checkout.path, env=env, capture_output=True, timeout=timeout, check=False
-        )
+        process.wait(timeout=timeout)
+        return process.returncode == 0
     except subprocess.TimeoutExpired:
         return None
     finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        process.wait()
         remove_attempt_clone(run_root, clone_id)
-    return done.returncode == 0
 
 
 def probe_repo(probe: RepoProbe, *, timeout: int = 300) -> ProbeResult:
@@ -160,6 +181,9 @@ def _scrub(path: Path) -> None:
 
 def main(argv: list[str]) -> int:
     # Each argument: <repo>::<python>::<tests/a.py,tests/b.py>
+    if not argv:
+        print("usage: env_smoke.py <repo>::<python>::<tests/a.py,tests/b.py> ...", file=sys.stderr)
+        return 2  # no probes is a usage error, not a clean "everything OK"
     probes = []
     for item in argv:
         repo, python, targets = item.split("::", 2)
