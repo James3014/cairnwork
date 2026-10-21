@@ -66,7 +66,7 @@
 
 ## 驗證別處產生的 commit：`cairnwork-verify`
 
-候選 commit 不是 Cairnwork 的 worker 做的（例如另一個 agent 或 CI 產生）時，用同一套檢查判定它（程式在核心之外的 `src/cairnwork_verify/`，核心不會 import 它）：
+候選 commit 不是 Cairnwork 的 worker 做的（例如另一個 agent 或 CI 產生）時，用同一套檢查判定它（程式是核心的一部分：`src/cairnwork/verify_candidate.py` 與 `verify_cli.py`）：
 
 ```
 cairnwork-verify --state DIR run --repo-path P --base SHA --candidate SHA \
