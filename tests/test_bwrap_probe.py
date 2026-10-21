@@ -21,6 +21,17 @@ def test_available_is_false_without_bwrap(monkeypatch):
         bwrap.available.cache_clear()
 
 
+def test_relative_bwrap_path_is_refused(monkeypatch):
+    # A relative PATH entry would make wrap() run a candidate-planted ./bin/bwrap (Popen uses
+    # cwd=checkout). bwrap_path must fail closed rather than hand back a relative program.
+    monkeypatch.setattr(bwrap.shutil, "which", lambda _name: "bin/bwrap")
+    bwrap.bwrap_path.cache_clear()
+    try:
+        assert bwrap.bwrap_path() is None
+    finally:
+        bwrap.bwrap_path.cache_clear()
+
+
 def test_wrap_and_unconfined_fail_closed_without_bwrap(monkeypatch):
     monkeypatch.setattr(bwrap, "bwrap_path", lambda: None)
     with pytest.raises(SandboxError):
@@ -66,6 +77,21 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
         assert lines[tmpfs - 1] == "--tmpfs" and tmpfs > bind
     netrc = lines.index(f"{real_home}/.netrc")
     assert lines[netrc - 2 : netrc + 1] == ["--ro-bind", "/dev/null", f"{real_home}/.netrc"]
+
+
+def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
+    # A reachable Docker/Podman/containerd socket is root-equivalent and a read-only root bind
+    # does not stop connect(), so an existing one is replaced with /dev/null; an absent one adds
+    # no flag (a bind over a missing path would fail on the read-only root).
+    home = _home(tmp_path)
+    present = tmp_path / "docker.sock"
+    present.write_text("")  # stands in for the socket inode
+    absent = tmp_path / "podman.sock"
+    monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", (str(present), str(absent)))
+    lines = bwrap.BACKEND.policy((), (), home=home).text.splitlines()
+    masked = lines.index(str(present))
+    assert lines[masked - 2 : masked + 1] == ["--ro-bind", "/dev/null", str(present)]
+    assert str(absent) not in lines
 
 
 def test_absent_credentials_are_not_masked(tmp_path):

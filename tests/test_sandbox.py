@@ -174,11 +174,15 @@ def test_a_process_that_leaves_the_group_is_contained(project, tmp_path):
     """A child that escapes the run's process group (start_new_session) must not outlive
     the run and do work. The backends reach that end differently: Seatbelt cannot reap an
     escaped session, so it sweeps the survivor by its run token and fails the run (so a
-    worker that leaves a process behind gets no passing verdict); bwrap's PID namespace
-    SIGKILLs the escapee when the verifier (the namespace's init) exits, so nothing is left
-    to sweep and the run may pass. The invariant both enforce is that the escape does no
-    work — it never writes the marker. (Failing the run on bwrap too is the P3 reaper
-    follow-up, not a security gap: the escape is already dead.)"""
+    worker that leaves a process behind gets no passing verdict); under bwrap the escapee
+    stays in the PID namespace and is SIGKILLed when the namespace tears down, so nothing is
+    left to sweep and the run may pass (see docs/SECURITY.md).
+
+    This witness asserts the invariant both enforce: the escape writes no marker. The marker
+    path is outside the write roots, so on bwrap the read-only root alone already forbids the
+    write — this assertion does not by itself exercise the PID-namespace kill (the write-outside
+    and no-network witnesses, plus the SECURITY.md reasoning, cover that). Making bwrap also
+    fail the run, and a witness that proves the kill directly, are P3 follow-ups."""
     marker = tmp_path / "late"
     child = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('x')"
     code = (

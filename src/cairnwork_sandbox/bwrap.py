@@ -3,12 +3,15 @@
 The policy is a read-only bind of the whole root plus read-write binds for the write roots,
 with a fresh /dev and /proc, every namespace unshared (so no network), all capabilities
 dropped and nested user namespaces disabled. Named credential directories under $HOME are
-emptied with a tmpfs and credential files are replaced by /dev/null.
+emptied with a tmpfs and credential files are replaced by /dev/null, and root-equivalent
+daemon sockets (Docker/Podman/containerd) are replaced by /dev/null — a read-only root bind
+does not stop connect() to a pathname socket, which no network namespace covers.
 
 Trade-off (documented in docs/SECURITY.md): until the verifier runs under its own account
 (P4) the sandbox runs as the invoking account, so everything that account can read is
-readable inside; only the named credential list is masked. Other users' 0700 home
-directories are protected by POSIX permissions. This is not a complete read isolation.
+readable inside; only the named credential list and daemon sockets are masked. Other users'
+0700 home directories are protected by POSIX permissions. This is not complete read isolation,
+and the general pathname-socket surface under the whole-root bind closes only with P4.
 
 On Ubuntu 24.04+ an AppArmor rule restricts unprivileged user namespaces by default:
 ``unshare(CLONE_NEWUSER)`` still succeeds but the new namespace holds no capabilities, so
@@ -17,7 +20,9 @@ mounting a fresh ``/proc`` or a bind fails. Lifting ``kernel.apparmor_restrict_u
 confinement work.
 
 ``available()`` probes with a real run: unshare a user and pid namespace with every
-capability dropped, bind the root read-only and mount a fresh ``/proc``, then run ``true``.
+capability dropped and nested userns disabled, bind the root read-only and mount a fresh
+``/proc``, then run ``true`` — the same hardening the real policy uses, so a build that
+rejects one of these flags fails the probe instead of passing it and erroring on the real run.
 The probe always mounts ``/proc`` on purpose: a probe that only binds the root passes on a
 host where a nested ``/proc`` still fails, which would turn a dead backend into a false green.
 When bwrap is missing or broken, callers run nothing (there is no unconfined fallback).
@@ -62,16 +67,42 @@ _CRED_DIRS = (
     ".gemini",
     ".nexus",
     ".local/state",
+    ".local/share/keyrings",  # gnome-keyring login keyring
+    ".terraform.d",
 )
-_CRED_FILES = (".netrc",)
+_CRED_FILES = (
+    ".netrc",
+    ".git-credentials",  # plaintext git tokens
+    ".npmrc",  # npm publish token
+    ".pypirc",  # PyPI token
+    ".pgpass",  # PostgreSQL password file
+    ".my.cnf",  # MySQL client password
+    ".vault-token",  # HashiCorp Vault token
+)
+# Daemon sockets that, left reachable, grant a candidate the host even with no network
+# namespace: a read-only bind does not stop ``connect()`` to a pathname AF_UNIX socket, and
+# the Docker/Podman/containerd API is root-equivalent. Replaced with /dev/null so connect
+# fails. (This is the known-dangerous set; the general pathname-socket surface under the
+# whole-root bind closes only with the P4 dedicated account — see docs/SECURITY.md.)
+_DANGEROUS_SOCKETS = (
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/var/run/podman/podman.sock",
+    "/run/podman/podman.sock",
+    "/run/containerd/containerd.sock",
+    "/var/run/containerd/containerd.sock",
+)
 
-# Unshare a user + pid namespace, drop all capabilities, bind the root read-only, mount a
-# fresh /proc, run true. Exit 0 means bwrap can build a confining namespace on this host.
+# Unshare a user + pid namespace, drop all capabilities, disable nested userns, bind the root
+# read-only, mount a fresh /proc, run true. Exit 0 means bwrap can build a confining namespace
+# here with the same hardening flags the real policy uses (so a build that rejects one fails
+# the probe rather than passing it and then erroring on the real run).
 _PROBE = (
     "--unshare-pid",
     "--unshare-user",
     "--cap-drop",
     "ALL",
+    "--disable-userns",  # match the real policy: a setuid bwrap that rejects this fails the probe
     "--ro-bind",
     "/",
     "/",
@@ -83,8 +114,16 @@ _PROBE = (
 
 @lru_cache(maxsize=1)
 def bwrap_path() -> str | None:
-    """Absolute path to bwrap, or None when it is not installed (backend then unavailable)."""
-    return shutil.which("bwrap")
+    """Absolute path to bwrap, or None when it is not installed (backend then unavailable).
+
+    A relative result (a relative ``PATH`` entry) is refused: ``wrap`` runs the binary with
+    ``cwd`` set to the candidate's checkout, so a relative ``bin/bwrap`` would resolve to a
+    program the candidate planted and run everything unconfined. Fail closed instead.
+    """
+    found = shutil.which("bwrap")
+    if found is None or not os.path.isabs(found):
+        return None
+    return os.path.realpath(found)
 
 
 @lru_cache(maxsize=1)
@@ -125,7 +164,10 @@ def build_policy(
 ) -> Policy:
     """bwrap flags, one argv element per line; later flags override earlier ones."""
     real_home = _safe(home or Path.home())
-    for root in read_roots:  # the root is already read-only and readable: validate only
+    # read_roots are validated but never emitted: the whole root is already bound read-only, so
+    # (unlike Seatbelt's allow-list) a read root grants no extra scope. Validating still rejects
+    # a malformed path early and keeps the two backends' call signatures identical.
+    for root in read_roots:
         _safe(root)
     writes = [_safe(root) for root in write_roots]
     for root in writes:
@@ -163,6 +205,11 @@ def build_policy(
         target = f"{real_home}/{rel}"
         if os.path.lexists(target):
             flags += ["--ro-bind", "/dev/null", target]
+    # Mask root-equivalent daemon sockets (Docker/Podman/containerd): a read-only root bind
+    # does not stop connect() to a pathname socket, and no network namespace covers it.
+    for sock in _DANGEROUS_SOCKETS:
+        if os.path.lexists(sock):
+            flags += ["--ro-bind", "/dev/null", sock]
     return Policy("\n".join(flags) + "\n")
 
 
