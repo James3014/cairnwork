@@ -166,7 +166,11 @@ def test_a_killed_run_is_cleaned_up(project, state):
 
     def hanging():
         ps = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True).stdout
-        return any(name in line and "pytest" in line for line in ps.splitlines())
+        # the CLI's own argv also names the test file: only count the verifier itself
+        return any(
+            name in line and "pytest" in line and "cairnwork_verify" not in line
+            for line in ps.splitlines()
+        )
 
     try:
         deadline = time.monotonic() + 60
