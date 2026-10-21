@@ -99,10 +99,13 @@ def test_owner_process_arguments_are_not_readable(project, monkeypatch):
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc; macOS uses sysctl")
-def test_owner_process_environment_is_not_readable(project, monkeypatch):
-    # The Linux counterpart of the macOS sysctl witness: a secret in another uid's environment
-    # (/proc/<pid>/environ is 0400, owned by that uid) must not be readable by the candidate.
-    # The bwrap pid namespace also hides the owner's pid outright, so the read fails either way.
+def test_owner_process_is_not_reachable_from_the_sandbox(project, monkeypatch):
+    # The Linux counterpart of the macOS process-args witness. The property is the same — the
+    # candidate cannot read the owner's process secrets — but the mechanism is the bwrap PID
+    # namespace, not the uid: the owner's host pid is not in the sandbox's namespace, so its
+    # /proc entry does not exist there (the uid boundary on the *filesystem* is witnessed
+    # separately by test_owner_only_files_are_not_readable). The test asserts the entry is
+    # genuinely absent, so it cannot pass vacuously on a present-but-unreadable file.
     secret = "CWFAKESECRET" + os.urandom(4).hex()
     owner = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -111,21 +114,22 @@ def test_owner_process_environment_is_not_readable(project, monkeypatch):
     monkeypatch.setenv("CW_PID", str(owner.pid))
     monkeypatch.setenv("CW_SECRET", secret)
     code = (
-        "import os\n"
-        "def test_environ():\n"
-        "    data = b''\n"
-        "    try:\n"
-        "        with open('/proc/' + os.environ['CW_PID'] + '/environ', 'rb') as handle:\n"
-        "            data = handle.read()\n"
-        "    except OSError:\n"
-        "        pass\n"
-        "    assert os.environ['CW_SECRET'].encode() not in data\n"
+        "import os, pytest\n"
+        "def test_proc():\n"
+        "    path = '/proc/' + os.environ['CW_PID'] + '/environ'\n"
+        "    with pytest.raises(FileNotFoundError):  # the owner's pid is not in this namespace\n"
+        "        open(path, 'rb').read()\n"
+        "    assert os.environ['CW_SECRET'].encode() not in b''.join(\n"
+        "        open('/proc/' + p + '/environ', 'rb').read()\n"
+        "        for p in os.listdir('/proc') if p.isdigit()\n"
+        "        if os.access('/proc/' + p + '/environ', os.R_OK)\n"
+        "    )\n"
     )
     try:
         result = verify(
             project,
-            {"tests/test_environ.py": code},
-            "tests/test_environ.py",
+            {"tests/test_proc.py": code},
+            "tests/test_proc.py",
             monkeypatch,
             ("CW_PID", "CW_SECRET"),
         )

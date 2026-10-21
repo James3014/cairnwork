@@ -19,13 +19,37 @@ SUDOERS="/etc/sudoers.d/cairnwork-verifier"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 1; }
 id "$OWNER" >/dev/null
+OWNER_UID="$(id -u "$OWNER")"
+
+# If the account name already exists, make sure it is ours and unprivileged before reusing it:
+# a pre-existing name that maps to the owner's uid (candidate would run as the owner) or to root,
+# has a login shell, or carries extra group memberships (a privileged or secret-reading group)
+# would defeat the boundary. Refuse rather than trust the name. (The runtime also refuses a uid
+# of 0 or the owner's, but the installer should not silently adopt a hijacked account.)
+if id "$VERIFIER" >/dev/null 2>&1; then
+  v_uid="$(id -u "$VERIFIER")"
+  v_shell="$(getent passwd "$VERIFIER" | cut -d: -f7)"
+  { [ "$v_uid" -ne 0 ] && [ "$v_uid" -ne "$OWNER_UID" ]; } \
+    || { echo "existing user $VERIFIER has uid $v_uid (root or the owner); refusing" >&2; exit 1; }
+  case "$v_shell" in
+    */nologin | /bin/false | /usr/bin/false) : ;;
+    *) echo "existing user $VERIFIER has a login shell ($v_shell); refusing" >&2; exit 1 ;;
+  esac
+  extra="$(id -Gn "$VERIFIER" | tr ' ' '\n' | grep -vx "$GROUP" || true)"
+  [ -z "$extra" ] \
+    || { echo "existing user $VERIFIER is in unexpected groups: $extra; refusing" >&2; exit 1; }
+fi
 
 # The sandbox binary the account is allowed to run (the sudoers rule names it, and the
-# remove()/chmod path runs through it). Must be an absolute path.
+# remove()/chmod path runs through it). Resolve symlinks so the rule names the same absolute
+# path the runtime invokes (verifier_account.py runs os.path.realpath(which("bwrap"))); without
+# this, sudo would deny the realpath'd command on a distro where /usr/bin/bwrap is a symlink.
 BWRAP="$(command -v bwrap || true)"
+[ -n "$BWRAP" ] || { echo "bwrap not found on PATH; install bubblewrap first" >&2; exit 1; }
+BWRAP="$(readlink -f "$BWRAP")"
 case "$BWRAP" in
   /*) : ;;
-  *) echo "bwrap not found on PATH; install bubblewrap first" >&2; exit 1 ;;
+  *) echo "could not resolve an absolute path to bwrap" >&2; exit 1 ;;
 esac
 
 # 1. group shared by the owner and the verifier account

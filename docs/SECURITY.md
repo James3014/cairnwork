@@ -24,6 +24,12 @@ account.** It is now available: `scripts/setup_verifier_user_linux.sh` creates a
 the readable set inside the sandbox is that account's, which owns nothing — closing the
 read-isolation gap below. The CI job `test-linux-verifier-account` proves it on a real runner.
 
+The shared root (`/var/lib/cairnwork`) is group-readable by the verifier (that is how the
+account reads its Python and each run's inputs), so **keep owner secrets out of it** — it is for
+verifier inputs and the account's interpreter, never credentials. The per-run verifier log stays
+owner-only (`0600`). The installer refuses to adopt a pre-existing `cairnwork-verifier` name that
+maps to root or the owner, has a login shell, or carries extra group memberships.
+
 ### Trade-off without the dedicated account (the launching-account fallback)
 
 Without the account, the bwrap sandbox runs as the account that launches it, for code that is

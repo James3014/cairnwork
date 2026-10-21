@@ -29,6 +29,7 @@ import os
 import pwd
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -74,24 +75,44 @@ class VerifierAccount:
         return str(self.root / "venv" / "bin" / "python")
 
     def available(self, python: str | None = None) -> bool:
-        """The account is a separate, non-root user, sudo works without a password,
-        and the shared Python (or ``python``, a target's own) runs pytest as that user.
+        """The account is a separate, non-root user, sudo works without a password, and a
+        **confined** run as that user can import pytest. The probe uses the real sandbox policy
+        (credential masks skipped, as on the account path), not an allow-all run, so "usable"
+        means confinement actually works — a policy that fails to mount (e.g. a tmpfs under a
+        home the account cannot enter) reports unusable instead of a false healthy.
 
         It starts a process as the account, so call it while holding exclusive().
         """
+        from cairnwork import pytest_config  # local import keeps the module import-cycle free
+
         try:
             uid = pwd.getpwnam(self.user).pw_uid
         except KeyError:
             return False
         if uid in (0, os.getuid()):
             return False  # kill -9 -1 as root or as the owner would be destructive
+        py = python or self.python
+        policy_file: Path | None = None
         try:
-            probe = self.wrap([python or self.python, "-P", "-c", "import pytest"], None)
+            policy = _backend().policy(
+                read_roots=pytest_config.interpreter_roots(py),
+                write_roots=(),
+                mask_home_credentials=False,
+            )
+            fd, name = tempfile.mkstemp(dir=self.root, suffix=".policy")
+            policy_file = Path(name)
+            os.write(fd, policy.text.encode())
+            os.close(fd)
+            os.chmod(policy_file, 0o644)  # seatbelt reads the profile as the account
+            probe = self.wrap([py, "-P", "-c", "import pytest"], policy_file)
             done = subprocess.run(  # noqa: S603 - fixed argv
                 probe, capture_output=True, timeout=60, check=False, cwd=self.root
             )
         except (OSError, subprocess.SubprocessError, VerifierAccountError):
             return False
+        finally:
+            if policy_file is not None:
+                policy_file.unlink(missing_ok=True)
         return done.returncode == 0
 
     def wrap(self, argv: list[str], profile: Path | None, env: dict[str, str] | None = None):
