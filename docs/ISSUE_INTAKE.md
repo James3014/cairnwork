@@ -1,6 +1,12 @@
 # Issue 直接送 Cairnwork（試點任務來源）
 
-2026-10-20 James 決定：試點的真實任務直接從 GitHub Issue 進 Cairnwork，不必繞舊 Gateway。舊 Gateway 這條線照議會 F 條繼續接完，用來證明切換和回退機制可靠。理由是：查過線上 Gateway 近 30 天只處理了 28 件任務，全部都是 agent 送的探測任務，沒有真實工作。
+2026-10-20 James 決定：試點的真實任務直接從 GitHub Issue 進 Cairnwork，不必繞舊 Gateway（線上 Gateway 近 30 天只處理了 28 件任務，全是 agent 的探測任務）。
+
+2026-10-21 James 決定：
+- **小而明確的 bug（符合 eia-task 形狀、非 hard）預設走這條**，不再另外決定。每天跑一到兩輪 `run-once`；累積的真實使用數據也作為 A/B 的 A1 來源。
+- **連續 10 張沒有 Cairnwork 環境失敗**之後，才把 `run-once` 掛成 launchd 無人值守。
+- **每個新 repo 先跑 `scripts/env_smoke.py`**，把環境耦合一次列出來再送題。驗收指令只能挑在主機上**沒有 skip** 的測試（verifier 只要有任何 skipped 就判失敗）。
+- 舊 Gateway 的 route 停車（見 `GATEWAY_ROUTE.md` 開頭）。
 
 ## 怎麼送
 

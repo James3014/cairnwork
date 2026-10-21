@@ -1,5 +1,7 @@
 # 舊 Gateway 轉送一類任務給 Cairnwork（議會 F 條）
 
+> **狀態（2026-10-21 James 決定）：停車。** 開關維持 `off`，Cairnwork 與 Gateway 兩端的程式都保留。理由：線上 Gateway 近 30 天沒有真實任務，議會 F 條要證明的切換與回退已在 2026-10-20 線上見證（route 見證、drain 後拒收、改回 off）。真實任務改走 Issue 直送（`ISSUE_INTAKE.md`）。重新開 route 的前置條件見 Issue #39（對當前版本重做兩端見證；只有出現真實呼叫端、或 #2721 解盲後想接 Gateway 任務時才做）。
+
 這份是 Cairnwork 這一端的介面，以及舊 Gateway（Nexus-new）那一端需要配合的改動。Gateway 端的寫法以 Nexus-new `b488218`（2026-10-20 線上版本）為準；行號引用前要再核對。
 
 ## Cairnwork 這一端（已完成）
@@ -58,7 +60,7 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
   - 第 2 次在審查修正之後執行，呼叫端 umask 設為 077，花 29 秒，Core VERIFIED。drain 後用新的冪等鍵交件，回 `NOT_ACCEPTING`。
   - 見 `docs/drills/2026-10-20-route.json`。
 
-## Gateway 這一端（還沒做；由 Gateway／部署器負責人決定誰改）
+## Gateway 這一端（已上線：Nexus-new #2804 分流 off／shadow／route，部署器 #2799）
 
 1. **分流點**：在 `nexus_worker_candidate` 的 handler（`unified_mcp_gateway_parts/worker_candidate.py`，約第 211 行），輸入驗證和 owner_confirmation 之後、`build_contract`／`submit_task` 之前。
    - 只有在環境變數開關打開、而且任務屬於試點類型（小 bug 修正）時，才轉給 Cairnwork。
