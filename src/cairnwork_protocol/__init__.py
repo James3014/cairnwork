@@ -158,6 +158,8 @@ def response_binding_problem(
         return MANIFEST_HASH_MISMATCH
     if echoed != expected:
         return MANIFEST_HASH_MISMATCH
-    if identity != dict(expected_identity):
-        return IDENTITY_MISMATCH
-    return None
+    try:  # canonical JSON, so false is not 0 and 1 is not true
+        same = canonical_json(identity) == canonical_json(expected_identity)
+    except TypeError:
+        same = False
+    return None if same else IDENTITY_MISMATCH

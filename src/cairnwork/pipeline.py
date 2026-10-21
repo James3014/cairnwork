@@ -334,7 +334,13 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         )
         recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
         result.verified = bool(verdict.verified and recorded and recorded.verified)
-        result.reason = verdict.reason or f"CORE_{verdict.status}"
+        shown = recorded or verdict  # an unverified readback never reads as CORE_VERIFIED
+        result.reason = (
+            f"CORE_{verdict.status}"
+            if result.verified
+            else shown.reason
+            or ("CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}")
+        )
     finally:
         try:
             remove_attempt_clone(run_root, result.attempt_id)

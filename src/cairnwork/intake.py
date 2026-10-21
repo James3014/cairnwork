@@ -147,9 +147,9 @@ class Intake:
     @property
     def notary(self) -> Notary:
         config = self.config()  # a Core HTTP service when configured, else in-process
-        if config["core_url"] is None:
-            return Notary(self.state / "notary.sqlite")
-        verify = http_core_verify(config["core_url"], Path(config["core_token_file"]))
+        verify = None
+        if config["core_url"] is not None:
+            verify = http_core_verify(config["core_url"], Path(config["core_token_file"]))
         return Notary(
             self.state / "notary.sqlite", core_verify=verify, core_identity=config["core_identity"]
         )

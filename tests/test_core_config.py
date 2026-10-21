@@ -44,3 +44,12 @@ def test_with_core_url_the_notary_calls_core_over_http(tmp_path):
         assert notary._core_verify.__module__ == "cairnwork_protocol.http"
         status, body = notary._core_verify({})
     assert status == 422 and "error" in body  # Core's own refusal of an empty request
+
+
+def test_a_configured_core_identity_pin_applies_in_process_too(tmp_path):
+    from product.protocol import core_identity
+
+    other = {**core_identity(), "version": "not-the-installed-core"}
+    notary = _intake(tmp_path, {"core_identity": other}).notary
+    assert notary._core_verify.__module__ != "cairnwork_protocol.http"
+    assert notary._core_identity == other
