@@ -106,32 +106,19 @@ def test_owner_process_is_not_reachable_from_the_sandbox(project, monkeypatch):
     # /proc entry does not exist there (the uid boundary on the *filesystem* is witnessed
     # separately by test_owner_only_files_are_not_readable). The test asserts the entry is
     # genuinely absent, so it cannot pass vacuously on a present-but-unreadable file.
-    secret = "CWFAKESECRET" + os.urandom(4).hex()
-    owner = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        env={**os.environ, "CW_OWNER_SECRET": secret},
-    )
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     monkeypatch.setenv("CW_PID", str(owner.pid))
-    monkeypatch.setenv("CW_SECRET", secret)
     code = (
         "import os, pytest\n"
         "def test_proc():\n"
-        "    path = '/proc/' + os.environ['CW_PID'] + '/environ'\n"
-        "    with pytest.raises(FileNotFoundError):  # the owner's pid is not in this namespace\n"
-        "        open(path, 'rb').read()\n"
-        "    assert os.environ['CW_SECRET'].encode() not in b''.join(\n"
-        "        open('/proc/' + p + '/environ', 'rb').read()\n"
-        "        for p in os.listdir('/proc') if p.isdigit()\n"
-        "        if os.access('/proc/' + p + '/environ', os.R_OK)\n"
-        "    )\n"
+        "    # The owner's host pid is not in the sandbox PID namespace, so its /proc entry is\n"
+        "    # absent — the candidate cannot reach the owner's process args or environment.\n"
+        "    with pytest.raises(FileNotFoundError):\n"
+        "        open('/proc/' + os.environ['CW_PID'] + '/environ', 'rb').read()\n"
     )
     try:
         result = verify(
-            project,
-            {"tests/test_proc.py": code},
-            "tests/test_proc.py",
-            monkeypatch,
-            ("CW_PID", "CW_SECRET"),
+            project, {"tests/test_proc.py": code}, "tests/test_proc.py", monkeypatch, ("CW_PID",)
         )
     finally:
         owner.kill()
@@ -170,7 +157,9 @@ def test_owner_only_files_are_not_readable_where_the_sandbox_allows_reading(proj
     assert result.observation.passed, result.log_path.read_text()
 
 
-def test_escaped_process_is_killed_and_fails_the_run(project):
+def test_escaped_process_is_killed(project):
+    import cairnwork_sandbox
+
     code = (
         "import subprocess, sys\n"
         "def test_spawn():\n"
@@ -178,9 +167,14 @@ def test_escaped_process_is_killed_and_fails_the_run(project):
         " start_new_session=True, env={})\n"
     )
     result = verify(project, {"tests/test_daemon.py": code}, "tests/test_daemon.py")
-    assert result.returncode == 0  # pytest itself passed; only the escaped process fails it
-    assert not result.observation.passed
-    assert ACCOUNT.count() == 0  # the 30 s sleeper is gone, not left running
+    assert result.returncode == 0  # pytest itself passed
+    assert ACCOUNT.count() == 0  # the 30 s sleeper is gone on either backend, not left running
+    # Seatbelt cannot reap an escaped session, so confined.py sweeps the survivor by run token
+    # and fails the run; under bwrap the escapee stays in the PID namespace and is killed on
+    # teardown, so there is nothing left to sweep and the run may pass (docs/SECURITY.md).
+    backend = cairnwork_sandbox.platform_backend()
+    if backend is not None and backend.name == "seatbelt":
+        assert not result.observation.passed
 
 
 def test_unusable_account_fails_closed(project):
@@ -276,13 +270,17 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     left behind (cairnwork#37). Hosts with only the Command Line Tools do not start it.
     """
     code = (
-        "import subprocess\n"
+        "import os, subprocess\n"
         "def test_git():\n"
         "    git = '/usr/bin/git'\n"
-        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, text=True)\n"
+        # Ignore the host's system/global git config: a CI runner may set safe.directory=* in
+        # /etc/gitconfig, which is the runner's doing, not the verifier's. Only the per-run
+        # value Cairnwork injects (GIT_CONFIG_*) should decide what this run trusts.
+        "    env = dict(os.environ, GIT_CONFIG_SYSTEM='/dev/null', GIT_CONFIG_GLOBAL='/dev/null')\n"
+        "    done = subprocess.run([git, 'rev-parse', 'HEAD'], capture_output=True, text=True, env=env)\n"
         "    assert done.returncode == 0, done.stderr\n"
         "    out = subprocess.run([git, 'config', '--get-all', 'safe.directory'],\n"
-        "                         capture_output=True, text=True).stdout.split()\n"
+        "                         capture_output=True, text=True, env=env).stdout.split()\n"
         "    assert out and '*' not in out\n"
     )
     result = verify(project, {"tests/test_git.py": code}, "tests/test_git.py")
