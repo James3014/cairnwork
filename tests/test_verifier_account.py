@@ -247,3 +247,26 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     log = result.log_path.read_text()
     assert result.outcomes == {"tests/test_git.py::test_git": "passed"}, log
     assert result.returncode == 0 and not result.timed_out and result.mutated == (), log
+
+
+def test_account_may_write_next_to_the_repo_but_not_move_the_checkout(project):
+    """cairnwork#38 under the account: the sticky work directory takes new files, but the
+    checkout (owner's) cannot be renamed away or replaced."""
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "repo = Path(__file__).resolve().parents[1]\n"
+        "def test_layout():\n"
+        "    (repo.parent / 'nexus-runtime-targets').mkdir()\n"
+        "    try:\n"
+        "        os.rename(repo, repo.parent / 'moved')\n"
+        "    except PermissionError:\n"
+        "        return\n"
+        "    raise AssertionError('moved the checkout')\n"
+    )
+    result = verify(project, {"tests/test_layout.py": code}, "tests/test_layout.py")
+    log = result.log_path.read_text()
+    assert result.outcomes == {"tests/test_layout.py::test_layout": "passed"}, log
+    assert result.mutated == (), log
+    clone_id = result.log_path.parent.name.split(".")[0]
+    assert not (ACCOUNT.run_root / f"{clone_id}.work").exists(), "work directory left behind"

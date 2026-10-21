@@ -193,7 +193,15 @@ def _run_all(
     runs = []
     for index, spec in enumerate(specs):
         clone_id = f"{run_id}-v{index}"
-        checkout = create_attempt_clone(repo, candidate_commit, run_root, clone_id).path
+        # The checkout sits alone in its own work directory, which the tests may write:
+        # some create files next to their repository (Nexus-new: nexus-runtime-targets),
+        # and that must stay inside this run. Sticky: the account cannot move the checkout.
+        work = Path(run_root) / f"{clone_id}.work"
+        work.parent.mkdir(parents=True, exist_ok=True)
+        work.mkdir(mode=0o700)
+        if account is not None:
+            os.chmod(work, 0o3770)
+        checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
         if account is not None:
             account.grant_read(checkout)  # whatever the caller's umask was
         try:
@@ -212,9 +220,10 @@ def _run_all(
             )
         finally:
             try:
-                remove_attempt_clone(run_root, clone_id)
+                remove_attempt_clone(work, clone_id)
             except WorkspaceError:
                 pass  # the run's verdict stands; a leftover directory is only disk space
+            _remove_scratch((work,), account)
     return tuple(runs)
 
 
@@ -241,7 +250,7 @@ def _run_one(
 ) -> VerifierRun:
     plugins = pytest_config.installed_plugins(python)
     ini_text = settings.ini_text(checkout, plugins)
-    private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent))
+    private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent.parent))
     log_path, ini, profile_path = (
         private / "verifier.log",
         private / "pytest.ini",
@@ -275,7 +284,7 @@ def _run_one(
     if sandbox.available():
         profile = sandbox.build_profile(
             read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
-            write_roots=(checkout, run_dir),
+            write_roots=(checkout.parent, run_dir),
         )
         _write_new(profile_path, profile.text.encode())
         returncode, timed_out, survivors = _execute(
