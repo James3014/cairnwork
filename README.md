@@ -4,6 +4,15 @@ Cairnwork 是 Nexus-new 的後繼產品：一個接任務、執行、驗證，�
 
 Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md`；議會條文 A–I：`nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md`。
 
+## 快速開始
+
+```sh
+uv tool install --from git+https://github.com/James3014/cairnwork.git cairnwork
+cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證、Core VERIFIED（不需 GitHub／網路／AI）
+```
+
+完整安裝、`cairnwork init` 接真實 repo、平台註記見 [docs/QUICKSTART.md](docs/QUICKSTART.md)。
+
 ## 狀態
 
 試點中（2026-10-20 → 2026-11-16）。目前只接一種任務：**小 bug 修正**（eia-task 格式：allowed_files ≤10、`pytest` 驗證）。

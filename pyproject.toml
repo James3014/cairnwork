@@ -15,6 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
+cairnwork = "cairnwork_quickstart.cli:main"
 cairnwork-route = "cairnwork.route:main"
 cairnwork-issues = "cairnwork.issue_runner:main"
 cairnwork-verify = "cairnwork.verify_cli:main"
@@ -28,7 +29,12 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cairnwork", "src/cairnwork_protocol", "src/cairnwork_sandbox"]
+packages = [
+    "src/cairnwork",
+    "src/cairnwork_protocol",
+    "src/cairnwork_sandbox",
+    "src/cairnwork_quickstart",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -49,7 +55,7 @@ select = ["E", "F", "W", "I", "B", "BLE", "S110", "S112", "UP"]
 "tests/**" = ["S"]
 
 [tool.importlinter]
-root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox"]
+root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox", "cairnwork_quickstart"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -57,6 +63,13 @@ name = "Core must not import experimental"
 type = "forbidden"
 source_modules = ["cairnwork"]
 forbidden_modules = ["experimental"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "Quickstart depends on the core, never the other way"
+type = "forbidden"
+source_modules = ["cairnwork"]
+forbidden_modules = ["cairnwork_quickstart"]
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
