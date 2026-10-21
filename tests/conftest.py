@@ -43,7 +43,7 @@ def pytest_collection_modifyitems(config, items):
     macOS CI job) makes a missing sandbox an error; elsewhere those tests are skipped."""
     import os
 
-    from cairnwork import sandbox
+    import cairnwork_sandbox
     from cairnwork.verifier_account import VerifierAccount
 
     if not VerifierAccount().available():
@@ -55,7 +55,7 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "verifier_account" in item.keywords:
                 item.add_marker(skip_account)
-    if sandbox.available():
+    if cairnwork_sandbox.select() is not None:
         return
     if os.environ.get("CAIRNWORK_REQUIRE_SANDBOX") == "1":
         raise pytest.UsageError("CAIRNWORK_REQUIRE_SANDBOX=1 but sandbox-exec is unavailable")
