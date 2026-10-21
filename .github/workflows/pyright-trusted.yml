@@ -1,0 +1,82 @@
+# Trusted exact-base Pyright gate (Issue #66). Runs from the DEFAULT BRANCH, so a PR cannot edit,
+# skip or neuter it. Publishes the commit status "pyright (trusted)" on the PR head.
+#
+# Trust boundary: the PR head is checked out only as data into ./head (no credentials kept) and
+# is never imported, installed or run by us. Dependencies and the gate script come from the
+# default branch. The analysis job has contents:read only; the job that holds statuses:write
+# never touches PR content and echoes only fixed strings.
+name: pyright-trusted
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: pyright-trusted-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      gate_rc: ${{ steps.gate.outputs.gate_rc }}
+    steps:
+      - name: Trusted tree (default branch)
+        uses: actions/checkout@v4
+        with:
+          path: trusted
+          persist-credentials: false
+      - name: PR head (data only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          path: head
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Pyright on the merge base and on the head
+        id: gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          rc=0
+          trusted/scripts/ci/pyright_trusted.sh trusted head "$BASE_SHA" "$RUNNER_TEMP/work" || rc=$?
+          echo "gate_rc=$rc" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Publish the status
+        id: verdict
+        env:
+          PYRIGHT_JOB_RESULT: ${{ needs.analyze.result }}
+          PYRIGHT_GATE_RC: ${{ needs.analyze.outputs.gate_rc }}
+        run: python3 scripts/ci/pyright_trusted_status.py
+      - name: Post commit status on the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          DESCRIPTION: ${{ steps.verdict.outputs.description }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="$STATE" -f context="pyright (trusted)" \
+            -f description="$DESCRIPTION" -f target_url="$RUN_URL"
