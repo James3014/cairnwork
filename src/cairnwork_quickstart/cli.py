@@ -60,10 +60,14 @@ def _init(args) -> int:
     except FileExistsError:
         print(f"error: {state} is already configured; use a new --dir", file=sys.stderr)
         return 2
-    os.chmod(state, 0o700)  # now that we own the config here, tighten a pre-existing loose dir
-    with os.fdopen(fd, "w") as handle:
-        handle.write(json.dumps(config, indent=2) + "\n")
-    (state / "ACCEPTING").touch(mode=0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(config, indent=2) + "\n")
+        os.chmod(state, 0o700)  # we own the config here now; tighten a pre-existing loose dir
+        (state / "ACCEPTING").touch(mode=0o600)
+    except BaseException:
+        (state / "config.json").unlink(missing_ok=True)  # leave no half-configured dir behind
+        raise
     print(f"state ready: {state}")
     print(f"  config.json: {json.dumps(config)}")
     print("  next: cairnwork-issues --state <dir> --repo OWNER/NAME --clone <mirror> run-once")
