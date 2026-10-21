@@ -222,10 +222,16 @@ def build_policy(
     # Empty the per-user runtime dir with a tmpfs: it holds the systemd user bus (a
     # `systemd-run --user` would start a process outside the sandbox), the SSH/keyring agent
     # socket and other session IPC. A tmpfs covers the whole class rather than a path at a time.
-    runtime_dir = f"/run/user/{os.getuid()}"
-    if os.path.isdir(runtime_dir):
+    runtime_dir = _user_runtime_dir()
+    if runtime_dir is not None:
         flags += ["--tmpfs", _safe(runtime_dir)]
     return Policy("\n".join(flags) + "\n")
+
+
+def _user_runtime_dir() -> str | None:
+    """The per-user runtime dir (`/run/user/<uid>`) to empty, or None when it does not exist."""
+    path = f"/run/user/{os.getuid()}"
+    return path if os.path.isdir(path) else None
 
 
 def _binary() -> str:

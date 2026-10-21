@@ -11,6 +11,16 @@ from cairnwork_sandbox import bwrap, platform_backend
 from cairnwork_sandbox.backend import SandboxError
 
 
+@pytest.fixture(autouse=True)
+def _host_independent_ipc_masks(monkeypatch):
+    """Keep the pure-function policy tests independent of the test host: the daemon-socket and
+    /run/user/<uid> masks fire on paths that really exist on the runner (e.g. the system D-Bus
+    socket, the CI user's runtime dir), which would otherwise add host-dependent flags. Tests
+    that exercise those masks re-set these in their own body."""
+    monkeypatch.setattr(bwrap, "_DANGEROUS_SOCKETS", ())
+    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: None)  # no session IPC by default
+
+
 def test_available_is_false_without_bwrap(monkeypatch):
     monkeypatch.setattr(bwrap, "bwrap_path", lambda: None)
     bwrap.available.cache_clear()
@@ -102,14 +112,16 @@ def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
 def test_user_runtime_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
     # /run/user/<uid> holds the systemd user bus (a systemd-run --user escape) and the session
     # agent sockets; a tmpfs empties the whole class. Masked only when the dir exists.
-    import os
-
-    monkeypatch.setattr(bwrap.os, "getuid", lambda: 4242)
-    real_isdir = os.path.isdir
-    monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: p == "/run/user/4242" or real_isdir(p))
+    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: "/run/user/4242")
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
     i = lines.index("/run/user/4242")
     assert lines[i - 1] == "--tmpfs"
+
+
+def test_user_runtime_dir_absent_adds_no_tmpfs(tmp_path, monkeypatch):
+    monkeypatch.setattr(bwrap, "_user_runtime_dir", lambda: None)
+    lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
+    assert "--tmpfs" not in lines
 
 
 def test_absent_credentials_are_not_masked(tmp_path):
