@@ -13,6 +13,8 @@ agy can read anything under HOME, so this narrows exposure, it is no boundary.
 Its output is copied into the log by the parent, capped like a verifier log; a
 process it started outside its group is killed if it still carries the attempt
 marker, and one that still holds the output afterwards fails the run.
+With an account-pool dispatcher configured (agy_dispatch.py) the worker runs that
+instead of agy, prompt on stdin, same environment plus the pool's tuning variables.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cairnwork.confined import ATTEMPT_ENV, copy_capped, sweep_marked
+from cairnwork.workers import agy_dispatch
 
 ENV_KEEP = (
     "HOME",
@@ -85,43 +88,61 @@ class AgyWorker:
     model: str = "gemini-3.8-flash-high"
     timeout_seconds: int = 900
     agy: str = "agy"
+    dispatch: agy_dispatch.Dispatch | None = None
 
     def run(self, workdir: Path, task) -> None:
-        binary = shutil.which(self.agy)
-        if binary is None:
-            raise AgyWorkerError(f"{self.agy} not found")
+        dispatch = self.dispatch
+        binary = shutil.which(self.agy) if dispatch is None else None
+        if dispatch is None:
+            if binary is None:
+                raise AgyWorkerError(f"{self.agy} not found")
+        elif not (os.path.isfile(dispatch.path) and os.access(dispatch.path, os.X_OK)):
+            raise AgyWorkerError(f"{dispatch.path} not found or not executable")
         prompt = PROMPT.format(
             title=task.title,
             instructions=task.instructions,
             allowed=", ".join(sorted(task.allowed_files)),
             hidden_tests=HIDDEN_TESTS if getattr(task, "test_commit", "") else "",
         )
-        argv = [
-            binary,
-            "-p",
-            prompt,
-            "--model",
-            self.model,
-            "--mode",
-            "accept-edits",
-            "--sandbox",
-            "--print-timeout",
-            f"{self.timeout_seconds}s",
-        ]
+        if dispatch is not None:
+            argv = agy_dispatch.argv(
+                dispatch, workdir, self.model, self.timeout_seconds, task.allowed_files
+            )
+        else:
+            argv = [
+                binary,
+                "-p",
+                prompt,
+                "--model",
+                self.model,
+                "--mode",
+                "accept-edits",
+                "--sandbox",
+                "--print-timeout",
+                f"{self.timeout_seconds}s",
+            ]
         log_path = workdir.parent / f"{workdir.name}.agy.log"
         fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         env = {key: os.environ[key] for key in ENV_KEEP if key in os.environ}
         env[ATTEMPT_ENV] = workdir.name
+        status_path = workdir.parent / f"{workdir.name}.agy.status"
+        status_file = None
+        if dispatch is not None:  # its status line is read from a file the cap cannot cut
+            env.update(agy_dispatch.tuning_env())
+            status_file = agy_dispatch.open_status(status_path)
         log = os.fdopen(fd, "wb")
         process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv,
             cwd=workdir,
             env=env,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if dispatch is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT if status_file is None else status_file,
             start_new_session=True,
         )
+        if status_file is not None:
+            status_file.close()
+            threading.Thread(target=_feed, args=(process, prompt), daemon=True).start()
         copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
         copier.start()
         held = True
@@ -136,8 +157,22 @@ class AgyWorker:
                 log.close()
         if held:
             raise AgyWorkerError("a process agy started outlived it and holds its output")
+        if dispatch is not None:
+            agy_dispatch.raise_if_exhausted(status_path, process.returncode, log_path)
         if process.returncode != 0:
             raise AgyWorkerError(f"agy exited {process.returncode}; log {log_path}")
+
+
+def _feed(process, prompt: str) -> None:
+    try:
+        process.stdin.write(prompt.encode())
+    except OSError:
+        pass  # the dispatcher exited without reading it; its exit code says what happened
+    finally:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
 
 
 def _stop(process, copier, attempt: str) -> bool:

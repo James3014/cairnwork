@@ -35,6 +35,7 @@ from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
 from cairnwork.workers.agy import AgyWorker
+from cairnwork.workers.agy_dispatch import Dispatch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,6 +90,17 @@ def _dispatch(intake: Intake, args) -> Any:
     return _run(intake, args.task_id)
 
 
+def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
+    if config["agy_dispatch"] is None:
+        return None
+    return Dispatch(
+        config["agy_dispatch"],
+        config["agy_dispatch_pool_wait_seconds"],
+        config["agy_dispatch_provider_stall_seconds"],
+        config["agy_dispatch_stream_no_progress_seconds"],
+    )
+
+
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     """The runner submit starts. It keeps the inherited lock fd open until it exits."""
     config = intake.config()
@@ -98,7 +110,7 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         ledger=intake.ledger,
         notary=intake.notary,
         journal=intake.journal,
-        worker=AgyWorker(model=config["model"], agy=config["agy"]),
+        worker=AgyWorker(model=config["model"], agy=config["agy"], dispatch=agy_dispatch(config)),
         run_root=intake.run_root,
         verifier_account=intake.verifier_account(),
         verifier_python=config["verifier_python"],

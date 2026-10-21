@@ -94,3 +94,156 @@ def test_hidden_tests_are_mentioned_only_when_the_task_has_them(tmp_path, test_c
     """Without a test_commit the judging tests are the repository's own: reading them helps."""
     task = SimpleNamespace(**vars(TASK), test_commit=test_commit)
     assert ("not in this repository; do not look for" in _prompt(tmp_path, task)) is said
+
+
+# --- account-pool dispatcher (state config agy_dispatch) ---
+
+
+def fake_dispatcher(tmp_path, body):
+    path = tmp_path / "pool-dispatch"
+    path.write_text(f"#!{sys.executable}\nimport json, os, sys\n{body}\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _dispatched(tmp_path, body, task=TASK, **settings):
+    from cairnwork.workers.agy_dispatch import Dispatch
+
+    path = fake_dispatcher(tmp_path, body)
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    worker = AgyWorker(model="m-1", timeout_seconds=900, dispatch=Dispatch(path, **settings))
+    return worker, workdir, path
+
+
+def test_the_dispatcher_gets_a_pinned_argv_and_the_prompt_on_stdin(tmp_path):
+    seen = tmp_path / "seen.json"
+    body = f"open({str(seen)!r}, 'w').write(json.dumps([sys.argv, sys.stdin.read(), os.getcwd()]))"
+    task = SimpleNamespace(title="t", instructions="i", allowed_files=("b/z.py", "a.py"))
+    worker, workdir, path = _dispatched(tmp_path, body, task)
+    worker.run(workdir, task)
+    argv, stdin, cwd = json.loads(seen.read_text())
+    assert argv == [
+        path,
+        "--cwd", str(workdir),
+        "--mode", "accept-edits",
+        "--model", "m-1",
+        "--timeout", "900",
+        "--pool-wait-timeout", "600",
+        "--max-calls", "1",
+        "--provider-stall-seconds", "900",
+        "--stream-no-progress-seconds", "900",
+        "--write-path", "a.py",
+        "--write-path", "b/z.py",
+    ]  # fmt: skip
+    assert "Task: t" in stdin and "a.py, b/z.py" in stdin
+    assert cwd == str(workdir.resolve())
+
+
+def test_dispatcher_timing_settings_reach_its_argv(tmp_path):
+    seen = tmp_path / "seen.json"
+    worker, workdir, _ = _dispatched(
+        tmp_path,
+        f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))",
+        pool_wait_seconds=11,
+        provider_stall_seconds=22,
+        stream_no_progress_seconds=33,
+    )
+    worker.run(workdir, TASK)
+    argv = json.loads(seen.read_text())
+    assert argv[argv.index("--pool-wait-timeout") + 1] == "11"
+    assert argv[argv.index("--provider-stall-seconds") + 1] == "22"
+    assert argv[argv.index("--stream-no-progress-seconds") + 1] == "33"
+
+
+def test_dispatcher_environment_is_trimmed_but_keeps_pool_tuning(tmp_path, monkeypatch):
+    monkeypatch.setenv("CW_FAKE_TOKEN", "secret-value")
+    monkeypatch.setenv("NEXUS_AGY_POOL_DIR", "/pool")
+    dump = tmp_path / "env.json"
+    worker, workdir, _ = _dispatched(
+        tmp_path, f"open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))"
+    )
+    worker.run(workdir, TASK)
+    env = json.loads(dump.read_text())
+    assert "CW_FAKE_TOKEN" not in env
+    assert env["NEXUS_AGY_POOL_DIR"] == "/pool"
+    assert env[ATTEMPT_ENV] == "attempt1" and env["HOME"] == os.environ["HOME"]
+
+
+def test_whole_pool_exhaustion_is_its_own_failure(tmp_path):
+    from cairnwork.workers.agy_dispatch import AgyPoolExhausted
+
+    body = (
+        "sys.stdin.read()\n"
+        'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\\n\')\n'
+        "sys.exit(75)"
+    )
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyPoolExhausted, match="POOL_EXHAUSTED.*no other model"):
+        worker.run(workdir, TASK)
+
+
+def test_the_status_line_survives_a_flood_of_dispatcher_output(tmp_path):
+    from cairnwork.workers.agy_dispatch import AgyPoolExhausted
+
+    body = (
+        f"sys.stdout.write('x' * {MAX_LOG_BYTES * 2})\n"
+        'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\\n\')\n'
+        "sys.exit(75)"
+    )
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyPoolExhausted):
+        worker.run(workdir, TASK)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "sys.exit(75)",  # busy or failed, no status line
+        'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "failed"}\\n\'); sys.exit(75)',
+        'sys.stderr.write(\'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\\n\'); sys.exit(1)',
+        "sys.stderr.write('NEXUS_AGY_DISPATCH [not json\\n'); sys.exit(75)",
+        "sys.exit(3)",
+    ],
+)
+def test_other_dispatcher_failures_are_ordinary_worker_errors(tmp_path, body):
+    from cairnwork.workers.agy_dispatch import AgyPoolExhausted
+
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    with pytest.raises(AgyWorkerError) as raised:
+        worker.run(workdir, TASK)
+    assert not isinstance(raised.value, AgyPoolExhausted)
+
+
+def test_a_missing_dispatcher_fails_the_run_not_falls_back_to_agy(tmp_path):
+    from cairnwork.workers.agy_dispatch import Dispatch
+
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    worker = AgyWorker(dispatch=Dispatch(str(tmp_path / "gone")))
+    with pytest.raises(AgyWorkerError, match="not found or not executable"):
+        worker.run(workdir, TASK)
+
+
+def test_without_a_dispatcher_the_agy_argv_is_unchanged(tmp_path):
+    seen = tmp_path / "argv.json"
+    stdin_seen = tmp_path / "stdin.txt"
+    agy = fake_agy(
+        tmp_path,
+        f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))\n"
+        f"open({str(stdin_seen)!r}, 'w').write(repr(sys.stdin.read()))",
+    )
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    AgyWorker(agy=agy).run(workdir, TASK)
+    argv = json.loads(seen.read_text())
+    assert argv[0] == agy
+    assert argv[1] == "-p" and argv[2].startswith("You are fixing a small bug")
+    assert argv[3:] == [
+        "--model", "gemini-3.8-flash-high",
+        "--mode", "accept-edits",
+        "--sandbox",
+        "--print-timeout", "900s",
+    ]  # fmt: skip
+    assert stdin_seen.read_text() == "''"  # still no stdin
+    assert not (tmp_path / "attempt1.agy.status").exists()

@@ -5,8 +5,9 @@ fixes here, through the ``cairnwork-route`` command (route.py). Everything lives
 in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
-    config.json        {"model", "agy", "verifier_account", "verifier_python", "mirror",
-                        "core_url", "core_token_file", "core_identity", "test_roots"}
+    config.json        {"model", "agy", "agy_dispatch", "agy_dispatch_*_seconds",
+                        "verifier_account", "verifier_python", "mirror", "core_url",
+                        "core_token_file", "core_identity", "test_roots"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -68,6 +69,12 @@ _spawn = subprocess.Popen  # replaced in tests
 DEFAULT_CONFIG = {
     "model": "gemini-3.8-flash-high",
     "agy": "agy",
+    # An account-pool dispatcher run instead of agy (workers/agy_dispatch.py): an absolute
+    # path, and its timing in seconds; None runs agy itself.
+    "agy_dispatch": None,
+    "agy_dispatch_pool_wait_seconds": 600,
+    "agy_dispatch_provider_stall_seconds": 900,
+    "agy_dispatch_stream_no_progress_seconds": 900,
     "verifier_account": True,
     "verifier_python": None,
     # Cairnwork's own repository for this target: the base is fetched into it from the
@@ -126,6 +133,10 @@ def task_from_payload(payload: Any, test_roots: tuple[str, ...] = ("tests",)) ->
     )
 
 
+def _seconds(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 86400
+
+
 def _verifier_shape(value: Any) -> bool:
     return (
         isinstance(value, list)
@@ -176,10 +187,13 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
-        for key in ("verifier_python", "mirror", "core_token_file"):
+        for key in ("verifier_python", "mirror", "core_token_file", "agy_dispatch"):
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
+        for key in DEFAULT_CONFIG.keys() & loaded.keys():
+            if key.startswith("agy_dispatch_") and not _seconds(loaded[key]):
+                raise IntakeRefused("BAD_CONFIG", f"{key} must be a whole number of seconds")
         if loaded.get("core_identity") is not None and not isinstance(
             loaded["core_identity"], dict
         ):

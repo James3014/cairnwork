@@ -1,5 +1,6 @@
 """Intake without starting real runners: the lock hand-over, cancel, and re-checks."""
 
+import json
 import os
 
 import pytest
@@ -189,3 +190,34 @@ def test_a_bad_config_refuses_the_submit_before_binding(intake, repo):
     with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
         intake.submit(payload(repo))
     assert intake.in_flight()["count"] == 0 and FakePopen.held == []
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"agy_dispatch": "relative/dispatch"},
+        {"agy_dispatch": 5},
+        {"agy_dispatch_pool_wait_seconds": 0},
+        {"agy_dispatch_provider_stall_seconds": "900"},
+        {"agy_dispatch_stream_no_progress_seconds": True},
+        {"agy_dispatch_pool_wait_seconds": 1.5},
+        {"agy_dispatch_pool_wait_seconds": 86401},
+        {"agy_dispatch_other": 1},
+    ],
+)
+def test_bad_agy_dispatch_settings_are_refused(intake, config):
+    (intake.state / "config.json").write_text(json.dumps(config))
+    with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
+        intake.config()
+
+
+def test_agy_dispatch_defaults_to_off_and_accepts_valid_settings(intake):
+    assert intake.config()["agy_dispatch"] is None
+    assert intake.config()["agy_dispatch_pool_wait_seconds"] == 600
+    (intake.state / "config.json").write_text(
+        json.dumps({"agy_dispatch": "/opt/pool/dispatch", "agy_dispatch_pool_wait_seconds": 30})
+    )
+    config = intake.config()
+    assert config["agy_dispatch"] == "/opt/pool/dispatch"
+    assert config["agy_dispatch_pool_wait_seconds"] == 30
+    assert config["agy_dispatch_provider_stall_seconds"] == 900
