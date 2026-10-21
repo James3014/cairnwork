@@ -88,12 +88,11 @@ jobs:
           zsh scripts/setup_verifier_python.sh
       - run: uv run pytest -q
 
-  # P2 draft (Linux bwrap, probe only). This job observes how bwrap behaves on a
-  # GitHub ubuntu-24.04 runner — where an AppArmor rule restricts capability-bearing
-  # user namespaces by default — before the policy/wrap backend and witness tests are
-  # written. It prints available() before and after lifting the restriction and runs
-  # the same unguarded namespace probe (unguarded on purpose: a host that cannot nest
-  # namespaces reddens the leg rather than letting sandbox tests skip silently).
+  # Linux bwrap backend, witnessed on real bwrap. On a GitHub ubuntu-24.04 runner an AppArmor
+  # rule restricts capability-bearing user namespaces by default, so the job asserts available()
+  # is False under the restriction and True once it is lifted, runs an unguarded namespace probe
+  # (unguarded on purpose: a host that cannot nest namespaces reddens the leg rather than letting
+  # the sandbox tests skip silently), then runs the sandbox witnesses under CAIRNWORK_REQUIRE_SANDBOX.
   test-linux-sandbox:
     strategy:
       fail-fast: false

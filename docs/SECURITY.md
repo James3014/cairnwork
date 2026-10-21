@@ -8,13 +8,31 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
 - **macOS Seatbelt** (`src/cairnwork_sandbox/seatbelt.py`): default deny. Reads only from an
   allow-list (system libraries, the interpreter, the checkout); writes only to the checkout
   and the per-run directory; no network; credential stores denied last. Behaviour unchanged.
-- **Linux bubblewrap** (`src/cairnwork_sandbox/bwrap.py`, P2): a read-only bind of the whole
-  root, read-write binds for the write roots only, every namespace unshared (no network), all
-  capabilities dropped, nested user namespaces disabled. Named credential directories under
-  `$HOME` (`.ssh`, `.aws`, `.gnupg`, `.config`, `.docker`, `.kube`, `.claude`, `.codex`,
-  `.gemini`, `.nexus`, `.local/state`) are emptied with a tmpfs and `~/.netrc` is replaced by
-  `/dev/null`. Write roots that are `/`, a system or temp directory, `$HOME` or an ancestor of
-  `$HOME` are refused.
+- **Linux bubblewrap** (`src/cairnwork_sandbox/bwrap.py`): a read-only bind of the whole root,
+  read-write binds for the write roots only, every namespace unshared (no network), all
+  capabilities dropped, nested user namespaces disabled. The masked set (all under `$HOME` unless
+  an absolute path is given):
+    - **Credential directories** emptied with a tmpfs: `.ssh`, `.aws`, `.gnupg`, `.config`,
+      `.docker`, `.kube`, `.claude`, `.codex`, `.gemini`, `.nexus`, `.local/state`,
+      `.local/share/keyrings`, `.terraform.d`.
+    - **Credential files** replaced with `/dev/null`: `.netrc`, `.git-credentials`, `.npmrc`,
+      `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, `.Xauthority`.
+    - **Socket trees** emptied with a tmpfs: `/run/user` (systemd user bus, session agents — a
+      `systemd-run --user` would start a process outside the sandbox) and `/tmp/.X11-unix` (an X
+      server lets a process inject input and run commands outside the sandbox).
+    - **Root-equivalent daemon sockets** replaced with `/dev/null`: Docker, Podman, containerd,
+      the system D-Bus, libvirt and LXD (each is root-equivalent; a read-only bind does not stop
+      `connect()` to a pathname `AF_UNIX` socket, and the network namespace covers only abstract
+      sockets).
+
+  Only paths that exist are masked. Write roots that are `/`, a system or temp directory, `$HOME`
+  or an ancestor of `$HOME` are refused.
+
+  **Deployment note:** a verifier write root or state directory must not live under a masked path
+  (e.g. `~/.config`, `~/.local/state`). The credential tmpfs is applied after the write binds, so
+  it would empty the directory inside the sandbox and the run would fail closed (nothing written,
+  no false pass). Put Cairnwork's state under a dedicated location such as `/var/lib/cairnwork` (or
+  `$XDG_STATE_HOME` set outside the masked tree), not under the masked credential directories.
 
 ### The dedicated verifier account (Linux P4, Issue #84)
 
