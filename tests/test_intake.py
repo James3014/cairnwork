@@ -1,12 +1,13 @@
 """Intake without starting real runners: the lock hand-over, cancel, and re-checks."""
 
+import json
 import os
 
 import pytest
 from conftest import git
 
 import cairnwork.intake as intake_module
-from cairnwork.intake import Intake, IntakeRefused
+from cairnwork.intake import DEFAULT_CONFIG, Intake, IntakeRefused
 from cairnwork.pipeline import TaskRejected, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
@@ -189,3 +190,72 @@ def test_a_bad_config_refuses_the_submit_before_binding(intake, repo):
     with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
         intake.submit(payload(repo))
     assert intake.in_flight()["count"] == 0 and FakePopen.held == []
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"agy_dispatch": "relative/dispatch"},
+        {"agy_dispatch": 5},
+        {"agy_dispatch_pool_wait_seconds": 0},
+        {"agy_dispatch_provider_stall_seconds": "900"},
+        {"agy_dispatch_stream_no_progress_seconds": True},
+        {"agy_dispatch_pool_wait_seconds": 1.5},
+        {"agy_dispatch_pool_wait_seconds": 86401},
+        {"agy_dispatch_other": 1},
+        {"model": "a\nb"},
+        {"model": ""},
+        {"model": 3},
+    ],
+)
+def test_bad_agy_dispatch_settings_are_refused(intake, config):
+    (intake.state / "config.json").write_text(json.dumps(config))
+    with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
+        intake.config()
+
+
+def test_agy_dispatch_defaults_to_off_and_accepts_valid_settings(intake):
+    assert intake.config()["agy_dispatch"] is None
+    assert intake.config()["agy_dispatch_pool_wait_seconds"] == 600
+    (intake.state / "config.json").write_text(
+        json.dumps({"agy_dispatch": "/opt/pool/dispatch", "agy_dispatch_pool_wait_seconds": 30})
+    )
+    config = intake.config()
+    assert config["agy_dispatch"] == "/opt/pool/dispatch"
+    assert config["agy_dispatch_pool_wait_seconds"] == 30
+    assert config["agy_dispatch_provider_stall_seconds"] == 900
+
+
+def test_route_hands_the_dispatcher_to_the_worker(monkeypatch):
+    from types import SimpleNamespace
+
+    import cairnwork.route as route
+
+    made = []
+    monkeypatch.setattr(route, "AgyWorker", lambda **kw: made.append(kw) or "worker")
+    monkeypatch.setattr(route, "run_bound_task", lambda *a, **kw: SimpleNamespace(logs=[]))
+
+    def run(config):
+        intake = SimpleNamespace(
+            config=lambda: {**DEFAULT_CONFIG, **config},
+            load_request=lambda _t: None,
+            ledger=None,
+            notary=None,
+            journal=None,
+            run_root=None,
+            verifier_account=lambda: None,
+        )
+        route._run(intake, "t1")  # type: ignore[arg-type]
+        return made[-1]
+
+    assert run({})["dispatch"] is None
+    got = run(
+        {
+            "agy_dispatch": "/opt/pool/d",
+            "agy_dispatch_pool_wait_seconds": 1,
+            "agy_dispatch_provider_stall_seconds": 2,
+            "agy_dispatch_stream_no_progress_seconds": 3,
+        }
+    )["dispatch"]
+    assert (got.path, got.pool_wait_seconds, got.provider_stall_seconds) == ("/opt/pool/d", 1, 2)
+    assert got.stream_no_progress_seconds == 3
