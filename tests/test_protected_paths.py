@@ -32,7 +32,7 @@ OWN_GATE = [
     "pyrightconfig.json",
     "src/cairnwork/issue_task.py",
     "src/cairnwork/protected_paths.py",
-    "src/cairnwork_verify/verify.py",
+    "src/cairnwork/verify_candidate.py",
     "src/cairnwork_sandbox/anything.py",
     "src/cairnwork_protocol/x.py",
     "security.md",

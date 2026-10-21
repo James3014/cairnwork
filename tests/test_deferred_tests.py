@@ -196,6 +196,8 @@ def test_a_retry_with_the_same_test_commit_is_refused(project, tmp_path):
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
     first = run(project, tmp_path, base, test_commit, SeeingWorker({"src/calc.py": "x = 1\n"}))
     assert first.status == "FAILED"
+    # a retry is a manual SUPERSEDED plus a new key (without it the replay is refused earlier)
+    OwnershipLedger(tmp_path / "state" / "own.sqlite").set_status(first.task_id, "SUPERSEDED")
     worker = SeeingWorker(FIX)
     second = run(project, tmp_path, base, test_commit, worker, key="k2")
     assert "TEST_COMMIT_ALREADY_EXPOSED" in second.reason

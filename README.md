@@ -29,7 +29,7 @@ Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexu
 
 ## 硬性限制（CI 強制）
 
-- 單檔 ≤400 行、單函式 ≤80 行；獨立套件各有自己的上限（`cairnwork_sandbox` 1,200、`cairnwork_verify` 600）。
+- 單檔 ≤400 行、單函式 ≤80 行；獨立套件 `cairnwork_sandbox` 上限 1,200。
 - 核心（`src/cairnwork/`）5,000 行是警戒預算，不是硬上限：超過時 CI 發 WARNING、不失敗，但 PR 必須簡短交代原因、替代方案（為何不用既有實作／契約／adapter）、責任（沒有第二權威或重複狀態）、成本與驗證。不要為了避開計數器新建 `cairnwork_*` 套件，程式放哪裡看責任。
 - Ruff BLE001／S110 開啟；失敗情境測試證明失敗不會變成成功。
 - import-linter：禁止循環、禁止核心 import `experimental/`。

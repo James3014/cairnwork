@@ -18,7 +18,7 @@ dependencies = [
 [project.scripts]
 cairnwork-route = "cairnwork.route:main"
 cairnwork-issues = "cairnwork.issue_runner:main"
-cairnwork-verify = "cairnwork_verify.cli:main"
+cairnwork-verify = "cairnwork.verify_cli:main"
 
 [dependency-groups]
 dev = [
@@ -29,7 +29,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cairnwork", "src/cairnwork_protocol", "src/cairnwork_sandbox", "src/cairnwork_verify"]
+packages = ["src/cairnwork", "src/cairnwork_protocol", "src/cairnwork_sandbox"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,7 +50,7 @@ select = ["E", "F", "W", "I", "B", "BLE", "S110", "S112", "UP"]
 "tests/**" = ["S"]
 
 [tool.importlinter]
-root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox", "cairnwork_verify"]
+root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -72,13 +72,6 @@ name = "The sandbox package stands alone (only the core calls it, never the othe
 type = "forbidden"
 source_modules = ["cairnwork_sandbox"]
 forbidden_modules = ["cairnwork", "product", "experimental"]
-allow_indirect_imports = false
-
-[[tool.importlinter.contracts]]
-name = "The core must not import cairnwork_verify (it sits outside the size cap)"
-type = "forbidden"
-source_modules = ["cairnwork"]
-forbidden_modules = ["cairnwork_verify"]
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]

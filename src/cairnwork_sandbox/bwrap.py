@@ -2,10 +2,13 @@
 
 The policy is a read-only bind of the whole root plus read-write binds for the write roots,
 with a fresh /dev and /proc, every namespace unshared (so no network), all capabilities
-dropped and nested user namespaces disabled. Named credential directories under $HOME are
-emptied with a tmpfs and credential files are replaced by /dev/null, and root-equivalent
-daemon sockets (Docker/Podman/containerd) are replaced by /dev/null — a read-only root bind
-does not stop connect() to a pathname socket, which no network namespace covers.
+dropped and nested user namespaces disabled. Named credential directories under $HOME (and the
+/run/user, /tmp/.X11-unix and /run/libvirt socket trees) are emptied with a tmpfs, credential
+files are replaced by /dev/null, and root-equivalent daemon socket files (Docker/Podman/
+containerd, the system D-Bus, LXD, Incus) are replaced by /dev/null — a read-only root bind does
+not stop connect() to a pathname socket, which no network namespace covers (an X server likewise
+lets a reachable client inject input and run commands outside the sandbox). See docs/SECURITY.md
+for the full set.
 
 Trade-off (documented in docs/SECURITY.md): until the verifier runs under its own account
 (P4) the sandbox runs as the invoking account, so everything that account can read is
@@ -78,6 +81,7 @@ _CRED_FILES = (
     ".pgpass",  # PostgreSQL password file
     ".my.cnf",  # MySQL client password
     ".vault-token",  # HashiCorp Vault token
+    ".Xauthority",  # X11 cookie: reaching the X server lets a process inject input / run commands
 )
 # Daemon sockets that, left reachable, grant a candidate the host even with no network
 # namespace: a read-only bind does not stop ``connect()`` to a pathname AF_UNIX socket, and
@@ -93,7 +97,18 @@ _DANGEROUS_SOCKETS = (
     "/var/run/containerd/containerd.sock",
     "/run/dbus/system_bus_socket",  # system D-Bus
     "/var/run/dbus/system_bus_socket",
+    "/var/snap/lxd/common/lxd/unix.socket",  # LXD: root-equivalent (launch a privileged container)
+    "/var/lib/lxd/unix.socket",
+    "/var/lib/incus/unix.socket",  # Incus (the LXD fork): same root-equivalence
+    "/run/incus/unix.socket",
 )
+# libvirt's sockets (the monolithic libvirtd and the modular virtqemud/virtnetworkd/… daemons)
+# all live under /run/libvirt, so that whole directory is emptied with a tmpfs (see
+# _socket_dirs_to_empty) rather than enumerating each socket here.
+# Socket directories emptied with a tmpfs (the whole tree at once, uid-independent): the X11
+# server sockets (a reachable X server lets a process inject input and run commands outside the
+# sandbox on a desktop) and the per-user runtime tree (systemd user bus, session agents).
+_X11_SOCKET_DIR = "/tmp/.X11-unix"  # noqa: S108 - masked, not created
 
 # Unshare a user + pid namespace, drop all capabilities, disable nested userns, bind the root
 # read-only, mount a fresh /proc, run true. Exit 0 means bwrap can build a confining namespace
@@ -232,23 +247,33 @@ def build_policy(
         if real and real not in masked_socks:
             masked_socks.add(real)
             flags += ["--ro-bind", "/dev/null", real]
-    # Empty the whole /run/user runtime tree with a tmpfs: it holds the systemd user bus (a
-    # `systemd-run --user` would start a process outside the sandbox), the SSH/keyring agent
-    # socket and other session IPC. A tmpfs over the tree covers every uid at once, so it is
-    # right whether the candidate runs as the launcher or a different (P4) account uid.
-    runtime_dir = _user_runtime_dir()
-    if runtime_dir is not None:
-        flags += ["--tmpfs", _safe(runtime_dir)]
+    # Empty the socket trees that exist with a tmpfs (whole tree, uid-independent).
+    for socket_dir in _socket_dirs_to_empty():
+        flags += ["--tmpfs", _safe(socket_dir)]
     return Policy("\n".join(flags) + "\n")
 
 
-def _user_runtime_dir() -> str | None:
-    """`/run/user` (the per-user runtime tree: systemd user buses, session agent sockets) to
-    empty with a tmpfs, or None when it is absent. The whole tree is masked, not one UID's
-    subdir, so it holds whether the candidate runs as the launching account or (under P4) a
-    dedicated verifier account with a different UID — the policy is built before any account
-    switch, so keying on the launcher's own uid would mask the wrong subdir."""
-    return "/run/user" if os.path.isdir("/run/user") else None
+def _socket_dirs_to_empty() -> list[str]:
+    """The socket directories to empty with a tmpfs, those that exist. Masking the whole tree
+    (not a per-path or per-uid entry) is uid-independent and covers every socket under it, so it
+    holds whether the candidate runs as the launching account or (under P4) a dedicated verifier
+    uid — the policy is built before any account switch, so keying on the launcher's own uid would
+    mask the wrong subdir. The tuple is read each call (tests rebind the module globals):
+    ``/run/user`` holds the systemd user bus (a ``systemd-run --user`` would start a process
+    outside the sandbox) and session agents; ``/tmp/.X11-unix`` the X server sockets (a reachable
+    X server lets a process inject input and run commands); ``/run/libvirt`` (and
+    ``/var/run/libvirt`` where that is a separate tree, not a symlink to ``/run``) every libvirt
+    daemon socket (the monolithic ``libvirtd`` and the modular ``virtqemud``/``virtnetworkd``/… —
+    each root-equivalent), covered in one tmpfs rather than enumerating each socket. Deduplicated
+    by real path so two names for the same directory (the usual /var/run -> /run symlink) mask
+    it once."""
+    seen: set[str] = set()
+    dirs = []
+    for d in ("/run/user", _X11_SOCKET_DIR, "/run/libvirt", "/var/run/libvirt"):
+        if os.path.isdir(d) and os.path.realpath(d) not in seen:
+            seen.add(os.path.realpath(d))
+            dirs.append(d)
+    return dirs
 
 
 def _binary() -> str:
