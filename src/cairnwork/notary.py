@@ -42,6 +42,7 @@ from cairnwork_protocol import (
     acceptance_contract_hash,
     change_set_hash,
     evidence_bundle_hash,
+    response_binding_problem,
     verification_plan_hash,
 )
 
@@ -118,6 +119,7 @@ class Verdict:
     integrity: str
     verified: bool
     response: dict[str, Any]
+    reason: str = ""  # set when Core said VERIFIED but the response is not bound to the request
 
 
 def default_core_verify() -> CoreVerify:
@@ -126,10 +128,24 @@ def default_core_verify() -> CoreVerify:
     return verify_generic_changeset
 
 
+def default_core_identity() -> dict[str, Any]:
+    from product.protocol import core_identity
+
+    return core_identity()
+
+
 class Notary:
-    def __init__(self, path: Path, core_verify: CoreVerify | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        core_verify: CoreVerify | None = None,
+        core_identity: dict[str, Any] | None = None,
+    ) -> None:
+        """core_identity is what a Core response must report as itself (default: the Core
+        installed beside Cairnwork); a remote Core needs its own pinned identity."""
         self._path = Path(path)
         self._core_verify = core_verify or default_core_verify()
+        self._core_identity = core_identity
         conn = self._connect()
         try:
             conn.execute("BEGIN")  # one read snapshot for both checks
@@ -229,7 +245,16 @@ class Notary:
         base, candidate, request_hash, request_json, http_status, status, integrity, resp = row
         request, response = json.loads(request_json), json.loads(resp)
         verified = _is_verified(http_status, status, integrity, response, request, request_hash)
-        verified = verified and _columns_match(request, task_id, attempt_id, base, candidate)
+        reason = ""
+        if verified:
+            if self._core_identity is None:
+                self._core_identity = default_core_identity()
+            reason = response_binding_problem(request, response, self._core_identity) or ""
+        verified = (
+            verified
+            and not reason
+            and _columns_match(request, task_id, attempt_id, base, candidate)
+        )
         if expected_candidate is not None and expected_candidate != candidate:
             verified = False
         return Verdict(
@@ -243,6 +268,7 @@ class Notary:
             integrity,
             verified,
             response,
+            reason,
         )
 
     def _recorded(self, task_id: str, attempt_id: str, request_hash: str) -> Verdict | None:

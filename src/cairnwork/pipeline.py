@@ -39,7 +39,7 @@ from cairnwork.deferred_tests import (
 from cairnwork.gitcmd import OID
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import OwnershipLedger, request_digest
+from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -161,7 +161,7 @@ def run_task(
     specs = check_task(task)
     verifying = (verifier_account, verifier_python)
     with runlock.held(ledger.path, exclusive=False):
-        bound = ledger.bind(task.idempotency_key, task.request(), "cairnwork", task.card_hash)
+        bound = ledger.bind(task.idempotency_key, task.request(), OWNER, task.card_hash)
         record = bound.record
         if bound.duplicate:
             return TaskResult(record.task_id, "", record.status, reason="DUPLICATE_REQUEST")
@@ -189,7 +189,7 @@ def run_bound_task(
         same = record.idempotency_key == task.idempotency_key and (
             record.request_digest == request_digest(task.request())
         )
-        if not same or record.owner != "cairnwork" or record.card_hash != task.card_hash:
+        if not same or record.owner != OWNER or record.card_hash != task.card_hash:
             raise TaskRejected("REQUEST_MISMATCH", f"{task_id} was bound to another request")
         if record.status != "BOUND":
             return TaskResult(task_id, "", record.status, reason="NOT_BOUND")
@@ -334,7 +334,13 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         )
         recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
         result.verified = bool(verdict.verified and recorded and recorded.verified)
-        result.reason = f"CORE_{verdict.status}"
+        shown = recorded or verdict  # an unverified readback never reads as CORE_VERIFIED
+        result.reason = (
+            f"CORE_{verdict.status}"
+            if result.verified
+            else shown.reason
+            or ("CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}")
+        )
     finally:
         try:
             remove_attempt_clone(run_root, result.attempt_id)
