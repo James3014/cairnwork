@@ -16,6 +16,14 @@ def test_init_writes_a_state_config(tmp_path, capsys):
     assert config == {"verifier_account": False, "verifier_python": "/x"}
     assert (state / "ACCEPTING").exists()
     assert oct((state).stat().st_mode)[-3:] == "700"
+    # A second init must not clobber an existing configured state.
+    assert main(args) == 2
+    assert json.loads((state / "config.json").read_text()) == config
+
+
+def test_init_rejects_a_relative_verifier_python(tmp_path):
+    args = ["init", "--dir", str(tmp_path / "s"), "--verifier-python", "relative/python"]
+    assert main(args) == 2
 
 
 @pytest.mark.sandbox

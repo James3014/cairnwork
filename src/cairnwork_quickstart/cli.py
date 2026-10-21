@@ -50,6 +50,10 @@ def _init(args) -> int:
     if args.verifier_python is not None and not os.path.isabs(args.verifier_python):
         print("error: --verifier-python must be an absolute path", file=sys.stderr)
         return 2
+    if (state / "config.json").exists():
+        # Never overwrite an existing config.json — it may hold a mirror / Core setup.
+        print(f"error: {state} is already configured; use a new --dir", file=sys.stderr)
+        return 2
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(state, 0o700)  # tighten an existing dir too; Intake.prepare() requires 0700
     config = {"verifier_account": args.verifier_account, "verifier_python": args.verifier_python}
