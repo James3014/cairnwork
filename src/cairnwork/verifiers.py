@@ -319,7 +319,10 @@ def _run_one(
 
 
 def _execute(argv, profile_path, checkout, env, timeout, log_path, account):
-    """Run argv under the sandbox profile, as the verifier account when one is given."""
+    """Run argv under the sandbox profile, as the verifier account when one is given.
+    As if the verifier's venv were activated, its bin directory (argv[0] is its Python)
+    leads PATH: tests that spawn plain ``python`` get the same interpreter as pytest."""
+    env["PATH"] = os.pathsep.join(filter(None, (str(Path(argv[0]).parent), env.get("PATH"))))
     if account is None:
         return confined.execute(sandbox.wrap(argv, profile_path), checkout, env, timeout, log_path)
     os.chmod(profile_path, 0o640)
