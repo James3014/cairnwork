@@ -72,6 +72,9 @@ def setup(repo, tmp_path, monkeypatch):
     git(clone, "config", "user.email", "t@e")  # CI runners have no git identity
     git(clone, "config", "user.name", "t")
     started = []
+    monkeypatch.setattr(
+        runner, "_verify_origin", lambda clone, repo: f"https://github.com/{repo}.git"
+    )
     monkeypatch.setattr(intake_module, "_spawn", lambda argv, **kw: started.append(argv))
     intake = Intake(tmp_path / "state")
     intake.set_accepting(True)
@@ -340,3 +343,15 @@ def test_bad_test_commits_need_a_fix(setup, parents, code):
         github.commits["c" * 40] = parents
     out = runner.take(setup["intake"], github, setup["clone"])
     assert code in out[0]["refused"] and github.labels[7] == {runner.NEEDS_FIX}
+
+
+def test_an_issue_with_a_verifier_under_a_configured_test_root_is_taken(setup):
+    intake = setup["intake"]
+    (intake.state / "config.json").write_text(json.dumps({"test_roots": ["pkg/tests"]}))
+    block = {**BLOCK, "verification": ["python3 -m pytest -q pkg/tests/test_calc.py"]}
+    out = runner.take(intake, FakeGitHub([issue(block=block)]), setup["clone"])
+    assert out[0]["duplicate"] is False, out
+    request = intake.load_request(out[0]["task_id"])  # the runner re-reads it with the same roots
+    assert request.test_roots == ("pkg/tests",)
+    again = runner.take(intake, FakeGitHub([issue(8)]), setup["clone"])  # default-root verifier
+    assert again[0]["refused"].startswith("TASK_VERIFICATION_UNSUPPORTED")

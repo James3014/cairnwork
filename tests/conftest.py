@@ -2,6 +2,8 @@ import subprocess
 
 import pytest
 
+pytest_plugins = ["verify_helpers"]
+
 
 def git(repo, *args):
     return subprocess.run(

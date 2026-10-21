@@ -46,6 +46,7 @@
 - 推送之前會再檢查一次：commit 格式、是否為 base 的後代、改動的檔案都在 `allowed_files` 裡。開 PR 之前會先查有沒有既有的 PR，所以中途失敗後重跑也不會重複開。
 - 同一時間只會跑一輪（鎖）。收尾時不會重新檢查可信身分（EIA 會），因為 PR 內容完全不用 Issue 的文字。
 - 目標 repo 的測試需要該 repo 自己的依賴和 pytest 設定。依賴：用 `scripts/setup_target_venv.sh` 建 venv，並在 state 的 `config.json` 設 `verifier_python`。一個 state 目錄只有一個 `verifier_python`，所以 `--repo` 一個 repo 就要配一個自己的 state 目錄（見 `docs/GATEWAY_ROUTE.md`）。pytest 設定一律取自 base commit，由 `src/cairnwork/pytest_config.py` 處理。
+- **測試目錄（`test_roots`）**：很多專案的測試放在套件目錄裡（例如 `pkg/tests/`），不是最上層的 `tests/`。state 的 `config.json` 可設 `"test_roots": ["pkg/tests"]`（相對目錄的清單，預設 `["tests"]`，最多 8 個）。它同時決定三件事：verifier 目標（`python3 -m pytest -q pkg/tests/test_x.py`，不在清單內的目錄一律拒絕 `VERIFIER_NOT_ALLOWED`）、延後測試 commit 只能新增或修改哪些目錄下的檔案、以及候選不可改的測試檔（每個根目錄底下的檔案都算，`conftest.py` 等保護檔名在任何位置都照舊不可改，也不可放進測試 commit）。每一項都要是乾淨的相對路徑，只含英數、底線、連字號和 `/`，每一段不能以 `-` 開頭，最後一段必須剛好是 `tests` 或 `test`（區分大小寫，所以設定不會讓延後測試 commit 改到正式程式）：不能是空的、`.`、絕對路徑、含 `..`、結尾斜線、萬用字元，也不能落在保護路徑（例如 `.github`）；違反就是 `BAD_CONFIG`。執行時還會檢查 base commit：根目錄路徑上的每一段若存在，必須是真的目錄，是符號連結或檔案就拒絕 `TEST_ROOT_NOT_A_DIRECTORY`。延後測試 commit 裡也不能有候選不可改的檔名：`conftest.py`、`pytest.ini`、`setup.cfg`、`tox.ini`、`pyproject.toml`、`setup.py`、`sitecustomize.py`、`usercustomize.py`、`*.pth`；`__init__.py` 仍允許（只有測試自己 import 套件時才會執行）。沒設時行為與以前完全相同。一個 state 目錄只對應一個目標 repo，所以這個設定也是一個 repo 一份。
 - 和 EIA 不重複：`cairnwork:queue` 是另一個標籤。要做 A/B 比較時，再明確把同一張 Issue 兩個標籤都貼上，兩邊各自開 PR，最後只合併一張。
 
 ## 常設 KPI：7 天返工率
@@ -61,6 +62,26 @@
   4. 內文、commit 訊息或留言引用原 Issue／PR，而且說是要修正它 → 算，即使改的是別處。
   5. 其他（包括只是提到原 PR、沒說要修正它）→ 不算。
 - **記錄**：每次交付一列，放在該 state 目錄的交付紀錄裡（欄位：repo、Issue、原 PR、合併時間、返工 PR 編號或空白、判定日期）。合併滿 7 天後補填一次，不回頭重算。交付紀錄的格式由 Cairnwork 整合負責人定義。
+
+## 驗證別處產生的 commit：`cairnwork-verify`
+
+候選 commit 不是 Cairnwork 的 worker 做的（例如另一個 agent 或 CI 產生）時，用同一套檢查判定它（程式在核心之外的 `src/cairnwork_verify/`，核心不會 import 它）：
+
+```
+cairnwork-verify --state DIR run --repo-path P --base SHA --candidate SHA \
+  --allowed-file F [--allowed-file F ...] --verifier "python3 -m pytest -q tests/..." [...] \
+  [--test-commit SHA]
+cairnwork-verify --state DIR cleanup     # 某次執行被強制結束後，在 recover 之前跑
+```
+
+- 檢查和 worker 的產出完全相同：候選必須是 base 上的單一 commit、只動 `allowed_files`（不能刪檔、不能有 symlink 或 submodule）；給了 `--test-commit` 就在 worker 之後才疊上延後測試（同樣的「從未出現過」和單一父 commit 規則）；verifier 在沙盒裡跑（同樣的白名單，任何 skipped 都算失敗）；最後交給 Core 公證，回應必須綁定這個 commit。
+- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`（疊了延後測試時和候選不同）。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤，1 內部錯誤。
+- 和 `submit` 一樣：state 沒有 `ACCEPTING`（drain 中）就拒絕（`VERIFY_NOT_ACCEPTING`），拿到執行鎖之後會再檢查一次。
+- 所有檢查都在這次執行專用的暫存 clone（`<state>/verify-scratch/`，結束就刪）裡跑：從 state 設定的 `mirror`（沒設就從 `--repo-path`）clone，再把 base 和候選從 `--repo-path` fetch 進暫存 clone。外部的候選**不會**進共用的 mirror，也不會寫進呼叫者的 repo（所以不會讓之後的測試 commit 看起來「已出現過」）。
+- `--test-commit` 的處理和 worker 路徑相同：先對 mirror（沒設就是 `--repo-path`）做「從未出現過」檢查，已存在就拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）；測試 commit 從該 repo 的 `origin`（相對路徑會先換成絕對路徑）抓進暫存 clone，疊在候選上後一起驗證，暫存 clone 結束時刪除。**測試 commit 一旦被一次 verify 取用（抓取之前就先用 `O_EXCL` 建立 `<state>/verify-used-tests/<sha>`，所以任何候選程式碼執行之前就登記了，崩潰或之後被拒絕也算用過），就視為已外洩（候選的程式碼和 log 看得到它），之後同一個 commit 一律拒絕 `TEST_COMMIT_ALREADY_EXPOSED`，要換新的測試 commit。只遮掉 log 不夠，因為通過或失敗本身就會洩漏測試內容，所以測試 commit 只能用一次；父 commit 不對的候選在登記之前就被拒絕，燒不掉它。**
+- 不跑 worker，也不在 ownership 帳本建立任務，所以 `in-flight`（部署器的靜止檢查）看不到它；它持有共用的執行鎖，所以 `recover` 這時會回 `RUN_LOCK_BUSY`。Core 紀錄寫進 state 的 notary，任務代號以 `verify-` 開頭。
+- 執行期間在 `<state>/verify-runs/` 放一個加鎖的標記檔；行程被強制結束時核心的 `recover` 看不到它（沒有帳本記錄），改用 `cleanup`：它清掉已死執行的殘留 clone、暫存 clone、基準目錄和孤兒 verifier 行程，還活著的執行（鎖還在）不動。每次 `run` 開頭也會先做一次。**強制結束後請先跑 `cleanup`，再跑 `recover`**，否則孤兒 verifier 會讓 `recover` 以為驗證帳號不閒。注意：設了驗證帳號時，`cleanup` 沒有權限結束以該帳號執行的行程（它只清得掉自己啟動的行程和目錄）；那些行程由 `recover` 的閒置檢查（`require_idle`）處理。
+- 候選必須能從 `--repo-path` 取得（先推到一個分支或 fetch 進來），而且在 `--repo-path` 裡就先檢查它是 base 上的單一 commit（否則 `NOT_ONE_COMMIT_ON_BASE`），之後才 fetch 或做任何其他事；蓋在隱藏測試 commit 上的候選因此在任何東西被抓取之前就被拒絕，不會讓該測試 commit 變成「已出現過」。
 
 ## Upgrading Core
 

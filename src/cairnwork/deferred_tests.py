@@ -29,7 +29,15 @@ from cairnwork.workspace import ATTEMPT_REF_PREFIX
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
 _REGULAR = ("100644", "100755")
 # pytest reads these on its own; a test commit carries tests, not configuration.
-_NOT_TEST_FILES = frozenset({"conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml"})
+# Same names the candidate may not touch (verifiers.protected_verifier_inputs). __init__.py
+# stays allowed: it runs only when the tests themselves import their package.
+_SITE_NAMES = frozenset({"sitecustomize", "usercustomize"})  # also refused as package names
+_NOT_TEST_FILES = frozenset(
+    {
+        "conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml",
+        "setup.py", "sitecustomize.py", "usercustomize.py",
+    }
+)  # fmt: skip
 
 
 class TestCommitRejected(Exception):
@@ -67,7 +75,33 @@ def ensure_test_commit(repo: Path, test_commit: str) -> None:
         raise TestCommitRejected("TEST_COMMIT_UNREADABLE", str(exc)) from exc
 
 
-def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
+def check_roots_on_base(repo: Path, base: str, roots: tuple[str, ...]) -> None:
+    """Every part of each configured root that exists on the base must be a real directory:
+    a symlink or file there could point the tests (or verifier targets) outside the root."""
+    for root in roots:
+        parts = root.split("/")
+        for i, part in enumerate(parts):
+            try:  # the parent's entries: a case variant (Tests/) may alias the root on some disks
+                where = ["--", "/".join(parts[:i]) + "/"] if i else []
+                raw = run_git(repo, "ls-tree", "-z", base, *where)
+            except GitCommandError as exc:
+                raise TestCommitRejected("TEST_ROOT_UNREADABLE", str(exc)) from exc
+            found = [
+                e
+                for e in raw.split("\0")
+                if e.rsplit("\t", 1)[-1].rsplit("/", 1)[-1].casefold() == part.casefold()
+            ]
+            if not found:
+                break  # absent on the base: nothing to hide behind (a test commit may add it)
+            if len(found) > 1 or not found[0].startswith("040000 tree "):
+                raise TestCommitRejected(
+                    "TEST_ROOT_NOT_A_DIRECTORY", f"{parts[: i + 1]} on the base"
+                )
+
+
+def test_paths(
+    repo: Path, base: str, test_commit: str, roots: tuple[str, ...] = ("tests",)
+) -> tuple[str, ...]:
     """The files the test commit adds or changes; refuse anything but plain test files."""
     try:
         parents = run_git(repo, "rev-list", "--parents", "-n", "1", test_commit).split()
@@ -87,8 +121,10 @@ def test_paths(repo: Path, base: str, test_commit: str) -> tuple[str, ...]:
         if (
             status not in ("A", "M")
             or new_mode not in _REGULAR
-            or posix.parts[0] != "tests"
+            or not path.startswith(tuple(f"{r}/" for r in roots))
             or posix.name.casefold() in _NOT_TEST_FILES
+            or posix.name.casefold().endswith(".pth")
+            or {x.casefold() for x in posix.parts} & _SITE_NAMES
         ):
             raise TestCommitRejected("TEST_COMMIT_SCOPE", f"{status} {new_mode} {path}")
         paths.append(path)

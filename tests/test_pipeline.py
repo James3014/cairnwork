@@ -3,10 +3,12 @@ from pathlib import Path
 import pytest
 from conftest import commit_change, git
 
+from cairnwork.issue_task import PROTECTED_NAMES, PROTECTED_PATHS, is_protected
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskRejected, TaskSpec, run_task
+from cairnwork.verifiers import protected_verifier_inputs
 
 VERIFY = (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_calc.py")),)
 
@@ -134,6 +136,12 @@ def test_resend_does_not_run_again(project, stores, tmp_path):
         ({"allowed": ("src/calc.py", "src/calc.py")}, "BAD_SCOPE"),
         ({"allowed": ("src/.GIT/config",)}, "BAD_SCOPE"),
         ({"allowed": ("src/calc.py\n",)}, "BAD_SCOPE"),
+        ({"allowed": (".github/workflows/x.yml",)}, "TASK_ALLOWED_FILES_PROTECTED"),
+        ({"allowed": ("AGENTS.md",)}, "TASK_ALLOWED_FILES_PROTECTED"),
+        ({"allowed": ("agents.MD",)}, "TASK_ALLOWED_FILES_PROTECTED"),
+        ({"allowed": ("uv.lock",)}, "TASK_ALLOWED_FILES_PROTECTED"),
+        ({"allowed": ("src/calc.py", "docs/governance/x.md")}, "TASK_ALLOWED_FILES_PROTECTED"),
+        ({"allowed": ("Pyproject.TOML",)}, "TASK_ALLOWED_FILES_PROTECTED"),
         ({"verifiers": (("v", ("bash", "-c", "true")),)}, "VERIFIER_NOT_ALLOWED"),
     ],
 )
@@ -142,6 +150,23 @@ def test_bad_tasks_are_rejected_before_anything_runs(project, stores, tmp_path, 
         go(project, stores, tmp_path, CrashWorker(), **kwargs)
     assert info.value.code == code
     assert not (tmp_path / "runs").exists()
+
+
+def test_submit_path_refuses_everything_the_issue_path_protects(project, stores, tmp_path):
+    sampled: set[str] = set()
+    rules = [r.replace("*", "x") for r in (*PROTECTED_PATHS, *PROTECTED_NAMES)]
+    for path in (
+        *rules,
+        *(f"d/{n}" for n in PROTECTED_NAMES),
+        *(f"{r}/y.py" for r in PROTECTED_PATHS if "*" not in r),
+    ):
+        assert is_protected(path)
+        with pytest.raises(TaskRejected) as info:
+            go(project, stores, tmp_path, CrashWorker(), allowed=(path,))
+        earlier = "PROTECTED_VERIFIER_INPUT" if protected_verifier_inputs((path,)) else None
+        assert info.value.code == (earlier or "TASK_ALLOWED_FILES_PROTECTED"), path
+        sampled.add(info.value.code)
+    assert sampled == {"TASK_ALLOWED_FILES_PROTECTED", "PROTECTED_VERIFIER_INPUT"}
 
 
 class ChmodWorker:

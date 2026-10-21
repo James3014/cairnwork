@@ -48,6 +48,7 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
 )
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+ORIGIN = re.compile(r"https://github\.com/([^/:@\s]+/[^/:@\s]+)")
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
 
 
@@ -125,7 +126,25 @@ class GitHub:
         ).strip()  # fmt: skip
 
 
+def _verify_origin(clone: Path, repo: str) -> None:
+    """Every fetch and push URL of origin must be https://github.com/<repo>.
+
+    ``get-url --push --all origin`` is the set ``git push origin`` uses (insteadOf included),
+    so the push must name the remote, never a URL built here."""
+    for flags in (("--all",), ("--push", "--all")):
+        urls = _git(clone, "remote", "get-url", *flags, "origin").splitlines()
+        if not any(urls):
+            raise RuntimeError("LINEAGE_REMOTE_UNKNOWN: origin has no URL")
+        for url in urls:
+            found = ORIGIN.fullmatch(url)
+            if not found:
+                raise RuntimeError(f"LINEAGE_REMOTE_UNKNOWN: origin {url!r} is not a github URL")
+            if found[1].removesuffix(".git").lower() != repo.lower():
+                raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
+
+
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
+    _verify_origin(clone, github.repo)
     _git(clone, "fetch", "-q", "origin", "main")
     base = _git(clone, "rev-parse", "origin/main").strip()
     results = []
@@ -150,7 +169,7 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     reason = github.trust(number, QUEUE)
     if reason:  # untrusted queueing: leave the Issue exactly as it is
         return {"skipped": reason}
-    task = parse_task_block(issue.get("body") or "")
+    task = parse_task_block(issue.get("body") or "", tuple(intake.config()["test_roots"]))
     known = _recall(intake, github.repo, number)
     if known and known.get("block_sha256") == task.block_sha256:
         github.relabel(number, RUNNING, QUEUE)  # taken before; only the label was missing
@@ -253,6 +272,7 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     existing = github.find_pr(branch)
     if existing:  # a previous pass opened it; only the labels were left to do
         return existing
+    _verify_origin(clone, github.repo)  # re-checked: the remote may have changed
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
          "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
@@ -315,6 +335,11 @@ def main(argv: list[str] | None = None) -> int:
     intake = Intake(Path(args.state).resolve())
     github = GitHub(args.gh, args.repo)
     clone = Path(args.clone).resolve()
+    try:
+        _verify_origin(clone, github.repo)
+    except RuntimeError as exc:
+        print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))
+        return 3
     intake.prepare()
     fd = os.open(intake.state / "issues.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
