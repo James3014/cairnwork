@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 from dataclasses import dataclass
 
 STATUS_PREFIX = "NEXUS_AGY_DISPATCH "
 TUNING_ENV_PREFIX = "NEXUS_AGY_"  # the pool's own tuning; passed through, nothing else is
 EXHAUSTED_EXIT = 75
 STATUS_TAIL_BYTES = 64 << 10
+TERM_GRACE_SECONDS = 15
 
 
 class AgyPoolExhausted(Exception):
@@ -87,3 +90,12 @@ def raise_if_exhausted(status_path, returncode: int, log_path) -> None:
             "POOL_EXHAUSTED: no account in the pool has quota left; "
             f"no other model was tried; log {log_path}"
         )
+
+
+def ask_to_stop(process) -> None:
+    """SIGTERM the dispatcher's group and wait a short while for it to release its lease."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=TERM_GRACE_SECONDS)
+    except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
+        pass  # the caller kills the group next

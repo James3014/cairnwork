@@ -149,6 +149,8 @@ class AgyWorker:
         try:
             process.wait(timeout=self.timeout_seconds + 60)
         except subprocess.TimeoutExpired as exc:
+            if dispatch is not None:
+                agy_dispatch.ask_to_stop(process)  # lets it release its lease
             raise AgyWorkerError("agy timed out") from exc
         finally:
             held = _stop(process, copier, workdir.name)

@@ -247,3 +247,34 @@ def test_without_a_dispatcher_the_agy_argv_is_unchanged(tmp_path):
     ]  # fmt: skip
     assert stdin_seen.read_text() == "''"  # still no stdin
     assert not (tmp_path / "attempt1.agy.status").exists()
+
+
+def test_a_timed_out_dispatcher_gets_sigterm_first_to_release_its_lease(tmp_path):
+    marker, ready = tmp_path / "term.marker", tmp_path / "ready"
+    body = (
+        "import signal, time\n"
+        f"def term(*_):\n    open({str(marker)!r}, 'w').write('released'); sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, term)\n"
+        f"open({str(ready)!r}, 'w').write('x')\n"
+        "time.sleep(60)"
+    )
+    worker, workdir, _ = _dispatched(tmp_path, body)
+    worker = AgyWorker(timeout_seconds=-57, dispatch=worker.dispatch)  # waits 3 s
+    with pytest.raises(AgyWorkerError, match="timed out"):
+        worker.run(workdir, TASK)
+    assert marker.read_text() == "released"
+
+
+def test_a_timed_out_raw_agy_is_killed_without_sigterm(tmp_path):
+    marker = tmp_path / "term.marker"
+    agy = fake_agy(
+        tmp_path,
+        "import signal, time\n"
+        f"signal.signal(signal.SIGTERM, lambda *_: open({str(marker)!r}, 'w').write('x'))\n"
+        "time.sleep(60)",
+    )
+    workdir = tmp_path / "attempt1"
+    workdir.mkdir()
+    with pytest.raises(AgyWorkerError, match="timed out"):
+        AgyWorker(agy=agy, timeout_seconds=-57).run(workdir, TASK)
+    assert not marker.exists()
