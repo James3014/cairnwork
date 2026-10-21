@@ -158,6 +158,8 @@ def _report(result: dict, kept: Path | None) -> int:
     if verified:
         print("\nCairnwork ran the fix in an isolated clone, enforced that it touched only the")
         print("allowed file, ran the tests, and recorded a Core verdict bound to that commit.")
+        print("\nNext: run it on a real repo's Issue with cairnwork-issues (see docs/QUICKSTART.md),")
+        print("where the worker fixes the bug against deferred tests it never sees.")
     return 0 if verified else 1
 
 

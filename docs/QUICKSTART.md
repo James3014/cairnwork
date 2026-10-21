@@ -47,6 +47,11 @@ Core verdict:
 
 Pass `--keep` to keep the throwaway tree and inspect the isolated clone and logs.
 
+The demo verifies a ready-made (deterministic) candidate so it is repeatable and needs no AI
+worker. In the **real** Issue flow (below) the worker fixes the bug against **deferred tests it
+never sees** — the governance Cairnwork adds — and only a Core VERIFIED verdict marks the task
+done. The demo shows that verification machinery, not the test-hiding, which the real flow adds.
+
 ## 3. Point it at a real repository
 
 Create a state directory (one per target repository) and run the Issue intake:
