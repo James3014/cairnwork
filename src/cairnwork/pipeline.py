@@ -38,10 +38,10 @@ from cairnwork.deferred_tests import (
     test_paths,
 )
 from cairnwork.gitcmd import OID
-from cairnwork.issue_task import is_protected
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
+from cairnwork.protected_paths import path_refusal
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -126,13 +126,17 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
         raise TaskRejected("BAD_SCOPE", "allowed_files must list 1 to 10 paths")
     if len(set(task.allowed_files)) != len(task.allowed_files):
         raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
+    blocked: list[str] = []
     for path in task.allowed_files:
-        if not _clean_relative_path(path):
-            raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
+        refusal = path_refusal(path)
+        if refusal:
+            if refusal[0] == "TASK_ALLOWED_FILES_INVALID":
+                raise TaskRejected("BAD_SCOPE", f"{path!r} is not a clean repository path")
+            blocked.append(path)
     protected = protected_verifier_inputs(task.allowed_files, task.test_roots)
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
-    if blocked := [p for p in task.allowed_files if is_protected(p)]:
+    if blocked:
         raise TaskRejected("TASK_ALLOWED_FILES_PROTECTED", ", ".join(blocked))
     try:
         return tuple(
@@ -140,18 +144,6 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
         )
     except VerifierRejected as exc:
         raise TaskRejected(exc.code, str(exc)) from exc
-
-
-def _clean_relative_path(path: object) -> bool:
-    if not isinstance(path, str) or not path or path != path.strip():
-        return False
-    parts = path.split("/")
-    return (
-        not path.startswith("/")
-        and all(part not in ("", ".", "..") for part in parts)
-        and all(part.lower() != ".git" for part in parts)
-        and not any(ord(ch) < 32 or ch == "\\" for ch in path)
-    )
 
 
 def run_task(

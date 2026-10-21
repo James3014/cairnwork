@@ -36,7 +36,7 @@ def test_a_good_block_parses():
         (body({**GOOD, "allowed_files": ["a/.hidden/x.py"]}), "TASK_ALLOWED_FILES_INVALID"),
         (body({**GOOD, "allowed_files": ["pyproject.toml"]}), "TASK_ALLOWED_FILES_PROTECTED"),
         (body({**GOOD, "allowed_files": ["src/conftest.py"]}), "TASK_ALLOWED_FILES_PROTECTED"),
-        (body({**GOOD, "allowed_files": [".github/x.yml"]}), "TASK_ALLOWED_FILES_INVALID"),
+        (body({**GOOD, "allowed_files": [".github/x.yml"]}), "TASK_ALLOWED_FILES_PROTECTED"),
         (body({**GOOD, "allowed_files": ["Tasks/card.md"]}), "TASK_ALLOWED_FILES_PROTECTED"),
         (
             body({**GOOD, "verification": ["sh -c 'git diff --check a b'"]}),
