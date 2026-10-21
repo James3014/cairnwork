@@ -248,3 +248,61 @@ def _run(task, state, worker):
         task, ledger=OwnershipLedger(state / "own.sqlite"), notary=Notary(state / "n.sqlite"),
         journal=Journal(state / "j.sqlite"), worker=worker, run_root=state / "runs",
     )  # fmt: skip
+
+
+def test_a_case_variant_symlink_of_a_root_is_refused(pkg_project):
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"Tests": "src"})
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, ("tests",))
+    base = _base_with(pkg_project, {"a/Pkg/x.py": "x = 1\n"}, {"a/PKG": "../src"})
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, ("a/pkg/tests",))
+
+
+def test_two_case_variants_of_a_root_are_refused(pkg_project, tmp_path):
+    blob_file = (
+        tmp_path / "blob.txt"
+    )  # built in the index: a case-insensitive disk cannot hold both
+    blob_file.write_text("x = 1\n")
+    blob = git(pkg_project, "hash-object", "-w", str(blob_file))
+    for name in ("Tests/a.py", "tests/b.py"):
+        git(pkg_project, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}")
+    git(pkg_project, "commit", "-q", "-m", "two variants")
+    base = git(pkg_project, "rev-parse", "HEAD")
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, ("tests",))
+
+
+def test_tests_with_teeth_checks_the_roots_before_any_base_run(pkg_project, tmp_path, monkeypatch):
+    import cairnwork.pipeline as pipeline
+
+    git(pkg_project, "rm", "-rq", "pkg")
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"pkg/tests": "../src"})
+    task = TaskSpec("k", "c", "t", "i", pkg_project, base, ("src/calc.py",), (), test_roots=PKG,
+                    test_commit="a" * 40)  # fmt: skip
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the base was run")
+
+    monkeypatch.setattr(pipeline, "run_verifiers", boom)
+    monkeypatch.setattr(pipeline, "ensure_test_commit", boom)
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        pipeline.tests_with_teeth(task, (), tmp_path, None, (None, None))
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["pkg/tests/.pth", "pkg/tests/a.PTH", "pkg/tests/sitecustomize/__init__.py",
+     "pkg/tests/UserCustomize/test_x.py", "pkg/tests/sub/sitecustomize.py"],
+)  # fmt: skip
+def test_a_test_commit_refuses_pth_files_and_site_packages(pkg_project, path):
+    base, commit = make_test_commit(pkg_project, {path: "x = 1\n"})
+    with pytest.raises(Rejected, match="TEST_COMMIT_SCOPE"):
+        paths_of(pkg_project, base, commit, PKG)
+
+
+def test_a_root_directory_itself_is_protected():
+    two = ("tests", "pkg/tests")
+    assert protected_verifier_inputs(("pkg/tests", "tests", "pkg"), two) == ("pkg/tests", "tests")
+    with pytest.raises(TaskRejected, match="PROTECTED_VERIFIER_INPUT"):
+        check_task(_task(("pkg/tests",), (*RUN, "pkg/tests/test_x.py"), PKG))

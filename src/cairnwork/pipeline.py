@@ -250,6 +250,7 @@ class _Steps:
 def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
     """Check a task's deferred tests once the worker is done: plain test files on the
     base whose test cases really fail there. Returns their paths."""
+    check_roots_on_base(task.repo, task.base_commit, task.test_roots)  # before any base run
     ensure_test_commit(task.repo, task.test_commit)
     paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
     targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse

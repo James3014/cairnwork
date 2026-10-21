@@ -233,7 +233,8 @@ def protected_verifier_inputs(paths: tuple[str, ...], roots=DEFAULT_TEST_ROOTS) 
     return tuple(
         path
         for path in paths
-        if path.startswith(tuple(f"{r}/" for r in roots))
+        if path in roots
+        or path.startswith(tuple(f"{r}/" for r in roots))
         or path.rsplit("/", 1)[-1] in _PROTECTED_NAMES
         or ("/" not in path and path.endswith((".py", ".pth")))
     )
