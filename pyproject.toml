@@ -7,6 +7,8 @@ name = "cairnwork"
 version = "0.0.1.dev0"
 description = "Cairnwork: governed agent task core (successor to Nexus-new)"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "nexus-certify",
