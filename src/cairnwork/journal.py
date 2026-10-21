@@ -32,13 +32,16 @@ CREATE TABLE IF NOT EXISTS attempt_journal (
     at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attempt_journal_task ON attempt_journal (task_id);
-CREATE UNIQUE INDEX IF NOT EXISTS attempt_journal_one_dispatch
-    ON attempt_journal (task_id) WHERE phase = 'DISPATCHED';
 CREATE TRIGGER IF NOT EXISTS attempt_journal_no_update BEFORE UPDATE ON attempt_journal
     BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_journal
     BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
 """
+
+_ONE_DISPATCH = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS attempt_journal_one_dispatch"
+    " ON attempt_journal (task_id) WHERE phase = 'DISPATCHED'"
+)
 
 
 class JournalIntegrityViolation(Exception):
@@ -64,8 +67,17 @@ class Journal:
         self._path = Path(path)
         conn = self._connect()
         try:
-            _refuse_double_dispatch(conn)
             conn.executescript(_SCHEMA)
+            conn.execute("BEGIN IMMEDIATE")  # the check and the index share one write lock
+            try:
+                _refuse_double_dispatch(conn)
+                conn.execute(_ONE_DISPATCH)
+                conn.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                raise JournalIntegrityViolation(f"{JournalIntegrityViolation.code}: {exc}") from exc
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
         finally:
             conn.close()
 
@@ -106,13 +118,10 @@ class Journal:
 
 def _refuse_double_dispatch(conn: sqlite3.Connection) -> None:
     """Name the tasks an old journal dispatched twice, before the unique index is built."""
-    try:
-        rows = conn.execute(
-            "SELECT task_id FROM attempt_journal WHERE phase = 'DISPATCHED'"
-            " GROUP BY task_id HAVING count(*) > 1 ORDER BY task_id"
-        ).fetchall()
-    except sqlite3.OperationalError:  # no table yet: a new journal
-        return
+    rows = conn.execute(
+        "SELECT task_id FROM attempt_journal WHERE phase = 'DISPATCHED'"
+        " GROUP BY task_id HAVING count(*) > 1 ORDER BY task_id"
+    ).fetchall()
     if rows:
         tasks = ", ".join(r[0] for r in rows)
         raise JournalIntegrityViolation(
