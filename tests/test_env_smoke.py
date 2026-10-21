@@ -27,6 +27,21 @@ def test_tests_that_fail_bare_are_not_a_probe(repo):
     assert _probe(repo, "tests/test_bad.py").verdict == "REPO_TESTS_NOT_GREEN"
 
 
+def test_bare_side_puts_the_venv_python_on_path(repo, monkeypatch):
+    # A repo whose test spawns plain ``python`` must pass bare too: the venv bin leads PATH on
+    # both sides (verifiers #33). With PATH stripped to the system dirs, the fix is what makes
+    # this ENV_OK instead of a false REPO_TESTS_NOT_GREEN.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # plain "python": absent from /usr/bin on macOS, so only the prepended venv bin resolves it.
+    source = (
+        "import subprocess\n"
+        "def test_x():\n"
+        "    subprocess.run(['python', '-c', 'import sys'], check=True)\n"
+    )
+    commit_change(repo, files={"tests/test_py.py": source})
+    assert _probe(repo, "tests/test_py.py").verdict == "ENV_OK"
+
+
 def test_write_outside_the_repo_shows_up_as_env_coupling(repo):
     # Passes bare (it can write to /private/tmp) but the sandbox denies that write, so the
     # same green test fails only under the real verification path -> ENV_COUPLING.

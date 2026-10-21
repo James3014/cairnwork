@@ -69,12 +69,21 @@ def _head(repo: Path) -> str:
 
 
 def _bare_is_green(probe: RepoProbe, commit: str, run_root: Path, timeout: int) -> bool | None:
-    """Run the repo's tests with no sandbox in a clean checkout. None if it times out."""
+    """Run the repo's tests with no sandbox in a clean checkout. None if it times out.
+
+    The timeout kills only the direct child; a test that spawns a detached daemon can outlive it.
+    That is acceptable for a manual onboarding probe."""
     clone_id = f"bare-{secrets.token_hex(6)}"
     checkout = create_attempt_clone(probe.repo, commit, run_root, clone_id)
     home = run_root / f"home-{secrets.token_hex(6)}"
     home.mkdir()
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
+    env = {k: os.environ[k] for k in ("LANG", "LC_ALL") if k in os.environ}
+    # Match the sandbox side (verifiers #33): the venv's bin leads PATH, so a test that spawns
+    # plain ``python`` gets the same interpreter here as under verification. Without this a repo
+    # that shells out to ``python`` fails bare and is misreported REPO_TESTS_NOT_GREEN.
+    env["PATH"] = os.pathsep.join(
+        filter(None, (str(Path(probe.python).parent), os.environ.get("PATH")))
+    )
     env.update(HOME=str(home), TMPDIR=str(home), PYTHONDONTWRITEBYTECODE="1")
     argv = [probe.python, "-m", "pytest", "-q", *probe.targets]
     try:
@@ -121,6 +130,8 @@ def probe_repo(probe: RepoProbe, *, timeout: int = 300) -> ProbeResult:
 
 
 def _classify(run) -> str:
+    # Heuristic from the verifier log: WRITE_OUTSIDE_REPO also matches a bare "Operation not
+    # permitted" from git/xcrun denials; the order is a best guess, not a proof of cause.
     if run.timed_out:
         return "TIMEOUT"
     if run.mutated:
@@ -157,7 +168,13 @@ def main(argv: list[str]) -> int:
     print(f"{'verdict':<22}{'reason':<34}repo")
     for r in results:
         print(f"{r.verdict:<22}{r.reason:<34}{r.repo}")
-    return 1 if any(r.verdict == "ENV_COUPLING" for r in results) else 0
+    if any(r.verdict == "ENV_COUPLING" for r in results):
+        return 1
+    # Distinct code: a repo we could not probe at all (not green bare, or bare timed out) is not
+    # the same signal as a coupling, but still not a clean onboarding.
+    if any(r.verdict in ("REPO_TESTS_NOT_GREEN", "SKIP_BARE_TIMEOUT") for r in results):
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
