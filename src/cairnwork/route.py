@@ -10,7 +10,7 @@ not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
     cairnwork-route --state DIR check < request.json   # shadow mode: validate only
     cairnwork-route --state DIR submit < request.json
     cairnwork-route --state DIR status (--task-id ID | --key KEY)
-    cairnwork-route --state DIR cancel --task-id ID
+    cairnwork-route --state DIR cancel --task-id ID --owner OWNER
     cairnwork-route --state DIR in-flight        # for the deployer's quiescence gate
     cairnwork-route --state DIR accept | drain   # switch new-task intake on / off
     cairnwork-route --state DIR recover          # after a restart, with no runner alive
@@ -71,7 +71,7 @@ def _dispatch(intake: Intake, args) -> Any:
     if args.command == "status":
         return intake.status(task_id=args.task_id, key=args.key)
     if args.command == "cancel":
-        return intake.cancel(args.task_id)
+        return intake.cancel(args.task_id, args.owner)
     if args.command == "in-flight":
         return intake.in_flight()
     if args.command in ("accept", "drain"):
@@ -116,7 +116,9 @@ def _parser() -> argparse.ArgumentParser:
     which = status.add_mutually_exclusive_group(required=True)
     which.add_argument("--task-id")
     which.add_argument("--key")
-    commands.add_parser("cancel").add_argument("--task-id", required=True)
+    cancel = commands.add_parser("cancel")
+    cancel.add_argument("--task-id", required=True)
+    cancel.add_argument("--owner", required=True)
     for name in ("in-flight", "accept", "drain", "recover"):
         commands.add_parser(name)
     run = commands.add_parser("_run")

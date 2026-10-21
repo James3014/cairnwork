@@ -311,11 +311,13 @@ class Intake:
             "core_verified": verified,
         }
 
-    def cancel(self, task_id: str) -> dict[str, Any]:
+    def cancel(self, task_id: str, owner: str) -> dict[str, Any]:
         """Only a task that has not started can be cancelled; a running one finishes.
-        Compare-and-set: a runner that dispatched first wins, cancel is refused."""
+        Compare-and-set: a runner that dispatched first wins, cancel is refused.
+        The caller states its owner; a task bound to another owner is refused."""
         ledger = self.ledger
-        ledger.get(task_id=task_id)  # UnknownTask before anything else
+        if ledger.get(task_id=task_id).owner != owner:  # UnknownTask comes first
+            raise IntakeRefused("OWNER_MISMATCH", f"{task_id} is not owned by {owner!r}")
         try:
             record = ledger.set_status(task_id, "CANCELLED", expected_from="BOUND")
         except InvalidStatusTransition as exc:

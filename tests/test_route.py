@@ -118,8 +118,10 @@ def test_submitted_task_is_fixed_and_core_verified(state, project):
     other = {**request(project), "title": "something else"}
     code, clash = route(state, "submit", stdin=other)
     assert code == 2 and clash["error"] == "KeyReusedWithDifferentRequest"
-    code, refused = route(state, "cancel", "--task-id", out["task_id"])
+    code, refused = route(state, "cancel", "--task-id", out["task_id"], "--owner", "cairnwork")
     assert code == 2 and refused["error"] == "NOT_CANCELLABLE"
+    code, refused = route(state, "cancel", "--task-id", out["task_id"], "--owner", "nexus-new")
+    assert code == 2 and refused["error"] == "OWNER_MISMATCH"
 
 
 def test_a_wrong_fix_has_a_candidate_but_is_not_core_verified(state, project):
