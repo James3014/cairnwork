@@ -53,6 +53,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -201,10 +202,10 @@ def _run_all(
         work.mkdir(mode=0o700)
         if account is not None:
             os.chmod(work, 0o3770)
-        checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
-        if account is not None:
-            account.grant_read(checkout)  # whatever the caller's umask was
         try:
+            checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
+            if account is not None:
+                account.grant_read(checkout)  # whatever the caller's umask was
             runs.append(
                 _run_one(
                     repo,
@@ -262,24 +263,11 @@ def _run_one(
     if attempt_id:
         env[ATTEMPT_ENV] = attempt_id
     argv = [
-        python,
-        "-P",
-        "-m",
-        "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
-        "-c",
-        str(ini),
-        f"--rootdir={checkout}",
-        f"--confcutdir={checkout}",
-        "-o",
-        "addopts=",
-        *settings.args(plugins),
-        "-p",
-        report_guard.MODULE,
-        *spec.targets,
-    ]
+        python, "-P", "-m", "pytest", "-q", "-p", "no:cacheprovider", "-c", str(ini),
+        f"--rootdir={checkout}", f"--confcutdir={checkout}", "-o", "addopts=",
+        *settings.args(plugins), "-p", report_guard.MODULE, *spec.targets,
+    ]  # fmt: skip
+    before = os.lstat(checkout)
     profile = None
     if sandbox.available():
         profile = sandbox.build_profile(
@@ -294,6 +282,8 @@ def _run_one(
         _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
     mutated = tuple(tree_differences(repo, candidate_commit, checkout))
+    if not _same_directory(checkout, before):  # e.g. renamed away, a symlink put in place
+        mutated = ("checkout replaced", *mutated)
     verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     passed = (
@@ -325,6 +315,15 @@ def _run_one(
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes
     )
+
+
+def _same_directory(path: Path, before: os.stat_result) -> bool:
+    try:
+        after = os.lstat(path)
+    except OSError:
+        return False
+    same = (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    return same and stat.S_ISDIR(after.st_mode)
 
 
 def _execute(argv, profile_path, checkout, env, timeout, log_path, account):

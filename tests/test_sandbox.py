@@ -351,3 +351,20 @@ def test_tests_may_write_next_to_their_repo_but_not_above_the_run(project, tmp_p
     runs = tmp_path / "runs"
     assert not (runs / "escaped").exists()
     assert not list(runs.glob("*.work")), "work directory left behind"
+
+
+@pytest.mark.sandbox
+def test_a_replaced_checkout_fails_the_run(project, tmp_path):
+    """The child may write the work directory, so it could move its checkout away and put a
+    symlink in its place; the owner then must not compare (or trust) another tree."""
+    code = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "def test_swap():\n"
+        "    repo = Path(__file__).resolve().parents[1]\n"
+        "    os.rename(repo, repo.parent / 'moved')\n"
+        "    os.symlink(repo.parent / 'moved', repo)\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_swap.py": code}, "tests/test_swap.py")
+    assert not result.observation.passed
+    assert "checkout replaced" in result.mutated

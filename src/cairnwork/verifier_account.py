@@ -142,15 +142,24 @@ class VerifierAccount:
 
     def remove(self, path: Path) -> None:
         """Remove files the account created (the owner cannot), only inside its run root."""
+        if os.path.islink(path):  # never follow a name the account may have swapped
+            return
         real = Path(os.path.realpath(path))
         if self.run_root.resolve() not in real.parents:
             raise VerifierAccountError(f"{real} is outside {self.run_root}")
-        subprocess.run(  # noqa: S603 - fixed argv, path checked above
-            [SUDO, "-n", "-u", self.user, "--", "/bin/rm", "-rf", "--", str(real)],
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        # The account may have left directories without permissions: rm -rf alone cannot
+        # enter them. chmod runs as the account (allowed only through sandbox-exec).
+        for argv in (
+            ["/usr/bin/sandbox-exec", "-p", "(version 1) (allow default)"]
+            + ["/bin/chmod", "-R", "u+rwx", "--", str(real)],
+            ["/bin/rm", "-rf", "--", str(real)],
+        ):
+            subprocess.run(  # noqa: S603 - fixed argv, path checked above
+                [SUDO, "-n", "-u", self.user, "--", *argv],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
 
     @staticmethod
     def share_run(private: Path, ini: Path, run_dir: Path, home: Path, tmp: Path) -> None:
@@ -158,7 +167,8 @@ class VerifierAccount:
         write only its run/ scratch. The log stays owner-only."""
         os.chmod(private, 0o750)
         os.chmod(ini, 0o640)
-        for directory in (run_dir, home, tmp):
+        os.chmod(run_dir, 0o3770)  # sticky: the account cannot swap home/ or tmp/ away
+        for directory in (home, tmp):
             os.chmod(directory, 0o2770)
 
     @staticmethod

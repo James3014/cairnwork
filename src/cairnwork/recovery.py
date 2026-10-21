@@ -120,7 +120,16 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
     root = Path(run_root)
     (root / f"{attempt_id}.index").unlink(missing_ok=True)
     (root / f"{attempt_id}.tests.index").unlink(missing_ok=True)
+    for work in root.glob(f"{attempt_id}-[vb]-v*.work"):  # a verifier checkout's own dir
+        if work.is_dir() and not work.is_symlink():
+            try:
+                remove_attempt_clone(work, work.name.removesuffix(".work"))
+            except WorkspaceError:
+                pass
+            shutil.rmtree(work, ignore_errors=True)
     for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
+        if private.suffix == ".work":
+            continue
         if private.is_dir() and not private.is_symlink():
             # a base-test run is not Core evidence and would show the tests: all of it goes
             keep_log = f"{attempt_id}-v-" in private.name
