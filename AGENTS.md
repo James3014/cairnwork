@@ -71,7 +71,7 @@ Approved by the maintainer on 2026-10-21. These rules speed review up; they do n
 
 ### Required checks and merging
 
-- The ruleset requires `test (3.11)`, `test (3.12)`, `test (3.13)`, `test-macos`, `Review record present (advisory)` and `Bindings preflight (default branch)`. Other jobs (`pyright`, `hypothesis`, CodeQL) are not required but should not be red without a written disposition (pre-existing or accepted) in a PR comment (the review record, or a separate comment when the independent review is a human APPROVED review).
+- The ruleset requires `test (3.11)`, `test (3.12)`, `test (3.13)`, `test-macos`, `Review record present (advisory)`, `Bindings preflight (default branch)` and `pyright (trusted)` (posted from the default branch by `pyright-trusted.yml`; no new Pyright findings versus the merge base). Other jobs (`hypothesis`, CodeQL) are not required but should not be red without a written disposition (pre-existing or accepted) in a PR comment (the review record, or a separate comment when the independent review is a human APPROVED review).
 - When the required checks are green, merge with `gh pr merge N --squash --match-head-commit <head sha>`. A transient 502 may still have started the merge, and an immediate retry then says it is already in progress: poll the PR state until `MERGED` instead of retrying blindly.
 - After merging, delete the remote branch and remove your worktree.
 
