@@ -152,3 +152,40 @@ def test_a_run_that_fails_only_because_the_checkout_was_mutated_is_not_re_run(pr
     )  # fmt: skip
     assert result.status == "FAILED" and not result.verified
     assert result.p2p["applied"] == "whole-suite" and "rerun" not in result.p2p
+
+
+def _fails_and(side_effect):
+    # a candidate-only failing test that also does something to the run itself
+    head = "import pathlib, subprocess, sys, calc\ndef test_x():\n    if calc.SLOW:\n"
+    return head + side_effect + "        assert False\n"
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "recorded"),
+    [
+        pytest.param(
+            "        (pathlib.Path(__file__).parent / 'junk.txt').write_text('x')\n",
+            "junk.txt",
+            id="checkout-mutated",
+        ),
+        pytest.param(
+            "        subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+            "                         start_new_session=True)\n",
+            "outlived",
+            id="surviving-process",
+        ),
+    ],
+)
+def test_a_failure_that_also_taints_the_run_is_not_plain_and_not_re_run(
+    project, tmp_path, side_effect, recorded
+):
+    # #130: the first run exits 1 on a failed test, but the run itself is suspect (a mutated
+    # checkout, a surviving process): plain_failure stays False, so no second try can wash it
+    result = run(
+        project, tmp_path, {"src/calc.py": FIX_ADD.replace("SLOW = False", "SLOW = True")},
+        mode="whole-suite", extra={"tests/test_taint.py": _fails_and(side_effect)},
+    )  # fmt: skip
+    assert result.status == "FAILED" and not result.verified
+    assert result.p2p["applied"] == "whole-suite" and "rerun" not in result.p2p
+    assert recorded in result.reason  # the cause is what the record says, not just FAILED
+    assert not list((tmp_path / "state" / "runs").glob("*-r-*"))  # and no second run happened
