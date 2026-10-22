@@ -4,6 +4,7 @@ verifier runs stubbed so each rule is checked on its own (test_p2p.py runs them 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,22 @@ def test_a_degraded_probe_records_the_rule_actually_used(monkeypatch):
     assert got.spec.verifier_id == "p2p-module-dir"
 
 
+def test_degraded_probe_whose_module_dir_tests_all_fail_on_the_base_is_refused(monkeypatch):
+    # G1: module-dir selected files after the degradation, but none of their tests passes on
+    # the base, so the target set is empty: still not "nothing to run"
+    existing = ("tests/a/test_b.py", "tests/z/test_slow.py")
+    outcomes = {"tests/a/test_b.py::test_1": "failed", "tests/a/test_b.py::test_2": "skipped"}
+    got, probed = plan(monkeypatch, existing, [(None, "base-probe-timeout"), (outcomes, "")])
+    assert isinstance(got, P2PRejected) and len(probed) == 2
+    assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "passes on the base" in str(got)
+
+
+def test_no_base_passing_test_without_degradation_runs_nothing(monkeypatch):
+    outcomes = {"tests/test_a.py::test_1": "failed"}
+    got, _ = plan(monkeypatch, ("tests/test_a.py",), [(outcomes, "")])
+    assert isinstance(got, P2PPlan) and got.spec is None and got.rule["targets"] == 0
+
+
 def test_tests_failing_or_skipped_on_the_base_are_left_out(monkeypatch):
     outcomes = {
         "tests/test_a.py::test_ok": "passed",
@@ -87,17 +104,18 @@ def test_tests_failing_or_skipped_on_the_base_are_left_out(monkeypatch):
 # --- the candidate run: timeout and the flaky rule ------------------------------------------
 
 
-def make_run(passed, *, timed_out=False, outcomes=None, log_dir):
+def make_run(passed, *, timed_out=False, outcomes=None, log_dir, plain=None, mutated=()):
     log_dir.mkdir(parents=True, exist_ok=True)
     spec = VerifierSpec("p2p-whole-suite", ("tests/test_a.py",))
     return VerifierRun(
         spec,
         None if timed_out else (0 if passed else 1),
         timed_out,
-        (),
+        mutated,
         log_dir / "verifier.log",
         VerifierObservation(spec.verifier_id, "x/verifier.log", "sha256:0", passed),
         outcomes or {},
+        plain_failure=(not passed and not timed_out) if plain is None else plain,
     )
 
 
@@ -135,7 +153,14 @@ def test_a_failure_that_passes_on_the_re_run_is_not_blocking_but_recorded(monkey
     second = make_run(True, log_dir=tmp_path / "2")
     (runs, rule), notes = candidate(monkeypatch, tmp_path, [first, second])
     assert runs == (second,)  # Core sees the re-run only
-    assert rule["rerun"] == {"first_failed": ["tests/test_a.py::t"], "first_returncode": 1}
+    assert rule["rerun"] == {
+        "failed": ["tests/test_a.py::t"],
+        "returncode": 1,
+        "timed_out": False,
+        "mutated": [],
+        "survivors": 0,
+        "ran": False,
+    }
     assert json.loads(notes[1]) == rule  # the re-run's artifact hash binds the flaky record
     assert json.loads((tmp_path / "2" / "p2p-selection.json").read_text()) == rule
 
@@ -145,7 +170,26 @@ def test_a_failure_on_both_runs_blocks(monkeypatch, tmp_path):
     second = make_run(False, outcomes={"tests/test_a.py::t": "failed"}, log_dir=tmp_path / "2")
     (runs, rule), notes = candidate(monkeypatch, tmp_path, [first, second])
     assert runs == (second,) and not runs[0].observation.passed
-    assert len(notes) == 2 and rule["rerun"]["first_failed"] == ["tests/test_a.py::t"]
+    assert len(notes) == 2 and rule["rerun"]["failed"] == ["tests/test_a.py::t"]
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [{"mutated": ("src/x.py",)}, {"survivors": 1}, {}],  # {}: oversized log / no guard report
+)
+def test_a_failure_that_is_not_a_plain_test_failure_blocks_without_a_re_run(
+    monkeypatch, tmp_path, signal
+):
+    # F2: integrity signals (mutated checkout, surviving process, oversized log, the guard says
+    # the run did not happen) are never given a second try
+    first = make_run(
+        False, outcomes={"tests/test_a.py::t": "passed"}, log_dir=tmp_path / "1",
+        plain=False, mutated=signal.get("mutated", ()),
+    )  # fmt: skip
+    if "survivors" in signal:
+        first = replace(first, survivors=signal["survivors"])
+    (runs, rule), notes = candidate(monkeypatch, tmp_path, [first])
+    assert len(notes) == 1 and runs == (first,) and "rerun" not in rule
 
 
 def test_a_re_run_that_times_out_blocks(monkeypatch, tmp_path):

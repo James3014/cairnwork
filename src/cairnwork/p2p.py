@@ -10,11 +10,14 @@ Failure paths, none of which can end VERIFIED:
 
 * base probe times out (or cannot report) in ``whole-suite``: degrade to ``module-dir`` once and
   say so in the record; when ``module-dir`` itself cannot be probed, or selects no test file at
-  all, the task is REFUSED (a degraded probe never turns into "nothing to run");
+  all, or none of its tests passes on the base, the task is REFUSED (a degraded probe never
+  turns into "nothing to run");
 * the candidate run times out: its observation is not a pass, so Core says not verified;
-* the candidate run fails without timing out: it is re-run once (flaky rule). A pass on the
-  re-run is what Core sees, with the first run's failing tests recorded in the rule (``rerun``);
-  a second failure is what Core sees, so not verified;
+* the candidate run fails only because a test failed (``VerifierRun.plain_failure``: no timeout,
+  mutated checkout, surviving process or oversized log, and the guard reported a failed test):
+  it is re-run once (flaky rule). A pass on the re-run is what Core sees, with the first run's
+  failing tests and integrity signals recorded in the rule (``rerun``); a second failure is what
+  Core sees, so not verified. Any other failed run blocks as it is, without a re-run;
 * the p2p verifier id clashes with an author verifier: REFUSED.
 
 ``p2p_time_budget_seconds`` bounds each run (probe, degraded probe, candidate run, re-run).
@@ -121,18 +124,23 @@ def plan_p2p(task, specs, test_files, mode, budget, run_root, result, verifying)
         files = select_p2p_targets(task.allowed_files, existing, task.test_roots, applied)
         rule |= {"applied": applied, "selected_files": len(files)}
         if not files and rule["degraded"]:  # #117 F1: a failed probe is not "nothing to run"
-            raise P2PRejected(
-                "P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']}; no module-dir test to fall back on"
-            )
+            raise _unusable(rule, "no module-dir test to fall back on")
         if not files:
             return P2PPlan(rule | {"targets": 0}, None, budget)
         if files == tried:  # the narrower mode would run the same files again
             break
         outcomes, why = _probe(task, files, run_root, result, verifying, budget)
         if outcomes is not None:
-            return _plan(task, specs, rule, _passing_targets(outcomes), budget)
+            plan = _plan(task, specs, rule, _passing_targets(outcomes), budget)
+            if plan.spec is None and rule["degraded"]:  # G1: and none passes on the base
+                raise _unusable(rule, "no module-dir test passes on the base")
+            return plan
         rule["degraded"], tried = why, files
     raise P2PRejected("P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']} in {rule['applied']} mode")
+
+
+def _unusable(rule: dict, why: str) -> P2PRejected:
+    return P2PRejected("P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']}; {why}")
 
 
 def _plan(task, specs, rule, targets, budget) -> P2PPlan:
@@ -155,10 +163,12 @@ def run_plan(
     if plan.spec is None:
         return (), plan.rule
     run = _run_once(plan.spec, plan, plan.note, task, judged, run_root, result, verifying, "q")
-    if run.observation.passed or run.timed_out:
+    if run.observation.passed or not run.plain_failure:  # timeout, mutation, survivors...: block
         return (run,), plan.rule
     failing = sorted(n for n, outcome in run.outcomes.items() if outcome != "passed")
-    rule = plan.rule | {"rerun": {"first_failed": failing, "first_returncode": run.returncode}}
+    first = {"failed": failing, "returncode": run.returncode, "timed_out": run.timed_out,
+             "mutated": list(run.mutated), "survivors": run.survivors, "ran": run.ran}  # fmt: skip
+    rule = plan.rule | {"rerun": first}
     note = json.dumps(rule, sort_keys=True)
     run = _run_once(plan.spec, plan, note, task, judged, run_root, result, verifying, "r")
     return (run,), rule

@@ -69,6 +69,9 @@ def test_a_sibling_regression_in_a_flat_test_directory_is_caught(project, tmp_pa
     assert result.status == "FAILED" and not result.verified
     assert result.p2p["applied"] == mode
     assert result.p2p["targets"] >= 1
+    # a real test failure is a plain failure: re-run once, fails again, the first run recorded
+    assert result.p2p["rerun"]["failed"] == ["tests/test_sibling.py::test_neg"]
+    assert result.p2p["rerun"]["mutated"] == [] and result.p2p["rerun"]["survivors"] == 0
 
 
 def test_the_same_fix_without_the_regression_is_verified_and_the_rule_is_recorded(
@@ -133,3 +136,18 @@ def test_a_degraded_probe_with_no_module_dir_test_refuses_instead_of_verifying(r
     result = run(repo, tmp_path, {"src/calc.py": FIX_ADD}, mode="whole-suite", budget=10)
     assert result.status == "FAILED" and not result.verified
     assert "P2P_BASE_PROBE_UNUSABLE" in result.reason and "base-probe-timeout" in result.reason
+
+
+def test_a_run_that_fails_only_because_the_checkout_was_mutated_is_not_re_run(project, tmp_path):
+    # F2: every test passes, but the candidate makes a test write into the checkout: that is an
+    # integrity failure, not a flaky test, so it blocks without a second try
+    writes = (
+        "import pathlib, calc\ndef test_writes():\n    if calc.SLOW:\n"
+        "        (pathlib.Path(__file__).parent / 'junk.txt').write_text('x')\n"
+    )
+    result = run(
+        project, tmp_path, {"src/calc.py": FIX_ADD.replace("SLOW = False", "SLOW = True")},
+        mode="whole-suite", extra={"tests/test_writes.py": writes},
+    )  # fmt: skip
+    assert result.status == "FAILED" and not result.verified
+    assert result.p2p["applied"] == "whole-suite" and "rerun" not in result.p2p
