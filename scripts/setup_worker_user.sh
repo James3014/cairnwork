@@ -68,12 +68,21 @@ id -Gn "$WORKER" | tr ' ' '\n' | grep -qx staff && { echo "worker is in staff; r
 dseditgroup -o edit -a "$OWNER" -t user "$RUNGROUP"
 dseditgroup -o edit -a "$WORKER" -t user "$RUNGROUP"
 
-# 4. directories. worker-runs: setgid so per-run dirs the dispatcher makes inherit RUNGROUP; 0770
-#    so the worker (group) can write and the owner (group) can read back and delete. bin: owner-
-#    owned 0755 (the dispatcher installs the wrapper there; the worker cannot modify it).
+# 4. directories.
+#    $ROOT may already be the verifier's 2750 owner:cairnwork (no other-traverse); the worker is in
+#    neither that owner nor that group, so add other-execute (traverse only, no listing) so it can
+#    descend to worker-runs/bin. The verifier's own runs subdir stays 2750 group cairnwork, which
+#    the worker (not in cairnwork) still cannot enter. (chmod o+x is additive: owner/group/setgid
+#    and the absence of other-read are preserved.)
 mkdir -p "$RUNS" "$BIN"
+chmod o+x "$ROOT"
+#    worker-runs: setgid so the per-run dirs the DISPATCHER (as the owner) creates inherit RUNGROUP.
+#    Mode 2710 — owner (dispatcher) creates/renames per-run dirs; the worker's group may only
+#    traverse into its own per-run dir, NOT write the parent, so it cannot rename or replace a
+#    sibling attempt's directory. Each per-run dir is opened to the group (2770) by the dispatcher.
 chgrp "$RUNGROUP" "$RUNS"
-chmod 2770 "$RUNS"
+chmod 2710 "$RUNS"
+#    bin: owner-owned 0755 (the dispatcher installs the wrapper there; the worker cannot modify it).
 chown "$OWNER" "$BIN"
 chmod 0755 "$BIN"
 
