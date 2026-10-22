@@ -34,7 +34,7 @@ from typing import Any
 
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
-from cairnwork.issue_publish import failure_text, refusal_code, require_bot_gh
+from cairnwork.issue_publish import TASK_ID, done_text, failure_text, refusal_code, require_bot_gh
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
 from cairnwork.pipeline import TaskRejected
@@ -261,7 +261,7 @@ def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
         github.relabel(number, NEEDS_FIX, QUEUE)
         github.comment(
             number,
-            f"Cairnwork 不能接這張：`{refusal_code(exc)}`。修正 ```eia-task 區塊，移除 "
+            f"Cairnwork 不能接這張：`{refusal_code(exc)}`。修正 `eia-task` 區塊，移除 "
             f"`{NEEDS_FIX}` 再加上 `{QUEUE}`。測試檔不能列在 allowed_files，要先放在 main。",
         )
     except (RuntimeError, OSError) as gh_error:  # retried on the next pass
@@ -283,7 +283,7 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
             if status["status"] == "COMPLETED" and status["core_verified"]:
                 url = _open_pr(intake, github, clone, number, status)
                 github.relabel(number, DONE, RUNNING)
-                github.comment(number, f"Cairnwork 修好並通過 Core 驗證，draft PR：{url}")
+                github.comment(number, done_text(url, github.repo))
                 results.append({"issue": number, "pr": url})
             else:
                 github.relabel(number, FAILED_LABEL, RUNNING)
@@ -298,7 +298,10 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     attempt, commit = str(status["attempt_id"]), str(status["candidate_commit"])
     if not ATTEMPT_ID.fullmatch(attempt) or not COMMIT.fullmatch(commit):
         raise ValueError(f"unexpected attempt or commit: {attempt!r} {commit!r}")
-    request = intake.load_request(str(status["task_id"]))
+    task_id = str(status["task_id"])
+    if not TASK_ID.fullmatch(task_id):
+        raise ValueError(f"unexpected task id: {task_id!r}")
+    request = intake.load_request(task_id)
     _git(clone, "merge-base", "--is-ancestor", request.base_commit, commit)
     changed = _git(clone, "diff", "--name-only", "--no-renames", request.base_commit, commit)
     tests = ()
@@ -317,7 +320,7 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
          "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
     body = (
         f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
-        f"- Cairnwork task `{status['task_id']}`，attempt `{attempt}`\n"
+        f"- Cairnwork task `{task_id}`，attempt `{attempt}`\n"
         f"- 候選 commit `{commit}`，Core 判定 VERIFIED（Cairnwork notary）\n"
         "- 這是 draft：照一般規則審查、檢查全綠後再由審查者合併；Cairnwork 不合併。\n\n"
         f"<!-- NEXUS_CORE_ISSUE: {number} -->\n<!-- NEXUS_ISSUE_INTENT_V1\n"
