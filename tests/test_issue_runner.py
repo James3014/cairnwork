@@ -85,6 +85,7 @@ def setup(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner, "_verify_origin", lambda clone, repo: f"https://github.com/{repo}.git"
     )
+    monkeypatch.setattr(runner, "require_bot_gh", lambda gh, repo, cwd: None)  # no network here
     monkeypatch.setattr(intake_module, "_spawn", lambda argv, **kw: started.append(argv))
     intake = Intake(tmp_path / "state")
     intake.set_accepting(True)
