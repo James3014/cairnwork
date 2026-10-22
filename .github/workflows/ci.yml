@@ -124,3 +124,39 @@ jobs:
           zsh scripts/setup_verifier_python.sh
       - name: Account witnesses on real bwrap, as the dedicated account
         run: uv run pytest -q -m verifier_account
+
+  # Launch witness (fe56's launch gate ③): the real one-line-install UX end to end on Linux.
+  # The test/sandbox jobs run pytest, but nothing otherwise proves the *installed* console script
+  # `cairnwork demo` reaches a Core VERIFIED verdict on Linux. This installs the tool the way an end
+  # user does (uv tool install) and runs the demo on real bwrap, failing closed if the verdict is not
+  # VERIFIED or if the sandbox was absent (a demo that ran without a backend is not a valid witness).
+  # AppArmor's default userns restriction is lifted here exactly as an end user loads an AppArmor
+  # profile. Advisory, not a required check.
+  demo-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+      - name: Lift the AppArmor userns restriction (end users load a profile instead)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Install the cairnwork tool the way an end user does
+        run: |
+          uv tool install --from . cairnwork
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: cairnwork demo must reach a Core VERIFIED verdict on real bwrap
+        run: |
+          set -o pipefail
+          # `cairnwork demo` exits 0 only on a genuine VERIFIED verdict, and the engine records
+          # VERIFIED only when a real sandbox backend ran the verifier (run_verifiers skips the run
+          # and fails when no backend is available). So an exit 0 here already means the demo was
+          # sandbox-backed: if the AppArmor lift above had silently failed, the demo would exit 1
+          # and pipefail would redden this step. The grep is a second check on the printed verdict.
+          cairnwork demo | tee demo.log
+          grep -q 'core status:  VERIFIED' demo.log
