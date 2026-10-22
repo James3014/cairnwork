@@ -15,7 +15,11 @@ from cairnwork.p2p import P2PPlan, P2PRejected, plan_p2p, run_plan
 from cairnwork.verifiers import VerifierRun, VerifierSpec
 
 TASK = SimpleNamespace(
-    repo="/repo", base_commit="b" * 40, test_roots=("tests",), allowed_files=("src/pkg/a/b.py",)
+    repo="/repo",
+    base_commit="b" * 40,
+    test_roots=("tests",),
+    import_paths=(),
+    allowed_files=("src/pkg/a/b.py",),
 )
 RESULT = SimpleNamespace(attempt_id="att")
 VERIFYING = (None, None)

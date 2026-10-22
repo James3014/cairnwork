@@ -55,7 +55,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cairnwork_sandbox
@@ -119,6 +119,7 @@ def run_verifiers(
     attempt_id: str = "",
     account: VerifierAccount | None = None,
     base_commit: str | None = None,
+    import_paths: tuple[str, ...] = (),
     note: str = "",
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
@@ -126,10 +127,14 @@ def run_verifiers(
     If a checkout cannot be created the error propagates and no observation is
     returned (fail closed). With an account, verifiers run as that dedicated user
     (verifier_account.py), in its run root and with its Python (or ``python``), one at a
-    time. With base_commit, pytest settings come from that commit (pytest_config.py). A non-empty
-    note (the P2P selection rule, p2p.py) is bound into each observation's artifact hash.
+    time. With base_commit, pytest settings come from that commit (pytest_config.py).
+    ``import_paths`` (operator state config, #82) are checkout-relative dirs prepended to the
+    verifier's import path so a src-layout project can import its own package. A non-empty note
+    (the P2P selection rule, p2p.py) is bound into each observation's artifact hash.
     """
     settings = pytest_config.base_settings(repo, base_commit)
+    if import_paths:
+        settings = replace(settings, pythonpath=(*import_paths, *settings.pythonpath))
     if account is not None:
         run_root, python = account.run_root, python or account.python
         with account.exclusive(lock_wait_seconds(len(specs), timeout)):

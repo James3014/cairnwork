@@ -32,7 +32,10 @@ class IntakeRefused(Exception):
 
 
 def task_from_payload(
-    payload: Any, test_roots: tuple[str, ...] = ("tests",), test_store=None
+    payload: Any,
+    test_roots: tuple[str, ...] = ("tests",),
+    test_store=None,
+    import_paths: tuple[str, ...] = (),
 ) -> TaskSpec:
     """A closed schema: unknown or missing fields are refused, never ignored."""
     if not isinstance(payload, dict) or not FIELDS <= set(payload) <= FIELDS | {"test_commit"}:
@@ -63,6 +66,7 @@ def task_from_payload(
         verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
         test_commit=payload.get("test_commit", ""),
         test_roots=test_roots,
+        import_paths=import_paths,
         test_store=test_store,
     )
 
