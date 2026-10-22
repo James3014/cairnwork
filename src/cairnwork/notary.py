@@ -37,11 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.changeset import GitChangeSet, read_change_set
-from cairnwork.core_request import (
-    AcceptanceSpec,
-    VerifierObservation,
-    build_core_request,
-)
+from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
 from cairnwork.notary_schema import SCHEMA, SCHEMA_VERSION
 from cairnwork.receipt_binding import request_matches
 from cairnwork_protocol import (
@@ -256,13 +252,20 @@ class Notary:
         return self._read(task_id, attempt_id, expected_candidate)
 
     def bound_to(self, task_id: str, attempt_id: str, change: GitChangeSet) -> bool:
-        """Whether this attempt's stored request is for exactly this git change set (#61)."""
-        conn = self._connect()
+        """Attempt is VERIFIED and its stored request is this git change (#61); fails closed."""
         try:
-            sql = "SELECT request_json FROM core_verifications WHERE task_id = ? AND attempt_id = ?"
-            row = conn.execute(sql, (task_id, attempt_id)).fetchone()
-        finally:
-            conn.close()
+            verdict = self._read(task_id, attempt_id, change.candidate_commit)
+            if verdict is None or not verdict.verified:
+                return False
+            conn = self._connect()
+            try:
+                sql = "SELECT request_json FROM core_verifications"
+                row = conn.execute(sql + " WHERE task_id = ? AND attempt_id = ?",
+                                   (task_id, attempt_id)).fetchone()  # fmt: skip
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
         return row is not None and request_matches(json.loads(row[0]), change)
 
     def _read(
