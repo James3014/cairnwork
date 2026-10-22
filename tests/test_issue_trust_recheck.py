@@ -13,15 +13,15 @@ from cairnwork.intake import Intake
 
 
 class Counting(FakeGitHub):
-    """trusted may be a list: one answer per trust call (the last repeats)."""
+    """One trust answer per call (the last repeats); counts the calls."""
 
-    calls = 0
+    def __init__(self, issues, answers=("",)):
+        super().__init__(issues)
+        self.answers, self.calls = answers, 0
 
     def trust(self, number, label):
         self.calls += 1
-        if isinstance(self.trusted, list):
-            return self.trusted[min(self.calls, len(self.trusted)) - 1]
-        return self.trusted
+        return self.answers[min(self.calls, len(self.answers)) - 1]
 
 
 def _submitted(setup, monkeypatch):
@@ -33,8 +33,15 @@ def _submitted(setup, monkeypatch):
 
 def test_a_stranger_author_is_not_touched_at_all(setup, monkeypatch):
     calls = _submitted(setup, monkeypatch)
-    github = FakeGitHub([issue()], trusted="AUTHOR_UNTRUSTED")
-    github.comment = github.relabel = lambda *a: pytest.fail("a write reached GitHub")
+
+    class NoWrites(FakeGitHub):
+        def comment(self, number, text):
+            pytest.fail("a comment reached GitHub")
+
+        def relabel(self, number, add, remove):
+            pytest.fail("a relabel reached GitHub")
+
+    github = NoWrites([issue()], trusted="AUTHOR_UNTRUSTED")
     assert runner.take(setup["intake"], github, setup["clone"]) == [
         {"issue": 7, "skipped": "AUTHOR_UNTRUSTED"}
     ]
@@ -71,7 +78,7 @@ def test_a_title_edit_after_the_first_check_stops_dispatch(setup, monkeypatch):
 
 def test_distrust_at_the_second_check_stops_dispatch(setup, monkeypatch):
     calls = _submitted(setup, monkeypatch)
-    github = Counting([issue()], trusted=["", "QUEUE_LABELED_BY_UNTRUSTED"])
+    github = Counting([issue()], ["", "QUEUE_LABELED_BY_UNTRUSTED"])
     out = runner.take(setup["intake"], github, setup["clone"])
     assert out == [{"issue": 7, "skipped": "TRUST_CHANGED_BEFORE_DISPATCH"}]
     assert github.calls == 2 and calls == []
