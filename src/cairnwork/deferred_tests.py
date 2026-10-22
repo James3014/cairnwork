@@ -80,9 +80,10 @@ def check_roots_on_base(repo: Path, base: str, roots: tuple[str, ...]) -> None:
     a symlink or file there could point the tests (or verifier targets) outside the root."""
     for root in roots:
         parts = root.split("/")
+        found_parts = []
         for i, part in enumerate(parts):
             try:  # the parent's entries: a case variant (Tests/) may alias the root on some disks
-                where = ["--", "/".join(parts[:i]) + "/"] if i else []
+                where = ["--", "/".join(found_parts) + "/"] if i else []
                 raw = run_git(repo, "ls-tree", "-z", base, *where)
             except GitCommandError as exc:
                 raise TestCommitRejected("TEST_ROOT_UNREADABLE", str(exc)) from exc
@@ -97,6 +98,7 @@ def check_roots_on_base(repo: Path, base: str, roots: tuple[str, ...]) -> None:
                 raise TestCommitRejected(
                     "TEST_ROOT_NOT_A_DIRECTORY", f"{parts[: i + 1]} on the base"
                 )
+            found_parts.append(found[0].rsplit("\t", 1)[-1].rsplit("/", 1)[-1])
 
 
 def test_paths(
