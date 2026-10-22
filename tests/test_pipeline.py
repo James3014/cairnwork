@@ -90,6 +90,26 @@ def test_correct_fix_completes_with_core_verified(project, stores, tmp_path):
     assert stores[0].get(task_id=result.task_id).status == "COMPLETED"
 
 
+def test_existing_root_module_completes_with_core_verified(repo, stores, tmp_path):
+    commit_change(
+        repo,
+        {
+            "calc.py": "def add(a, b):\n    return a + b + 1\n",
+            "tests/test_calc.py": (
+                "from calc import add\ndef test_add():\n    assert add(2, 3) == 5\n"
+            ),
+        },
+    )
+    result = go(
+        repo,
+        stores,
+        tmp_path,
+        EditWorker({"calc.py": "def add(a, b):\n    return a + b\n"}),
+        allowed=("calc.py",),
+    )
+    assert result.status == "COMPLETED" and result.verified, result.reason
+
+
 @pytest.mark.parametrize(
     "worker,reason",
     [

@@ -261,8 +261,12 @@ class Intake:
     def submit(self, payload: Any) -> dict[str, Any]:
         roots = tuple(self.config()["test_roots"])
         task = task_from_payload(payload, roots)
-        check_task(task)
-        mirror = self.config()["mirror"]  # a bad config is refused here, not by the runner
+        config = self.config()
+        account = self.verifier_account()
+        check_task(
+            task, verifier_python=config["verifier_python"] or getattr(account, "python", None)
+        )
+        mirror = config["mirror"]  # a bad config is refused here, not by the runner
         source = task.repo
         if mirror:  # the task is bound to Cairnwork's own repository, whatever the caller's
             if not Path(mirror).is_dir():
