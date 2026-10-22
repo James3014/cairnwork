@@ -50,7 +50,7 @@
 3. 由跑 Cairnwork 的帳號匯入：`cairnwork-verify --state <目錄> import-tests --repo-path <mirror> --bundle tests.bundle`（細節與拒絕條件見下方「私有存放區」）。
 4. state 的 `config.json` 設 `"test_source": "bundle"`（沒匯入就拒絕，絕不退回 origin）。
 5. Issue 的 `eia-task` 區塊把該 commit 的 40 位 hex 填進 `test_commit`，其餘照常。
-6. 要出證明時，確認證明包 `test_source` 是 `"bundle"`（`cairnwork-attest verify --json` 會印出）；是 `"auto"` 的證明不能拿來宣稱測試保密。
+6. 要出證明時，確認證明包 `test_source` 是 `"bundle"`（它是該次執行時用的模式，之後改 config.json 不會改變它）（`cairnwork-attest verify --json` 會印出）；是 `"auto"` 或 `"none"` 的證明不能拿來宣稱測試保密。
 
 ## 保證與限制
 

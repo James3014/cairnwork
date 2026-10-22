@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +22,7 @@ STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 _OID = re.compile(r"^[0-9a-f]{40}$")
 
 
-TEST_SOURCES = ("bundle", "auto")
+TEST_SOURCES = ("bundle", "auto", "none")  # none: no hidden tests, or a pre-change run
 
 
 class StatementInputError(AttestError):
@@ -36,15 +36,25 @@ class Producer:
     git_commit: str = ""
 
 
-def state_test_source(state_dir: Path) -> str:
-    """``"bundle"`` only if config.json says exactly that; anything else is ``"auto"``."""
+def run_test_source(state_dir: Path, task_id: str, attempt_id: str) -> str:
+    """The hidden-test mode the run journaled (read-only); no row -> ``"none"``."""
+    path = Path(state_dir) / "journal.sqlite"
+    if not path.is_file():
+        return "none"
     try:
-        config = json.loads((Path(state_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "auto"
-    return (
-        "bundle" if isinstance(config, dict) and config.get("test_source") == "bundle" else "auto"
-    )
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT detail FROM attempt_journal"
+                " WHERE task_id = ? AND attempt_id = ? AND phase = 'TEST_SOURCE' ORDER BY seq",
+                (task_id, attempt_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "none"
+    modes = {row[0] for row in rows}
+    return modes.pop() if len(modes) == 1 and modes <= set(TEST_SOURCES) else "none"
 
 
 def _validate_verified_record(verified: VerifiedRecord) -> None:
@@ -92,7 +102,7 @@ def build_statement(
     *,
     producer: Producer,
     timestamp: str,
-    test_source: str = "auto",
+    test_source: str = "none",
 ) -> dict[str, Any]:
     if test_source not in TEST_SOURCES:
         raise StatementInputError(f"test_source must be one of {TEST_SOURCES}, got {test_source!r}")

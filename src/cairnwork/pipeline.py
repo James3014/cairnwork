@@ -370,6 +370,8 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
             return
         judged, test_files, plan = candidate.candidate_commit, (), None
         if task.test_commit:  # only now: the worker is done (deferred_tests.py, p2p.py)
+            mode = "bundle" if task.test_store and task.test_store.required else "auto"
+            steps.reach("TEST_SOURCE", mode)  # the mode of this run, read by cairnwork_attest
             try:
                 test_files = tests_with_teeth(task, specs, run_root, result, verifying)
                 judged = lay_tests_over(

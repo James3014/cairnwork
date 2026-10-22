@@ -1,6 +1,7 @@
 """The private store for deferred tests (#119): the test commit lives in a bundle under the
 0700 state directory and on no remote, and every failure refuses instead of falling back."""
 
+import json
 import os
 import subprocess
 from typing import Any, cast
@@ -13,7 +14,11 @@ from test_deferred_tests import project as project  # noqa: F401 - fixture
 import cairnwork.deferred_tests as dt
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.deferred_tests import TestCommitRejected, ensure_test_commit
-from cairnwork.pipeline import TaskSpec
+from cairnwork.journal import Journal
+from cairnwork.notary import Notary
+from cairnwork.ownership import OwnershipLedger
+from cairnwork.pipeline import TaskSpec, run_task
+from cairnwork_attest.statement import run_test_source
 
 
 @pytest.fixture
@@ -235,3 +240,40 @@ def test_a_submitted_task_carries_the_strict_store(project, tmp_path):  # noqa: 
     }  # fmt: skip
     test_store = task_from_payload(payload, ("tests",), store).test_store
     assert test_store is not None and test_store.required is True
+
+
+def _run_and_journal(project, tmp_path, *, required, with_tests):  # noqa: F811
+    """Run one task and return the test_source the statement would record for it."""
+    base, sha, bundle = make_bundle(project, {"tests/test_regression.py": REGRESSION}, tmp_path)
+    state = tmp_path / "state"
+    store = DeferredStore(state / "deferred-tests", required=required)
+    store.path.mkdir(parents=True, mode=0o700)
+    store.import_bundle(project, bundle, used_dir(store))
+    task = TaskSpec("k", "card-k", "fix add", "x", project, base, ("src/calc.py",), CHECK,
+                    test_commit=sha if with_tests else "", test_store=store)  # fmt: skip
+    result = run_task(
+        task,
+        ledger=OwnershipLedger(state / "own.sqlite"),
+        notary=Notary(state / "notary.sqlite"),
+        journal=Journal(state / "journal.sqlite"),
+        worker=SeeingWorker(FIX),
+        run_root=state / "runs",
+    )
+    assert not with_tests or result.status == "COMPLETED", result.reason  # no tests: CHECK fails
+    # config drift after the run: the recorded mode must still be the run's
+    (state / "config.json").write_text(
+        json.dumps({"test_source": "auto" if required else "bundle"})
+    )
+    return run_test_source(state, result.task_id, result.attempt_id)
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("required", [False, True])
+def test_the_run_journals_its_own_test_source(project, tmp_path, required):  # noqa: F811
+    mode = _run_and_journal(project, tmp_path, required=required, with_tests=True)
+    assert mode == ("bundle" if required else "auto")
+
+
+@pytest.mark.sandbox
+def test_a_task_without_a_test_commit_journals_no_test_source(project, tmp_path):  # noqa: F811
+    assert _run_and_journal(project, tmp_path, required=True, with_tests=False) == "none"

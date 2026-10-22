@@ -105,7 +105,7 @@ def sign_statement(
     producer: Producer,
     timestamp: str,
     private_key: Ed25519PrivateKey,
-    test_source: str = "auto",
+    test_source: str = "none",
 ) -> dict[str, Any]:
     """Build a Statement from a verified record and return its signed DSSE envelope."""
     statement = build_statement(

@@ -26,7 +26,7 @@ from cairnwork_attest.keys import (
     public_key_pem,
 )
 from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
-from cairnwork_attest.statement import TEST_SOURCES, Producer, build_statement, state_test_source
+from cairnwork_attest.statement import TEST_SOURCES, Producer, build_statement, run_test_source
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
 
@@ -82,7 +82,7 @@ def _cmd_statement(args: argparse.Namespace) -> int:
             version = "0.0.1.dev0"
         producer = Producer(name="cairnwork", version=version, git_commit="")
         timestamp = datetime.now(UTC).isoformat()
-        test_source = state_test_source(state_dir)  # config at statement time, see ATTESTATION.md
+        test_source = run_test_source(state_dir, args.task_id, args.attempt_id)
 
         out_path = Path(args.out)
         if args.sign:

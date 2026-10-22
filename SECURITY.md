@@ -32,7 +32,7 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
 
 ## 平時
 
-- **隱藏測試保密只在 `test_source: "bundle"` 成立**（私有存放區、沒匯入就拒絕、絕不退回 origin）。`auto`（程式預設）是相容／示範模式，沒有保密保證，任何文件和證明都不得在 `auto` 下主張。證明包的 `test_source` 欄位記錄模式。
+- **隱藏測試保密只在 `test_source: "bundle"` 成立**（私有存放區、沒匯入就拒絕、絕不退回 origin）。`auto`（程式預設）是相容／示範模式，沒有保密保證，任何文件和證明都不得在 `auto` 下主張。證明包的 `test_source` 欄位記錄該次執行用的模式（`bundle`／`auto`／`none`）。
 
 - CI 只用最小權限（`permissions: contents: read`）。
 - 不在 repo 裡寫主機路徑、內部 IP、帳號 email。
