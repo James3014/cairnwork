@@ -62,8 +62,9 @@ import cairnwork_sandbox
 from cairnwork import confined, pytest_config, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
+from cairnwork.reasons import why_not_passed
 from cairnwork.treecompare import tree_differences
-from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
+from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lock_wait_seconds
 from cairnwork.verifier_spec import (  # re-exported for existing importers
     VerifierRejected,
     VerifierSpec,
@@ -100,6 +101,7 @@ class VerifierRun:
     # a plain test failure: the guard reported a failed test and nothing about the run itself
     # is suspect (no timeout, mutation, survivor or oversized log); p2p.py may re-run only this
     plain_failure: bool = False
+    why: str = ""  # in words, why the run did not pass ("" when it passed): reasons.py
 
 
 def run_verifiers(
@@ -127,7 +129,7 @@ def run_verifiers(
     settings = pytest_config.base_settings(repo, base_commit)
     if account is not None:
         run_root, python = account.run_root, python or account.python
-        with account.exclusive():
+        with account.exclusive(lock_wait_seconds(len(specs), timeout)):
             if not account.available(python):
                 raise VerifierAccountError(f"account {account.user} is not usable")
             account.require_idle()
@@ -267,11 +269,16 @@ def _run_one(
     verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0
-    clean = clean and log_path.stat().st_size <= MAX_LOG_BYTES
+    too_big = log_path.stat().st_size > MAX_LOG_BYTES
+    clean = clean and not too_big
     passed = profile is not None and returncode == 0 and clean and ran
     plain_failure = (
         profile is not None and returncode == 1 and clean and "failed" in verdict.outcomes.values()
     )
+    why = "" if passed else why_not_passed(
+        ran_sandboxed=profile is not None, returncode=returncode, timed_out=timed_out,
+        mutated=mutated, survivors=survivors, log_too_big=too_big, tests_ran=ran,
+    )  # fmt: skip
     _remove_scratch((home, tmp), account)
     digest = _record_digest(
         candidate_commit=candidate_commit,
@@ -292,7 +299,7 @@ def _run_one(
     )
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes,
-        survivors=survivors, ran=ran, plain_failure=plain_failure,
+        survivors=survivors, ran=ran, plain_failure=plain_failure, why=why,
     )  # fmt: skip
 
 

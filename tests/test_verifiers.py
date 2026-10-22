@@ -295,3 +295,26 @@ def test_candidate_only_reachable_from_attempt_refs_can_be_verified(project, tmp
 def test_artifact_id_points_at_the_log(project, tmp_path):
     result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
     assert (tmp_path / "runs" / result.observation.artifact_id) == result.log_path
+
+
+# Issue #114: a run whose log shows passing tests failed with no recorded cause. Reading the
+# process list is slow on a loaded host; one timed-out read counted as "a process escaped".
+def test_unreadable_process_list_fails_closed_and_says_why(project, tmp_path, monkeypatch):
+    import cairnwork.confined as confined
+
+    monkeypatch.setattr(confined, "_processes_with_environment", lambda: None)
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    result = run(project, tmp_path, head, "tests/test_a.py::test_x")
+    assert result.returncode == 0 and b"passed" in result.log_path.read_bytes()
+    assert not result.observation.passed and result.survivors == 1
+    assert "outlived the run" in result.why
+
+
+def test_a_passing_run_has_no_failure_reason(project, tmp_path):
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    assert run(project, tmp_path, head, "tests/test_a.py::test_x").why == ""
+
+
+def test_a_failing_test_says_which_exit_code(project, tmp_path):
+    result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
+    assert f"pytest exit code {result.returncode}" in result.why

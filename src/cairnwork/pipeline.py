@@ -44,6 +44,7 @@ from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
 from cairnwork.p2p import P2PPlan, p2p_for, run_plan
 from cairnwork.protected_paths import path_refusal
+from cairnwork.reasons import explain, verdict_reason
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -287,20 +288,6 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
     return paths
 
 
-def _verdict_reason(verified: bool, verdict, recorded) -> str:
-    """The reason string for a judged attempt. A verified attempt reads ``CORE_<status>``. Otherwise
-    the readback's reason is shown (``recorded`` when present, so an unverified readback never reads
-    as CORE_VERIFIED; ``verdict`` only if there is no readback); when that reason is empty, a Core
-    that said VERIFIED but did not verify on readback reads ``CORE_NOT_VERIFIED``, else
-    ``CORE_<status>``."""
-    if verified:
-        return f"CORE_{verdict.status}"
-    shown = recorded or verdict
-    if shown.reason:
-        return shown.reason
-    return "CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}"
-
-
 def judge_candidate(
     task, specs, digest, notary, run_root, result, test_files, verifying, reach,
     p2p: P2PPlan | None = None,
@@ -345,7 +332,7 @@ def judge_candidate(
     )
     recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
     result.verified = bool(verdict.verified and recorded and recorded.verified)
-    result.reason = _verdict_reason(result.verified, verdict, recorded)
+    result.reason = verdict_reason(result.verified, verdict, recorded) + explain(runs)
 
 
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
