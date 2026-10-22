@@ -91,6 +91,7 @@ DEFAULT_CONFIG = {
     "core_token_file": None,
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
+    "test_source": "auto",
 }
 
 
@@ -262,10 +263,8 @@ class Intake:
     def submit(self, payload: Any) -> dict[str, Any]:
         config = self.config()
         task = task_from_payload(payload, tuple(config["test_roots"]), self.test_store())
-        account = self.verifier_account()
-        check_task(
-            task, verifier_python=config["verifier_python"] or getattr(account, "python", None)
-        )
+        python = config["verifier_python"] or getattr(self.verifier_account(), "python", None)
+        check_task(task, verifier_python=python)
         mirror = config["mirror"]  # a bad config is refused here, not by the runner
         source = task.repo
         if mirror:  # the task is bound to Cairnwork's own repository, whatever the caller's
