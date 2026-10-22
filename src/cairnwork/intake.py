@@ -50,6 +50,7 @@ from cairnwork.ownership import (
 )
 from cairnwork.p2p_selection import check_p2p_config
 from cairnwork.pipeline import TaskSpec, check_task
+from cairnwork.taskpaths import check_submitted_paths
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
 
@@ -205,7 +206,7 @@ class Intake:
         config = self.config()
         task = task_from_payload(payload, tuple(config["test_roots"]), self.test_store())
         python = config["verifier_python"] or getattr(self.verifier_account(), "python", None)
-        check_task(task, verifier_python=python)
+        check_submitted_paths(task, check_task(task, verifier_python=python))
         mirror = config["mirror"]  # a bad config is refused here, not by the runner
         source = task.repo
         if mirror:  # the task is bound to Cairnwork's own repository, whatever the caller's

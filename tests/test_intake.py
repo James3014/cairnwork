@@ -24,6 +24,16 @@ class FakePopen:
 
 
 @pytest.fixture
+def repo(repo):
+    """The conftest repo plus the verifier target the default payload names."""
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("def test_a():\n    pass\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "tests")
+    return repo
+
+
+@pytest.fixture
 def intake(tmp_path, monkeypatch):
     monkeypatch.setattr(intake_module, "_spawn", FakePopen)
     FakePopen.held = []
@@ -159,6 +169,7 @@ def test_the_same_key_for_another_repo_is_refused(intake, repo, tmp_path):
     from cairnwork.ownership import KeyReusedWithDifferentRequest
 
     intake.submit(payload(repo))
+    git(tmp_path, "clone", "-q", str(repo), str(tmp_path / "elsewhere"))
     with pytest.raises(KeyReusedWithDifferentRequest):
         intake.submit({**payload(repo), "repo": str(tmp_path / "elsewhere")})
 
