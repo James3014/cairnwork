@@ -374,34 +374,21 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except CandidateRejected as exc:
             result.reason = str(exc)
             return
-        judged, test_files = candidate.candidate_commit, ()
-        if task.test_commit:  # only now: the worker is done (deferred_tests.py)
+        judged, test_files, plan = candidate.candidate_commit, (), None
+        if task.test_commit:  # only now: the worker is done (deferred_tests.py, p2p.py)
             try:
                 test_files = tests_with_teeth(task, specs, run_root, result, verifying)
                 judged = lay_tests_over(
                     task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
                 )
+                plan = p2p_for(task, specs, test_files, run_root, result, verifying)
             except TestCommitRejected as exc:
                 result.reason = str(exc)
                 return
-        try:
-            plan = p2p_for(task, specs, test_files, run_root, result, verifying)
-        except TestCommitRejected as exc:
-            result.reason = str(exc)
-            return
         result.candidate_commit = judged
         steps.reach("CANDIDATE", judged)
         judge_candidate(
-            task,
-            specs,
-            digest,
-            notary,
-            run_root,
-            result,
-            test_files,
-            verifying,
-            steps.reach,
-            plan,
+            task, specs, digest, notary, run_root, result, test_files, verifying, steps.reach, plan
         )
     finally:
         try:

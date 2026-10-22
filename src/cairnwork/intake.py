@@ -214,9 +214,6 @@ class Intake:
                 raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
         try:
             check_test_roots(loaded.get("test_roots", ["tests"]))
-        except ValueError as exc:
-            raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
-        try:
             check_p2p_config(loaded)
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
