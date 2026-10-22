@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork import runlock
+from cairnwork.deferred_store import DeferredStore
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.issue_task import check_test_roots
 from cairnwork.journal import Journal
@@ -90,6 +91,7 @@ DEFAULT_CONFIG = {
     "core_token_file": None,
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
+    "test_source": "auto",
 }
 
 
@@ -100,7 +102,9 @@ class IntakeRefused(Exception):
         self.detail = detail
 
 
-def task_from_payload(payload: Any, test_roots: tuple[str, ...] = ("tests",)) -> TaskSpec:
+def task_from_payload(
+    payload: Any, test_roots: tuple[str, ...] = ("tests",), test_store=None
+) -> TaskSpec:
     """A closed schema: unknown or missing fields are refused, never ignored."""
     if not isinstance(payload, dict) or not FIELDS <= set(payload) <= FIELDS | {"test_commit"}:
         got = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
@@ -130,6 +134,7 @@ def task_from_payload(payload: Any, test_roots: tuple[str, ...] = ("tests",)) ->
         verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
         test_commit=payload.get("test_commit", ""),
         test_roots=test_roots,
+        test_store=test_store,
     )
 
 
@@ -208,11 +213,18 @@ class Intake:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
             if not _has_token(loaded.get("core_token_file")):
                 raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
+        if loaded.get("test_source", "auto") not in ("auto", "bundle"):
+            raise IntakeRefused("BAD_CONFIG", 'test_source must be "auto" or "bundle"')
         try:
             check_test_roots(loaded.get("test_roots", ["tests"]))
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
         return {**DEFAULT_CONFIG, **loaded}
+
+    def test_store(self) -> DeferredStore:
+        return DeferredStore(
+            self.state / "deferred-tests", self.config()["test_source"] == "bundle"
+        )
 
     def verifier_account(self) -> VerifierAccount | None:
         return VerifierAccount() if self.config()["verifier_account"] else None
@@ -237,7 +249,7 @@ class Intake:
             raise IntakeRefused("BAD_STATE", f"{self.state} is not a directory owned by us")
         if info.st_mode & 0o077:
             raise IntakeRefused("BAD_STATE", f"{self.state} must be mode 0700")
-        for name in ("requests", "runs"):
+        for name in ("requests", "runs", "deferred-tests"):
             (self.state / name).mkdir(mode=0o700, exist_ok=True)
 
     @contextmanager
@@ -252,7 +264,7 @@ class Intake:
 
     def submit(self, payload: Any) -> dict[str, Any]:
         roots = tuple(self.config()["test_roots"])
-        task = task_from_payload(payload, roots)
+        task = task_from_payload(payload, roots, self.test_store())
         check_task(task)
         mirror = self.config()["mirror"]  # a bad config is refused here, not by the runner
         source = task.repo
@@ -260,7 +272,7 @@ class Intake:
             if not Path(mirror).is_dir():
                 raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
             payload = {**payload, "repo": mirror}
-            task = task_from_payload(payload, roots)
+            task = task_from_payload(payload, roots, self.test_store())
         with self._intake_lock():
             return self._bind_and_start(task, payload, source)
 
@@ -297,7 +309,8 @@ class Intake:
 
     def load_request(self, task_id: str) -> TaskSpec:
         path = self.state / "requests" / f"{task_id}.json"
-        return task_from_payload(json.loads(path.read_text()), tuple(self.config()["test_roots"]))
+        raw = json.loads(path.read_text())
+        return task_from_payload(raw, tuple(self.config()["test_roots"]), self.test_store())
 
     def _start_runner(self, task_id: str, lock_fd: int) -> None:
         log = self.run_root / f"{task_id}.runner.log"

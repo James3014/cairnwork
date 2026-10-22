@@ -27,6 +27,7 @@ from typing import Protocol
 
 from cairnwork import runlock
 from cairnwork.core_request import AcceptanceSpec
+from cairnwork.deferred_store import DeferredStore
 from cairnwork.deferred_tests import (
     TestCommitRejected,
     check_roots_on_base,
@@ -80,6 +81,7 @@ class TaskSpec:
     allow_deletions: bool = False
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
     test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
+    test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -248,7 +250,7 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
     """Check a task's deferred tests once the worker is done: plain test files on the
     base whose test cases really fail there. Returns their paths."""
     check_roots_on_base(task.repo, task.base_commit, task.test_roots)  # before any base run
-    ensure_test_commit(task.repo, task.test_commit)
+    ensure_test_commit(task.repo, task.test_commit, task.test_store)
     paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
     targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse
     runs = run_verifiers(

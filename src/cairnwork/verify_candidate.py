@@ -76,7 +76,7 @@ def verify_candidate(
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
-        test_roots=tuple(intake.config()["test_roots"]),
+        test_roots=tuple(intake.config()["test_roots"]), test_store=intake.test_store(),
     )  # fmt: skip
     specs = check_task(task)  # the same scope, protected-file and verifier rules
     if not OID.fullmatch(candidate):
