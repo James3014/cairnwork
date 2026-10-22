@@ -262,7 +262,7 @@ def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
         github.comment(
             number,
             f"Cairnwork 不能接這張：`{refusal_code(exc)}`。修正 ```eia-task 區塊，移除 "
-            f"`{NEEDS_FIX}` 再加上 `{QUEUE}`。驗證用的測試檔不能列在 allowed_files，要先放在 main。",
+            f"`{NEEDS_FIX}` 再加上 `{QUEUE}`。測試檔不能列在 allowed_files，要先放在 main。",
         )
     except (RuntimeError, OSError) as gh_error:  # retried on the next pass
         return {"refused": str(exc), "error": f"{type(gh_error).__name__}: {gh_error}"}
