@@ -186,3 +186,5 @@ def test_a_failure_that_also_taints_the_run_is_not_plain_and_not_re_run(
     )  # fmt: skip
     assert result.status == "FAILED" and not result.verified
     assert result.p2p["applied"] == "whole-suite" and "rerun" not in result.p2p
+    assert recorded in result.reason  # the cause is what the record says, not just FAILED
+    assert not list((tmp_path / "state" / "runs").glob("*-r-*"))  # and no second run happened
