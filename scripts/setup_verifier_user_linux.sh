@@ -31,6 +31,11 @@ if id "$VERIFIER" >/dev/null 2>&1; then
   v_shell="$(getent passwd "$VERIFIER" | cut -d: -f7)"
   { [ "$v_uid" -ne 0 ] && [ "$v_uid" -ne "$OWNER_UID" ]; } \
     || { echo "existing user $VERIFIER has uid $v_uid (root or the owner); refusing" >&2; exit 1; }
+  # Linux allows two login names to share one uid; running as a name that shares another service
+  # account's uid would let candidate code read that account's 0600 files (same uid, same access).
+  shared="$(getent passwd | awk -F: -v u="$v_uid" -v n="$VERIFIER" '$3==u && $1!=n {print $1}')"
+  [ -z "$shared" ] \
+    || { echo "existing user $VERIFIER shares uid $v_uid with: $shared; refusing" >&2; exit 1; }
   case "$v_shell" in
     */nologin | /bin/false | /usr/bin/false) : ;;
     *) echo "existing user $VERIFIER has a login shell ($v_shell); refusing" >&2; exit 1 ;;
