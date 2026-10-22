@@ -118,7 +118,7 @@ class TaskResult:
     logs: list[str] = field(default_factory=list)
 
 
-def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
+def check_task(task: TaskSpec, *, verifier_python: str | None = None) -> tuple[VerifierSpec, ...]:
     """Reject a task before anything is bound or run."""
     if not isinstance(task.base_commit, str) or not OID.fullmatch(task.base_commit):
         raise TaskRejected("BAD_BASE", "base_commit must be a 40-hex commit id")
@@ -136,7 +136,13 @@ def check_task(task: TaskSpec) -> tuple[VerifierSpec, ...]:
             blocked.append(path)
     if len(set(files)) != len(files):
         raise TaskRejected("BAD_SCOPE", "allowed_files has duplicates")
-    protected = protected_verifier_inputs(task.allowed_files, task.test_roots)
+    protected = protected_verifier_inputs(
+        task.allowed_files,
+        task.test_roots,
+        repo=task.repo,
+        base_commit=task.base_commit,
+        python=verifier_python,
+    )
     if protected:
         raise TaskRejected("PROTECTED_VERIFIER_INPUT", ", ".join(protected))
     if blocked:
@@ -160,7 +166,9 @@ def run_task(
     verifier_account: VerifierAccount | None = None,
     verifier_python: str | None = None,
 ) -> TaskResult:
-    specs = check_task(task)
+    specs = check_task(
+        task, verifier_python=verifier_python or getattr(verifier_account, "python", None)
+    )
     verifying = (verifier_account, verifier_python)
     with runlock.held(ledger.path, exclusive=False):
         bound = ledger.bind(task.idempotency_key, task.request(), OWNER, task.card_hash)
@@ -184,7 +192,9 @@ def run_bound_task(
 ) -> TaskResult:
     """Run a task bound earlier (intake.submit). Its request must be the one bound;
     a task that is no longer BOUND (cancelled, or already run) is not run again."""
-    specs = check_task(task)
+    specs = check_task(
+        task, verifier_python=verifier_python or getattr(verifier_account, "python", None)
+    )
     verifying = (verifier_account, verifier_python)
     with runlock.held(ledger.path, exclusive=False):
         record = ledger.get(task_id=task_id)

@@ -78,7 +78,11 @@ def verify_candidate(
         allowed_files, verifiers, test_commit=test_commit,
         test_roots=tuple(intake.config()["test_roots"]), test_store=intake.test_store(),
     )  # fmt: skip
-    specs = check_task(task)  # the same scope, protected-file and verifier rules
+    account = intake.verifier_account()
+    python = intake.config()["verifier_python"]
+    specs = check_task(
+        task, verifier_python=python or getattr(account, "python", None)
+    )  # the same scope, protected-file and verifier rules
     if not OID.fullmatch(candidate):
         raise TaskRejected("BAD_CANDIDATE", "candidate must be a 40-hex commit id")
     _require_accepting(intake)
@@ -87,7 +91,7 @@ def verify_candidate(
     cleanup(intake)
     result = TaskResult(task.idempotency_key, f"a{secrets.token_hex(8)}", "FAILED")
     notary = intake.notary
-    verifying = (intake.verifier_account(), intake.config()["verifier_python"])
+    verifying = (account, python)
     status = "FAILED"
     with runlock.held(intake.state / "ownership.sqlite", exclusive=False):
         _require_accepting(intake)  # a drain that came in while we waited for the lock
