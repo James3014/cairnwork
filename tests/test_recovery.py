@@ -132,6 +132,17 @@ def test_recovery_leaves_another_owners_task_untouched(tmp_path):
     assert ledger.get(task_id=task).status == "BOUND"
 
 
+def test_recovery_leaves_another_owners_dispatched_task_untouched(tmp_path):
+    ledger, _, _ = stores(tmp_path)
+    task = ledger.bind("k9", {"x": 1}, "nexus-new", "card-9").record.task_id
+    ledger.set_status(task, "DISPATCHED")
+    decisions, ledger = settle(tmp_path)
+    assert [(d.task_id, d.previous_status, d.new_status, d.reason) for d in decisions] == [
+        (task, "DISPATCHED", "DISPATCHED", "FOREIGN_OWNER")
+    ]
+    assert ledger.get(task_id=task).status == "DISPATCHED"
+
+
 def test_recovery_refuses_while_a_run_holds_the_lock(project, tmp_path):
     proc = subprocess.Popen(
         [sys.executable, str(DRIVER), str(project), str(tmp_path), GOOD, "orphan"],

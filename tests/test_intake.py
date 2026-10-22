@@ -120,6 +120,11 @@ def test_cancel_refuses_a_task_another_owner_holds_and_leaves_it_bound(intake):
     assert intake.status(task_id=task)["status"] == "BOUND"
 
 
+def test_in_flight_ignores_a_task_another_owner_holds(intake):
+    intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8)
+    assert intake.in_flight()["count"] == 0
+
+
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first
