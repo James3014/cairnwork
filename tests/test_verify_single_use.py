@@ -30,7 +30,7 @@ def test_a_test_commit_is_burned_by_the_run_that_uses_it(project, state):
 def test_the_burn_is_written_before_the_tests_are_fetched_and_survives_a_crash(
     project, state, monkeypatch
 ):
-    import cairnwork_verify.verify as module
+    import cairnwork.verify_candidate as module
     from cairnwork.intake import Intake
 
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})

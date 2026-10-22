@@ -202,7 +202,12 @@ class SeatbeltBackend:
         read_roots: tuple[Path, ...],
         write_roots: tuple[Path, ...],
         home: Path | None = None,
+        mask_home_credentials: bool = True,
     ) -> Policy:
+        # Seatbelt is default-deny (allow-list): the owner's home is unreadable whether or not
+        # the explicit credential denies are present, and they mount nothing, so there is no
+        # EPERM under the dedicated account. The flag is accepted for the Backend protocol and
+        # intentionally ignored — macOS behaviour is unchanged on either path.
         return build_profile(read_roots, write_roots, home)
 
     def wrap(self, argv: list[str], policy_path: Path) -> list[str]:

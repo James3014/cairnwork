@@ -46,8 +46,14 @@ class Backend(Protocol):
         read_roots: tuple[Path, ...],
         write_roots: tuple[Path, ...],
         home: Path | None = None,
+        mask_home_credentials: bool = True,
     ) -> Policy:
-        """Default-deny policy; raises SandboxError for unsafe or too-broad roots."""
+        """Default-deny policy; raises SandboxError for unsafe or too-broad roots.
+
+        ``mask_home_credentials`` masks the launching user's home credentials; pass False when
+        the sandbox runs as a different account (the dedicated verifier uid), which cannot reach
+        that home and does not need to (the uid boundary denies it). See bwrap.build_policy.
+        """
         ...
 
     def wrap(self, argv: list[str], policy_path: Path) -> list[str]:

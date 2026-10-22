@@ -1,16 +1,19 @@
-"""Run verifiers as a dedicated, unprivileged macOS account (Issue #9).
+"""Run verifiers as a dedicated, unprivileged account (Issue #9 on macOS, #84 on Linux).
 
-Inside Seatbelt, a process can still read the arguments of other processes that
-run as the same user (sysctl KERN_PROCARGS2); macOS refuses that across users. So
-verifiers run as ``cairnwork-verifier`` (created by scripts/setup_verifier_user.sh):
+A sandbox alone is not complete read isolation: inside Seatbelt a process can still read
+the arguments of other processes that run as the same user (sysctl KERN_PROCARGS2), and
+under the Linux bwrap backend the whole root is bound read-only, so anything the running
+account can read is readable. Running verifiers as a different, unprivileged account closes
+both: the readable set becomes that account's, which owns nothing. The account is created by
+scripts/setup_verifier_user.sh (macOS) or scripts/setup_verifier_user_linux.sh:
 
-    sudo -n -u cairnwork-verifier -- /usr/bin/sandbox-exec -f <profile>
-         /usr/bin/env -i <scrubbed environment> <python> -P -m pytest ...
+    sudo -n -u cairnwork-verifier -- <sandbox> /usr/bin/env -i <env> <python> -P -m pytest ...
 
-The sudoers rule lets the owner run sandbox-exec, kill and rm as that account.
-sandbox-exec takes any profile, so in effect any process running as the owner can
-run code as the account, unsandboxed: the account protects the owner from the
-verifier, not the other way round. The account has no privileges of its own.
+where ``<sandbox>`` is sandbox-exec on macOS and bwrap on Linux (both from the backend).
+The sudoers rule lets the owner run the sandbox binary, kill and rm as that account. The
+sandbox binary takes any policy, so in effect any process running as the owner can run code
+as the account: the account protects the owner from the verifier, not the other way round.
+The account has no privileges of its own.
 
 Every verifier process belongs to that account, so after each run ``kill -9 -1``
 as the account ends all of them, including anything that started its own
@@ -25,6 +28,8 @@ import fcntl
 import os
 import pwd
 import subprocess
+import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,7 +39,12 @@ from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
 DEFAULT_USER = "cairnwork-verifier"
-DEFAULT_ROOT = Path("/Users/Shared/cairnwork")
+# The shared root lives where the platform keeps shared service data: /Users/Shared on macOS,
+# /var/lib on Linux. scripts/setup_verifier_user.sh (macOS) and setup_verifier_user_linux.sh
+# create it there; the account machinery is otherwise identical on both.
+DEFAULT_ROOT = Path(
+    "/var/lib/cairnwork" if sys.platform.startswith("linux") else "/Users/Shared/cairnwork"
+)
 
 
 class VerifierAccountError(Exception):
@@ -65,24 +75,44 @@ class VerifierAccount:
         return str(self.root / "venv" / "bin" / "python")
 
     def available(self, python: str | None = None) -> bool:
-        """The account is a separate, non-root user, sudo works without a password,
-        and the shared Python (or ``python``, a target's own) runs pytest as that user.
+        """The account is a separate, non-root user, sudo works without a password, and a
+        **confined** run as that user can import pytest. The probe uses the real sandbox policy
+        (credential masks skipped, as on the account path), not an allow-all run, so "usable"
+        means confinement actually works — a policy that fails to mount (e.g. a tmpfs under a
+        home the account cannot enter) reports unusable instead of a false healthy.
 
         It starts a process as the account, so call it while holding exclusive().
         """
+        from cairnwork import pytest_config  # local import keeps the module import-cycle free
+
         try:
             uid = pwd.getpwnam(self.user).pw_uid
         except KeyError:
             return False
         if uid in (0, os.getuid()):
             return False  # kill -9 -1 as root or as the owner would be destructive
+        py = python or self.python
+        policy_file: Path | None = None
         try:
-            probe = self.wrap([python or self.python, "-P", "-c", "import pytest"], None)
+            policy = _backend().policy(
+                read_roots=pytest_config.interpreter_roots(py),
+                write_roots=(),
+                mask_home_credentials=False,
+            )
+            fd, name = tempfile.mkstemp(dir=self.root, suffix=".policy")
+            policy_file = Path(name)
+            os.write(fd, policy.text.encode())
+            os.close(fd)
+            os.chmod(policy_file, 0o640)  # group-readable: seatbelt reads it as the account
+            probe = self.wrap([py, "-P", "-c", "import pytest"], policy_file)
             done = subprocess.run(  # noqa: S603 - fixed argv
                 probe, capture_output=True, timeout=60, check=False, cwd=self.root
             )
         except (OSError, subprocess.SubprocessError, VerifierAccountError):
             return False
+        finally:
+            if policy_file is not None:
+                policy_file.unlink(missing_ok=True)
         return done.returncode == 0
 
     def wrap(self, argv: list[str], profile: Path | None, env: dict[str, str] | None = None):
@@ -96,8 +126,11 @@ class VerifierAccount:
     def count(self) -> int:
         """How many processes the account is running (-1: cannot tell)."""
         try:
+            # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
+            # procps selects all of a user's processes with -U alone and rejects -x.
+            tty_flag = ["-x"] if sys.platform == "darwin" else []
             done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", "-x", "-U", self.user, "-o", "pid="],
+                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
                 capture_output=True,
                 text=True,
                 timeout=20,

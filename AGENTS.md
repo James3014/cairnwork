@@ -17,7 +17,7 @@ Read `README.md` and `docs/LESSONS_FROM_NEXUS.md` first.
 - A failure in a safeguard, in verification or in a Core call must never produce a success state or an unauthorised side effect. Allowed degradations are listed in the contract, not improvised in `except` blocks.
 - Every task has exactly one owning system, bound before dispatch by a durable, atomic record (idempotency key, request digest, owner, task id). Resend, query, cancel and recovery route by that record; unknown ownership stops dispatch.
 - Only a nexus-core VERIFIED verdict marks a task complete.
-- Limits enforced in CI (blocking): file ≤400 lines, function ≤80 lines, per-package caps (`cairnwork_sandbox` ≤1,200, `cairnwork_verify` ≤600), no import cycles, core never imports `experimental`.
+- Limits enforced in CI (blocking): file ≤400 lines, function ≤80 lines, the sandbox package cap (`cairnwork_sandbox` ≤1,200), no import cycles, core never imports `experimental`.
 - `src/cairnwork` 5,000 lines is a warning budget, not a hard limit: above it CI prints WARNING (not a failure) and the PR must briefly state the reason, alternatives considered (existing implementation, contract or adapter), responsibility (no second authority or duplicated state), cost, and verification. Placement follows responsibility: never create a new `cairnwork_*` package to avoid the counter; a new package needs an explainable boundary, one-way dependencies and an independently verifiable interface. `scripts/check_size.py` prints the per-package table.
 
 ## Verification

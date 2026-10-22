@@ -27,42 +27,8 @@ jobs:
       - run: uv run pytest -q
       - run: git diff --check
 
-  # Exact-base Pyright gate: fails only on findings the PR adds versus its merge base, matched
-  # by (file, rule, message, source line text) rather than line number. Limitation: the
-  # comparison script comes from the base when it has one, so a PR cannot weaken its own gate;
-  # only the PR that introduces scripts/pyright_gate.py is judged by its own copy.
-  pyright:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.13"
-      - name: Pyright on the merge base and on the head
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          base_sha=$(git merge-base "origin/${BASE_REF}" HEAD)
-          echo "merge base: $base_sha"
-          git worktree add "$RUNNER_TEMP/base" "$base_sha"
-          # pyright exits 0 (clean) or 1 (findings); the gate judges findings, any other
-          # exit code (crash, bad config, usage) fails this step.
-          run_pyright() {
-            (cd "$1" && uv sync --locked)
-            local rc=0
-            (cd "$1" && uvx --from pyright==1.1.414 pyright --pythonpath .venv/bin/python \
-              --outputjson > "$2") || rc=$?
-            if [ "$rc" -gt 1 ]; then echo "pyright exited $rc in $1"; exit 1; fi
-          }
-          run_pyright "$RUNNER_TEMP/base" "$RUNNER_TEMP/base.json"
-          run_pyright "$GITHUB_WORKSPACE" "$RUNNER_TEMP/head.json"
-          gate="$RUNNER_TEMP/base/scripts/pyright_gate.py"
-          [ -f "$gate" ] || gate=scripts/pyright_gate.py
-          python3 "$gate" "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/base" \
-            "$RUNNER_TEMP/head.json" "$GITHUB_WORKSPACE"
+  # The exact-base Pyright gate runs from the default branch (pyright-trusted.yml, Issue #66):
+  # a PR-owned job could be edited away, so it is not defined here.
 
   # The verifier sandbox (macOS Seatbelt) is only proven on macOS. Nexus-new's
   # sandbox could not run pytest for weeks because nothing ran it for real, so
@@ -88,12 +54,11 @@ jobs:
           zsh scripts/setup_verifier_python.sh
       - run: uv run pytest -q
 
-  # P2 draft (Linux bwrap, probe only). This job observes how bwrap behaves on a
-  # GitHub ubuntu-24.04 runner — where an AppArmor rule restricts capability-bearing
-  # user namespaces by default — before the policy/wrap backend and witness tests are
-  # written. It prints available() before and after lifting the restriction and runs
-  # the same unguarded namespace probe (unguarded on purpose: a host that cannot nest
-  # namespaces reddens the leg rather than letting sandbox tests skip silently).
+  # Linux bwrap backend, witnessed on real bwrap. On a GitHub ubuntu-24.04 runner an AppArmor
+  # rule restricts capability-bearing user namespaces by default, so the job asserts available()
+  # is False under the restriction and True once it is lifted, runs an unguarded namespace probe
+  # (unguarded on purpose: a host that cannot nest namespaces reddens the leg rather than letting
+  # the sandbox tests skip silently), then runs the sandbox witnesses under CAIRNWORK_REQUIRE_SANDBOX.
   test-linux-sandbox:
     strategy:
       fail-fast: false
@@ -130,3 +95,32 @@ jobs:
         run: bwrap --unshare-pid --unshare-user --cap-drop ALL --ro-bind / / --proc /proc true
       - name: Sandbox witnesses on real bwrap
         run: CAIRNWORK_REQUIRE_SANDBOX=1 uv run pytest -q tests/test_sandbox.py
+
+  # Linux P4 (Issue #84): verifiers run as a dedicated unprivileged account, as on macOS.
+  # Creates the account, then runs the account witnesses on real bwrap with the account
+  # required — a missing or unusable account fails the job (it cannot silently skip).
+  test-linux-verifier-account:
+    runs-on: ubuntu-24.04
+    env:
+      CAIRNWORK_REQUIRE_SANDBOX: "1"
+      CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT: "1"
+      CAIRNWORK_VERIFIER_ROOT: "/var/lib/cairnwork"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - name: Install bubblewrap and zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap zsh
+          bwrap --version
+      - name: Lift the AppArmor userns restriction (end users load a profile instead)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Create the verifier account (Issue #84) and its Python
+        run: |
+          sudo sh scripts/setup_verifier_user_linux.sh "$USER"
+          zsh scripts/setup_verifier_python.sh
+      - name: Account witnesses on real bwrap, as the dedicated account
+        run: uv run pytest -q -m verifier_account

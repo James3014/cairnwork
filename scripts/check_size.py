@@ -1,7 +1,7 @@
 """Enforce Cairnwork size limits. Blocking: file <=400 lines, function <=80 lines, the trusted
-sandbox package (src/cairnwork_sandbox) <=1200 lines of its own, src/cairnwork_verify <=600
-lines. Warning only: core (src/cairnwork) above the 5000-line budget. Prints a per-package
-table (also appended to $GITHUB_STEP_SUMMARY when set)."""
+sandbox package (src/cairnwork_sandbox) <=1200 lines of its own. Warning only: core
+(src/cairnwork) above the 5000-line budget. Prints a per-package table (also appended to
+$GITHUB_STEP_SUMMARY when set)."""
 
 from __future__ import annotations
 
@@ -13,13 +13,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ROOT / "src" / "cairnwork"
 SANDBOX = ROOT / "src" / "cairnwork_sandbox"
-VERIFY = ROOT / "src" / "cairnwork_verify"
 SCANNED = [ROOT / "src", ROOT / "experimental", ROOT / "scripts", ROOT / "tests"]
 MAX_FILE_LINES = 400
 MAX_FUNCTION_LINES = 80
 MAX_CORE_LINES = 5000  # warning budget, not a failure
 MAX_SANDBOX_LINES = 1200
-MAX_VERIFY_LINES = 600
 
 
 def _python_files(base: Path) -> list[Path]:
@@ -36,7 +34,7 @@ def measure(root: Path = ROOT) -> tuple[list[str], list[str], dict[str, int]]:
     problems: list[str] = []
     warnings: list[str] = []
     totals: dict[str, int] = {}
-    core_total = sandbox_total = verify_total = 0
+    core_total = sandbox_total = 0
     for base in SCANNED:
         for path in _python_files(base):
             text = path.read_text(encoding="utf-8")
@@ -51,8 +49,6 @@ def measure(root: Path = ROOT) -> tuple[list[str], list[str], dict[str, int]]:
                 core_total += lines
             if SANDBOX in path.parents:
                 sandbox_total += lines
-            if VERIFY in path.parents:
-                verify_total += lines
             for node in ast.walk(ast.parse(text, filename=str(path))):
                 if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                     length = (node.end_lineno or node.lineno) - node.lineno + 1
@@ -66,8 +62,6 @@ def measure(root: Path = ROOT) -> tuple[list[str], list[str], dict[str, int]]:
         )
     if sandbox_total > MAX_SANDBOX_LINES:
         problems.append(f"src/cairnwork_sandbox total {sandbox_total} lines > {MAX_SANDBOX_LINES}")
-    if verify_total > MAX_VERIFY_LINES:
-        problems.append(f"src/cairnwork_verify total {verify_total} lines > {MAX_VERIFY_LINES}")
     return problems, warnings, totals
 
 
@@ -79,7 +73,7 @@ def check(root: Path = ROOT) -> list[str]:
 def table(totals: dict[str, int]) -> str:
     src = {k: v for k, v in totals.items() if k.startswith("cairnwork")}
     rows = [("cairnwork (core)", src.get("cairnwork", 0), f"warn > {MAX_CORE_LINES}")]
-    limits = {"cairnwork_sandbox": MAX_SANDBOX_LINES, "cairnwork_verify": MAX_VERIFY_LINES}
+    limits = {"cairnwork_sandbox": MAX_SANDBOX_LINES}
     for name in sorted(k for k in src if k != "cairnwork"):
         limit = limits.get(name)
         rows.append((name, src[name], f"max {limit}" if limit else "-"))

@@ -275,13 +275,14 @@ def _run_one(
         profile = backend.policy(
             read_roots=(*pytest_config.interpreter_roots(python), ini, private / "guard"),
             write_roots=(checkout.parent, run_dir),
+            mask_home_credentials=account is None,  # account uid can't enter the owner's home
         )
         _write_new(profile_path, profile.text.encode())
         returncode, timed_out, survivors = _execute(
             argv, profile_path, checkout, env, timeout, log_path, account, backend
         )
     else:
-        _write_new(log_path, b"sandbox-exec unavailable: verifier not executed\n")
+        _write_new(log_path, b"no sandbox backend available: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
     if _same_directory(checkout, before):  # not renamed away, no symlink put in place
         mutated = tuple(tree_differences(repo, candidate_commit, checkout))

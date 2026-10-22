@@ -4,9 +4,20 @@ Cairnwork 是 Nexus-new 的後繼產品：一個接任務、執行、驗證，�
 
 Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md`；議會條文 A–I：`nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md`。
 
+## 快速開始
+
+```sh
+uv tool install --from git+https://github.com/cairnwork/cairnwork.git cairnwork
+cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證、Core VERIFIED（不需 GitHub／AI／API key）
+```
+
+完整安裝、`cairnwork init` 接真實 repo、平台註記見 [docs/QUICKSTART.md](docs/QUICKSTART.md)。
+
 ## 狀態
 
 試點中（2026-10-20 → 2026-11-16）。目前只接一種任務：**小 bug 修正**（eia-task 格式：allowed_files ≤10、`pytest` 驗證）。
+
+第一次 A/B（Cairnwork 過濾 vs 裸跑，28 題）：**打平、未贏**，原因與下一步見 [docs/results/2026-10-22-ab-run2.md](docs/results/2026-10-22-ab-run2.md)。
 
 ## 能力入場規則
 
@@ -29,7 +40,7 @@ Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexu
 
 ## 硬性限制（CI 強制）
 
-- 單檔 ≤400 行、單函式 ≤80 行；獨立套件各有自己的上限（`cairnwork_sandbox` 1,200、`cairnwork_verify` 600）。
+- 單檔 ≤400 行、單函式 ≤80 行；獨立套件 `cairnwork_sandbox` 上限 1,200。
 - 核心（`src/cairnwork/`）5,000 行是警戒預算，不是硬上限：超過時 CI 發 WARNING、不失敗，但 PR 必須簡短交代原因、替代方案（為何不用既有實作／契約／adapter）、責任（沒有第二權威或重複狀態）、成本與驗證。不要為了避開計數器新建 `cairnwork_*` 套件，程式放哪裡看責任。
 - Ruff BLE001／S110 開啟；失敗情境測試證明失敗不會變成成功。
 - import-linter：禁止循環、禁止核心 import `experimental/`。

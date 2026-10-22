@@ -2,7 +2,8 @@
 
 Every command prints one JSON object on stdout. Exit codes: 0 done; 2 refused
 (``{"error": code, "detail": ...}``: not accepting, bad request, not cancellable,
-recovery busy, key reused, card already active); 3 unknown task; 1 anything else,
+recovery busy, key reused, card already active, REPLAY_FORBIDDEN,
+RECONCILIATION_REQUIRED); 3 unknown task; 1 anything else,
 including a recovery that could not settle every task. Only NOT_ACCEPTING means
 "not taken, the old system may run it"; after any other answer the caller must
 not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
@@ -25,16 +26,20 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
+from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
     KeyReusedWithDifferentRequest,
     OwnerMismatch,
     OwnershipUnknown,
+    ReconciliationRequired,
+    ReplayForbidden,
 )
 from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
 from cairnwork.workers.agy import AgyWorker
+from cairnwork.workers.agy_dispatch import Dispatch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,8 +55,16 @@ def main(argv: list[str] | None = None) -> int:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except RunLockBusy as exc:
         return _emit({"error": exc.code, "detail": "a runner is still working"}, 2)
-    except (KeyReusedWithDifferentRequest, DuplicateLogicalTask, OwnerMismatch) as exc:
+    except (
+        KeyReusedWithDifferentRequest,
+        DuplicateLogicalTask,
+        OwnerMismatch,
+    ) as exc:
         return _emit({"error": type(exc).__name__, "detail": str(exc)}, 2)
+    except JournalIntegrityViolation as exc:
+        return _emit({"error": exc.code, "detail": str(exc)}, 1)
+    except (ReplayForbidden, ReconciliationRequired) as exc:
+        return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
     stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
@@ -89,6 +102,17 @@ def _dispatch(intake: Intake, args) -> Any:
     return _run(intake, args.task_id)
 
 
+def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
+    if config["agy_dispatch"] is None:
+        return None
+    return Dispatch(
+        config["agy_dispatch"],
+        config["agy_dispatch_pool_wait_seconds"],
+        config["agy_dispatch_provider_stall_seconds"],
+        config["agy_dispatch_stream_no_progress_seconds"],
+    )
+
+
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     """The runner submit starts. It keeps the inherited lock fd open until it exits."""
     config = intake.config()
@@ -98,7 +122,7 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         ledger=intake.ledger,
         notary=intake.notary,
         journal=intake.journal,
-        worker=AgyWorker(model=config["model"], agy=config["agy"]),
+        worker=AgyWorker(model=config["model"], agy=config["agy"], dispatch=agy_dispatch(config)),
         run_root=intake.run_root,
         verifier_account=intake.verifier_account(),
         verifier_python=config["verifier_python"],
