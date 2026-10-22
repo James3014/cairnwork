@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 
 GIT_TIMEOUT_SECONDS = 60
+NETWORK_TIMEOUT_SECONDS = 300  # fetch and push over a network; local commands keep the default
+STDERR_TAIL_CHARS = 400
 OID = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -32,6 +34,22 @@ _SAFE_OPTIONS = (
 )
 
 
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+_CONTROL = re.compile(r"[^\x20-\x7e\n\u00a0-\U0010ffff]")
+
+
+def stderr_tail(raw: str | bytes | None) -> str:
+    """Last STDERR_TAIL_CHARS of git's stderr, one line per line, safe to put in an error.
+
+    URL credentials (``https://user:token@host``) are removed and control characters
+    (terminal escapes, CR overwrites) are dropped, so the text can go to a log or an Issue.
+    """
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    text = _CONTROL.sub("", _URL_USERINFO.sub("", raw or "")).strip()
+    return text.replace("\n", " | ")[-STDERR_TAIL_CHARS:]
+
+
 class GitCommandError(Exception):
     code = "GIT_COMMAND_FAILED"
 
@@ -40,7 +58,11 @@ class GitCommandError(Exception):
 
 
 def run_git(
-    repo: Path, *args: str, index_file: Path | None = None, isolate_config: bool = False
+    repo: Path,
+    *args: str,
+    index_file: Path | None = None,
+    isolate_config: bool = False,
+    timeout: float = GIT_TIMEOUT_SECONDS,
 ) -> str:
     """Run git in repo; index_file points git at a private index (GIT_INDEX_FILE).
 
@@ -49,6 +71,9 @@ def run_git(
     stop git reading ``~/.gitconfig``/``/etc/gitconfig``, where a setting such as
     ``gc.recentObjectsHook`` runs a command during a prune — which ``core.hooksPath``
     does not cover. Use it for maintenance commands (gc, prune) on a worker's clone.
+
+    timeout is in seconds; pass NETWORK_TIMEOUT_SECONDS for a fetch or push over a network.
+    A failure carries a bounded, sanitised tail of git's stderr (see stderr_tail).
     """
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if index_file is not None:
@@ -63,11 +88,12 @@ def run_git(
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
             env=env,
         )
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
-        raise GitCommandError(f"git {args[0]} failed") from exc
+        tail = stderr_tail(getattr(exc, "stderr", None))
+        raise GitCommandError(f"git {args[0]} failed" + (f": {tail}" if tail else "")) from exc
     return done.stdout
 
 

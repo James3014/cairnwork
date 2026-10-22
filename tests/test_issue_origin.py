@@ -109,7 +109,7 @@ def test_a_remote_swapped_after_take_is_not_pushed_to(setup, monkeypatch):
     pushes = []
     real_git = runner._git
     monkeypatch.setattr(
-        runner, "_git", lambda r, *a: pushes.append(a) if "push" in a else real_git(r, *a)
+        runner, "_git", lambda r, *a, **k: pushes.append(a) if "push" in a else real_git(r, *a, **k)
     )
     out = runner.settle(setup["intake"], github, setup["clone"])
     assert "LINEAGE_REPOSITORY_MISMATCH" in out[0]["error"]
@@ -130,7 +130,7 @@ def _settled_with(setup, monkeypatch, stored, rule_key, rule_from):
     pushes = []
     real_git = runner._git
     monkeypatch.setattr(
-        runner, "_git", lambda r, *a: pushes.append(a) if "push" in a else real_git(r, *a)
+        runner, "_git", lambda r, *a, **k: pushes.append(a) if "push" in a else real_git(r, *a, **k)
     )
     return runner.settle(setup["intake"], github, setup["clone"]), pushes, foreign
 

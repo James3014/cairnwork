@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.deferred_tests import TestCommitRejected
-from cairnwork.gitcmd import GitCommandError, run_git
+from cairnwork.gitcmd import NETWORK_TIMEOUT_SECONDS, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.issue_publish import (
     TASK_ID,
@@ -171,7 +171,7 @@ def _verify_single_branch(clone: Path) -> None:
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
     _verify_origin(clone, github.repo)
     _verify_single_branch(clone)
-    _git(clone, "fetch", "-q", "origin", "main")
+    _git(clone, "fetch", "-q", "origin", "main", timeout=NETWORK_TIMEOUT_SECONDS)
     base = _git(clone, "rev-parse", "origin/main").strip()
     results = []
     for issue in github.issues(QUEUE):
@@ -305,7 +305,7 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     _verify_origin(clone, github.repo)  # re-checked: the remote may have changed
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
-         "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
+         "origin", f"{commit}:refs/heads/{branch}", timeout=NETWORK_TIMEOUT_SECONDS)  # fmt: skip
     body = pr_body(number, task_id, attempt, commit)
     return github.draft_pr(branch, f"Cairnwork: fix for #{number} (Refs #{number})", body)
 
@@ -337,11 +337,11 @@ def _recall(intake: Intake, repo: str, number: int) -> dict[str, Any] | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, timeout: float | None = None) -> str:
     """The one git runner of this module, shared with lineage: no GIT_* environment, so the
     remote that is checked is the remote that is pushed to (GIT_CONFIG_*, GIT_DIR, ...)."""
     try:
-        return run_git(repo, *args)
+        return run_git(repo, *args) if timeout is None else run_git(repo, *args, timeout=timeout)
     except GitCommandError as exc:
         raise RuntimeError(str(exc)) from exc
 
