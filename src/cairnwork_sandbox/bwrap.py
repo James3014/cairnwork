@@ -42,7 +42,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from cairnwork_sandbox.backend import Policy, SandboxError
-from cairnwork_sandbox.shm import shm_flags
+from cairnwork_sandbox.shm import shm_flags, shm_unavailable_reason
 
 NAME = "bwrap"
 
@@ -129,6 +129,9 @@ _PROBE = (
     "/proc",
     "true",
 )
+
+
+SHM_NOTE_PREFIX = "shm withheld: "
 
 
 @lru_cache(maxsize=1)
@@ -249,6 +252,12 @@ def build_policy(
     # Empty the socket trees that exist with a tmpfs (whole tree, uid-independent).
     for socket_dir in _socket_dirs_to_empty():
         flags += ["--tmpfs", _safe(socket_dir)]
+    # A note, not a flag (wrap() skips "#" lines): the policy file is recorded per run and its
+    # sha256 is bound into the verifier record, so a host that withholds /dev/shm (and so cannot
+    # verify multiprocessing targets) shows why in the run, not only as a PermissionError.
+    reason = shm_unavailable_reason(bwrap_path() or "")
+    if reason:
+        flags.append(f"# {SHM_NOTE_PREFIX}{reason}")
     return Policy("\n".join(flags) + "\n")
 
 
@@ -347,7 +356,8 @@ def _binary() -> str:
 
 def wrap(argv: list[str], policy_path: Path) -> list[str]:
     binary = _binary()
-    flags = [line for line in Path(policy_path).read_text().splitlines() if line]
+    lines = Path(policy_path).read_text().splitlines()
+    flags = [line for line in lines if line and not line.startswith("#")]
     return [binary, *flags, "--", *argv]
 
 
