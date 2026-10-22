@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -188,12 +189,12 @@ def build_policy(
     of ``home``, who can mount over any path in their own home, so every existing credential
     dir/file is masked. False is the dedicated verifier account (Issue #84): the sandbox runs as
     a different uid, so a tmpfs over a path it cannot even resolve (a ``0700`` home) would fail
-    with EPERM. It is not all-or-nothing, though — a *world-readable* secret under a loosened
-    (``0755``) home still leaks to that uid, so the reachable, leaking credential paths are masked
-    (traversable ancestors + other-readable target): exactly the ones that both leak and can be
-    mounted without EPERM. A correctly ``0700`` home yields none, as before. The narrow-check
-    still uses the real home, and the system socket / ``/run/user`` masks (which do not touch the
-    owner's home) are always applied.
+    with EPERM. It is not all-or-nothing, though — a world-readable secret under a loosened
+    (``0755``) home still leaks to that uid, so the credential paths that uid can *resolve to mount
+    over* are masked (every directory on the literal and real path other-traversable). Those are
+    exactly the ones that can leak and can be mounted without EPERM; a correctly ``0700`` home
+    yields none, as before. The narrow-check still uses the real home, and the system socket /
+    ``/run/user`` masks (which do not touch the owner's home) are always applied.
     """
     real_home = _safe(home or Path.home())
     # read_roots are validated but never emitted: the whole root is already bound read-only, so
@@ -254,35 +255,59 @@ def _home_cred_masks(real_home: str, owner: bool) -> list[tuple[str, bool]]:
 
     ``owner`` true (the owner runs the sandbox): every existing credential path, since the owner
     can mount over any path in their own home. False (the dedicated account, a different uid):
-    only the paths that uid can both reach and read, so the mount does not EPERM and the mask is
-    not wasted on a path that does not leak."""
+    only the paths that uid can resolve to mount over without EPERM — which are exactly the ones
+    that can leak to it. Read bits are not consulted: masking any reachable path is harmless, and
+    reasoning about them per path is error-prone (a ``0711`` directory is unreadable yet still lets
+    a known world-readable file under it leak)."""
     masks: list[tuple[str, bool]] = []
     for rel, is_dir in [(d, True) for d in _CRED_DIRS] + [(f, False) for f in _CRED_FILES]:
         if not os.path.lexists(f"{real_home}/{rel}"):
             continue
-        if owner or _other_can_read(real_home, rel, is_dir):
+        if owner or _account_can_reach(real_home, rel):
             masks.append((rel, is_dir))
     return masks
 
 
-def _other_can_read(real_home: str, rel: str, is_dir: bool) -> bool:
-    """True if a uid that is neither the owner nor in the path's group could reach and read
-    ``real_home/rel``: every ancestor directory within the home is world-traversable (``o+x``)
-    and the target is world-readable (a file ``o+r``; a directory ``o+r`` and ``o+x``, to list and
-    enter). A stat error or a broken symlink means not reachable — do not mask a path we cannot
-    confirm, rather than risk an EPERM mount."""
+def _account_can_reach(real_home: str, rel: str) -> bool:
+    """True if a uid that is neither the owner nor in the path's group can resolve
+    ``real_home/rel`` to mount over it. The kernel resolves the bind target as that uid, so every
+    directory it must enter has to be other-traversable (``o+x``): the literal path's directories
+    within the home and, if the target is a symlink, the real target's. A realpath that escapes the
+    home, a symlinked or non-directory component, a missing target, or a stat error counts as not
+    reachable — skip the mask rather than risk an EPERM that would fail the run. (Directories above
+    the home are not checked: ``real_home`` itself being non-traversable — a private ``0700`` home —
+    already yields nothing, and a home whose parents deny the owner is pathological.)"""
+    literal = f"{real_home}/{rel}"
     try:
-        ancestor = real_home
-        for part in rel.split("/")[:-1]:  # home, then each intermediate dir (not the target)
-            if not os.stat(ancestor).st_mode & 0o001:
-                return False
-            ancestor = f"{ancestor}/{part}"
-        if not os.stat(ancestor).st_mode & 0o001:  # the target's parent directory
+        real = os.path.realpath(literal)
+        if not os.path.exists(real):  # a broken symlink masks nothing and cannot be mounted
             return False
-        mode = os.stat(f"{real_home}/{rel}").st_mode
     except OSError:
         return False
-    return bool(mode & 0o004) and (not is_dir or bool(mode & 0o001))
+    return _within_home_traversable(real_home, literal) and _within_home_traversable(
+        real_home, real
+    )
+
+
+def _within_home_traversable(real_home: str, path: str) -> bool:
+    """``real_home`` and every directory under it down to ``path``'s parent are real directories a
+    non-owner, no-shared-group uid can enter (``o+x``). A ``path`` outside the home is not reachable
+    (do not bind over a home path that resolves outside it). ``lstat`` so a symlinked component is a
+    link, not the directory it points at, and counts as not traversable (fail closed)."""
+    parent = os.path.dirname(path)
+    if parent != real_home and not parent.startswith(f"{real_home}/"):
+        return False
+    extra = "" if parent == real_home else parent[len(real_home) + 1 :]
+    directory = real_home
+    for name in ["", *(extra.split("/") if extra else [])]:
+        directory = f"{directory}/{name}" if name else directory
+        try:
+            info = os.lstat(directory)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or not info.st_mode & 0o001:
+            return False
+    return True
 
 
 def _socket_dirs_to_empty() -> list[str]:

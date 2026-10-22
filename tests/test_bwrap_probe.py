@@ -118,31 +118,52 @@ def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path):
     assert str(work.resolve()) in lines  # the write bind is still there
 
 
-def test_reachable_world_readable_credentials_are_masked_under_the_account(tmp_path):
-    # Issue #93: on a loosened (0755) owner home the account uid can reach credential paths, so a
-    # world-readable one still leaks. mask_home_credentials=False masks exactly the reachable,
-    # leaking paths (not the unreadable ones, whose mask would be wasted and could EPERM).
+def test_reachable_credentials_are_masked_under_the_account(tmp_path):
+    # Issue #93: on a loosened (0755) owner home the account uid can resolve credential paths, so
+    # a world-readable one still leaks. mask_home_credentials=False masks every path the uid can
+    # reach to mount over — read bits are not consulted: masking a reachable path is harmless, and
+    # a 0711 directory is unreadable yet still lets a known world-readable child under it leak.
     home, work = _home(tmp_path), tmp_path / "work"
     work.mkdir()
     home.chmod(0o755)  # traversable by others — a misconfigured home
     (home / ".netrc").write_text("secret\n")
-    (home / ".netrc").chmod(0o644)  # world-readable file: leaks, and can be masked
+    (home / ".netrc").chmod(0o644)  # world-readable file
     (home / ".git-credentials").write_text("token\n")
-    (home / ".git-credentials").chmod(0o600)  # owner-only: no leak, left unmasked
+    (home / ".git-credentials").chmod(0o600)  # owner-only file, but still reachable → masked
     (home / ".ssh").mkdir()
-    (home / ".ssh").chmod(0o700)  # owner-only dir: the account cannot enter it, left unmasked
-    (home / ".config").mkdir()
-    (home / ".config").chmod(0o755)  # world-readable+traversable dir: its contents leak
+    (home / ".ssh").chmod(0o711)  # not listable, but a known child under it would leak (finding)
+    policy = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
+    lines = policy.splitlines()
+    real_home = str(home.resolve())
+    for f in (".netrc", ".git-credentials"):
+        i = lines.index(f"{real_home}/{f}")
+        assert lines[i - 2 : i + 1] == ["--ro-bind", "/dev/null", f"{real_home}/{f}"]
+    ssh = lines.index(f"{real_home}/.ssh")
+    assert lines[ssh - 1] == "--tmpfs"  # the 0711 directory is masked, not skipped
+
+
+def test_a_credential_behind_a_private_ancestor_is_not_masked(tmp_path):
+    # Reachability, not the target's own perms, decides masking: a path the account uid cannot
+    # resolve (an ancestor it cannot enter, or a symlink that lands behind one) must not be masked
+    # — binding over it would EPERM and fail the run. A reachable one alongside it is still masked.
+    home, work = _home(tmp_path), tmp_path / "work"
+    work.mkdir()
+    home.chmod(0o755)
+    (home / ".local").mkdir()
+    (home / ".local").chmod(0o700)  # private intermediate: the account cannot enter it
+    (home / ".local" / "state").mkdir()  # a _CRED_DIRS path now unreachable through .local
+    (home / "priv").mkdir()
+    (home / "priv").chmod(0o700)
+    (home / "priv" / "secret").write_text("token\n")
+    (home / "priv" / "secret").chmod(0o644)
+    (home / ".netrc").symlink_to(home / "priv" / "secret")  # resolves behind a 0700 dir
+    (home / ".npmrc").write_text("//r/:_authToken=x\n")
+    (home / ".npmrc").chmod(0o644)  # reachable control
     lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
     real_home = str(home.resolve())
-    netrc = lines.splitlines().index(f"{real_home}/.netrc")
-    assert lines.splitlines()[netrc - 2 : netrc + 1] == [
-        "--ro-bind", "/dev/null", f"{real_home}/.netrc",
-    ]  # fmt: skip
-    config = lines.splitlines().index(f"{real_home}/.config")
-    assert lines.splitlines()[config - 1] == "--tmpfs"
-    assert f"{real_home}/.git-credentials" not in lines  # owner-only file: not masked
-    assert f"{real_home}/.ssh" not in lines  # owner-only dir: not masked
+    assert f"{real_home}/.local/state" not in lines  # blocked by the 0700 .local ancestor
+    assert f"{real_home}/.netrc" not in lines  # symlink lands behind the 0700 priv dir
+    assert f"{real_home}/.npmrc" in lines  # the reachable one is still masked
 
 
 def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
