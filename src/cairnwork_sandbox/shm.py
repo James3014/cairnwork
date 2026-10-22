@@ -17,10 +17,12 @@ def supports_tmpfs_size(binary: str) -> bool:
                 "--ro-bind",
                 "/",
                 "/",
-                "--tmpfs",
-                "/tmp",
+                # bwrap applies --size to the *next* --tmpfs, so it must come first; a trailing
+                # --size is accepted by some versions and would make this probe lie.
                 "--size",
                 "67108864",
+                "--tmpfs",
+                "/tmp",
                 "true",
             ],
             capture_output=True,
@@ -33,7 +35,5 @@ def supports_tmpfs_size(binary: str) -> bool:
 
 
 def shm_flags(binary: str) -> list[str]:
-    flags = ["--tmpfs", "/dev/shm"]
-    if supports_tmpfs_size(binary):
-        flags += ["--size", "67108864"]
-    return flags
+    flags = ["--size", "67108864"] if supports_tmpfs_size(binary) else []
+    return [*flags, "--tmpfs", "/dev/shm"]

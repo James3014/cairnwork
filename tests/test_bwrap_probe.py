@@ -304,6 +304,17 @@ def test_absent_credentials_are_not_masked(tmp_path):
     assert f"{home.resolve()}/.netrc" not in lines
 
 
+def test_shm_size_precedes_its_tmpfs(monkeypatch):
+    # bwrap applies --size to the next --tmpfs and refuses "--size must be followed by --tmpfs"
+    # otherwise; a trailing --size broke every Linux sandbox run (#125 CI).
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
+    assert shm.shm_flags("/usr/bin/bwrap") == ["--size", "67108864", "--tmpfs", "/dev/shm"]
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: False)
+    assert shm.shm_flags("/usr/bin/bwrap") == ["--tmpfs", "/dev/shm"]
+
+
 def test_wrap_reads_the_policy_file(monkeypatch, tmp_path):
     monkeypatch.setattr(bwrap, "bwrap_path", lambda: "/usr/bin/bwrap")
     path = tmp_path / "p"
