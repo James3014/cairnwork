@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cairnwork_attest.record import AttestError
 
 PRIVATE_KEY_FILENAME = "attest_ed25519.pem"
+MAX_KEY_BYTES = 16 * 1024
 _LOOSE_BITS = stat.S_IRWXG | stat.S_IRWXO
 
 
@@ -56,13 +57,31 @@ def load_public_key_pem(pem: str | bytes) -> Ed25519PublicKey:
     return key
 
 
-def _safe_unlink(path: Path, expected_dev: int, expected_ino: int) -> None:
+def _safe_unlink(dir_path: Path, name: str, expected_dev: int, expected_ino: int) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        st = os.lstat(path)
-        if st.st_dev == expected_dev and st.st_ino == expected_ino:
-            path.unlink()
-    except OSError:
+        dir_fd = os.open(dir_path, flags)
+    except FileNotFoundError:
         return
+    except OSError as exc:
+        raise KeyFileError(
+            f"cannot open directory for cleanup: {exc}", code="KEY_CLEANUP_FAILED"
+        ) from exc
+
+    try:
+        try:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if st.st_dev == expected_dev and st.st_ino == expected_ino:
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                return
+    except OSError as exc:
+        raise KeyFileError(f"cannot clean up key file: {exc}", code="KEY_CLEANUP_FAILED") from exc
+    finally:
+        os.close(dir_fd)
 
 
 def _fsync_dir(dir_path: Path) -> None:
@@ -95,6 +114,8 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
     except OSError as exc:
         raise KeyFileError(f"cannot create key file: {exc}", code="KEY_UNWRITABLE") from exc
 
+    created_dev: int | None = None
+    created_ino: int | None = None
     try:
         created_stat = os.fstat(fd)
         created_dev = created_stat.st_dev
@@ -110,7 +131,17 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)
-        _safe_unlink(path, created_dev, created_ino)
+        if created_dev is not None and created_ino is not None:
+            _safe_unlink(state_dir, path.name, created_dev, created_ino)
+        else:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                _already_gone = True
+            except OSError as unlink_exc:
+                raise KeyFileError(
+                    f"cannot clean up key file: {unlink_exc}", code="KEY_CLEANUP_FAILED"
+                ) from unlink_exc
         raise KeyFileError(f"cannot write key file: {exc}", code="KEY_UNWRITABLE") from exc
 
     os.close(fd)
@@ -118,7 +149,8 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
     try:
         _fsync_dir(state_dir)
     except OSError as exc:
-        _safe_unlink(path, created_dev, created_ino)
+        if created_dev is not None and created_ino is not None:
+            _safe_unlink(state_dir, path.name, created_dev, created_ino)
         raise KeyFileError(f"cannot sync directory: {exc}", code="KEY_UNWRITABLE") from exc
 
     return private_key.public_key()
@@ -127,7 +159,7 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
 def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
     """Load the signing key; reject symlinks, non-regular files and group/other access."""
     path = private_key_path(state_dir)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except FileNotFoundError as exc:
@@ -144,7 +176,11 @@ def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
         raise KeyFileError(f"cannot open key file: {exc}", code="KEY_UNREADABLE") from exc
 
     try:
-        st = os.fstat(fd)
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise KeyFileError(f"cannot stat key file: {exc}", code="KEY_UNREADABLE") from exc
+
         if not stat.S_ISREG(st.st_mode):
             raise KeyFileError(f"key file is not a regular file: {path}", code="KEY_NOT_REGULAR")
         if st.st_mode & _LOOSE_BITS:
@@ -157,11 +193,22 @@ def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
                 f"key file owner {st.st_uid} does not match user {os.getuid()}: {path}",
                 code="KEY_WRONG_OWNER",
             )
+
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
-            chunk = os.read(fd, 65536)
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError as exc:
+                raise KeyFileError(f"cannot read key file: {exc}", code="KEY_UNREADABLE") from exc
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > MAX_KEY_BYTES:
+                raise KeyFileError(
+                    f"key file exceeds maximum size of {MAX_KEY_BYTES} bytes: {path}",
+                    code="KEY_TOO_LARGE",
+                )
             chunks.append(chunk)
         data = b"".join(chunks)
     finally:

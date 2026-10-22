@@ -11,6 +11,7 @@ import pytest
 from cairnwork_attest.dsse import _sign_bytes, verify
 from cairnwork_attest.keys import (
     KeyFileError,
+    _safe_unlink,
     generate_keypair,
     keyid,
     load_private_key,
@@ -187,3 +188,68 @@ def test_cli_generate_then_print_public(tmp_path: Path, capsys: pytest.CaptureFi
 def test_cli_public_without_key_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["public", "--state", str(tmp_path)]) == 1
     assert "KEY_NOT_FOUND" in capsys.readouterr().err
+
+
+def test_generate_failure_on_fstat_leaves_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_fstat = os.fstat
+    called = False
+
+    def fstat_fail_once(fd: int) -> os.stat_result:
+        nonlocal called
+        if not called:
+            called = True
+            raise OSError("simulated fstat failure")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", fstat_fail_once)
+    with pytest.raises(KeyFileError) as excinfo:
+        generate_keypair(tmp_path)
+    assert excinfo.value.code == "KEY_UNWRITABLE"
+    assert not private_key_path(tmp_path).exists()
+
+
+def test_load_rejects_fifo(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo not supported on this platform")
+    path = private_key_path(tmp_path)
+    os.mkfifo(path, 0o600)
+
+    with pytest.raises(KeyFileError) as excinfo:
+        load_private_key(tmp_path)
+    assert excinfo.value.code == "KEY_NOT_REGULAR"
+
+
+def test_safe_unlink_preserves_file_when_inode_changed(tmp_path: Path) -> None:
+    path = private_key_path(tmp_path)
+    path.write_text("original content")
+    st_orig = path.stat()
+
+    path.unlink()
+    path.write_text("replaced content")
+    st_new = path.stat()
+    assert st_new.st_ino != st_orig.st_ino
+
+    _safe_unlink(tmp_path, path.name, st_orig.st_dev, st_orig.st_ino)
+    assert path.exists()
+    assert path.read_text() == "replaced content"
+
+
+def test_safe_unlink_deletes_when_dev_and_ino_match(tmp_path: Path) -> None:
+    path = private_key_path(tmp_path)
+    path.write_text("to be unlinked")
+    st = path.stat()
+
+    _safe_unlink(tmp_path, path.name, st.st_dev, st.st_ino)
+    assert not path.exists()
+
+
+def test_load_rejects_oversize_key(tmp_path: Path) -> None:
+    path = private_key_path(tmp_path)
+    path.write_bytes(b"A" * 16385)
+    path.chmod(0o600)
+
+    with pytest.raises(KeyFileError) as excinfo:
+        load_private_key(tmp_path)
+    assert excinfo.value.code == "KEY_TOO_LARGE"

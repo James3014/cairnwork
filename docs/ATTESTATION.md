@@ -122,7 +122,8 @@ uv run python -m cairnwork_attest.keys public --state <state-dir>    # prints th
   loops until the entire PEM is written, `os.fsync(fd)` is called before close,
   and the parent directory fd is fsynced after close. On any failure, the path is
   unlinked only if its `st_dev` and `st_ino` match the created file descriptor
-  (never deleting a foreign file).
+  (never deleting a foreign file). The remaining window (a rename of the directory
+  itself between create and cleanup) is out of scope.
 - Loading avoids check/use races: `load_private_key(state_dir)` opens the key file
   with `O_RDONLY | O_NOFOLLOW` directly, checks `os.fstat(fd)` for a regular file
   (`KEY_NOT_REGULAR`), no group/other permission bits (`KEY_PERMISSIONS_LOOSE`),
