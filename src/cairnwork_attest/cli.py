@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import importlib.metadata
+import json
 import os
 import re
 import sys
@@ -102,14 +106,87 @@ def _cmd_statement(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bundle_facts(path: Path) -> dict[str, Any]:
+    nulls: dict[str, Any] = {
+        "base": None,
+        "statement_sha256": None,
+        "core_status": None,
+        "keyid": None,
+    }
+    try:
+        content = path.read_bytes()
+        envelope = json.loads(content)
+        raw_payload = base64.b64decode(envelope["payload"], validate=True)
+        statement = json.loads(raw_payload)
+        base = None
+        core_status = None
+        keyid_val = None
+        if isinstance(envelope, dict):
+            sigs = envelope.get("signatures")
+            if isinstance(sigs, list) and sigs and isinstance(sigs[0], dict):
+                k = sigs[0].get("keyid")
+                if isinstance(k, str):
+                    keyid_val = k
+        if isinstance(statement, dict):
+            pred = statement.get("predicate")
+            if isinstance(pred, dict):
+                b = pred.get("base_commit")
+                if isinstance(b, str) and _OID.fullmatch(b):
+                    base = b
+                st = pred.get("status")
+                if isinstance(st, str):
+                    core_status = st
+        return {
+            "base": base,
+            "statement_sha256": hashlib.sha256(raw_payload).hexdigest(),
+            "core_status": core_status,
+            "keyid": keyid_val,
+        }
+    except (OSError, ValueError, UnicodeDecodeError, KeyError, TypeError, binascii.Error):
+        return nulls
+
+
+def _print_json(
+    *,
+    ok: bool,
+    code: str,
+    detail: str | None,
+    candidate: str,
+    base: str | None = None,
+    statement_sha256: str | None = None,
+    core_status: str | None = None,
+    keyid: str | None = None,
+) -> None:
+    obj = {
+        "base": base,
+        "candidate": candidate,
+        "code": code,
+        "core_status": core_status,
+        "detail": detail,
+        "keyid": keyid,
+        "ok": ok,
+        "statement_sha256": statement_sha256,
+    }
+    print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+
+
+def _usage_error(msg: str, candidate: str, as_json: bool) -> int:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    if as_json:
+        _print_json(ok=False, code="USAGE", detail=msg, candidate=candidate)
+    return 2
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     candidate = args.candidate
     if not _OID.fullmatch(candidate):
-        print(f"ERROR: malformed --candidate: {candidate!r} (must be 40-hex)", file=sys.stderr)
-        return 2
+        return _usage_error(
+            f"malformed --candidate: {candidate!r} (must be 40-hex)", candidate, args.json
+        )
 
     repo = Path(args.repo)
-    print(f"Candidate: {candidate}", file=sys.stderr)
+    if not args.json:
+        print(f"Candidate: {candidate}", file=sys.stderr)
 
     core_id_pin: Mapping[str, Any] | None = None
     if args.core_identity is not None:
@@ -122,11 +199,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 constant_code="CORE_IDENTITY_MALFORMED",
             )
             if not isinstance(core_id_pin, Mapping):
-                print("ERROR: core-identity must decode to a JSON object", file=sys.stderr)
-                return 2
+                return _usage_error(
+                    "core-identity must decode to a JSON object", candidate, args.json
+                )
         except (BundleError, OSError, UnicodeDecodeError) as exc:
-            print(f"ERROR: cannot read core-identity: {exc}", file=sys.stderr)
-            return 2
+            return _usage_error(f"cannot read core-identity: {exc}", candidate, args.json)
 
     result = verify_bundle(
         Path(args.bundle),
@@ -135,6 +212,20 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         expected_candidate=candidate,
         core_identity_pin=core_id_pin,
     )
+
+    if args.json:
+        facts = _bundle_facts(Path(args.bundle))
+        _print_json(
+            ok=result.ok,
+            code="OK" if result.ok else result.code,
+            detail=result.detail or None,
+            candidate=candidate,
+            base=facts["base"],
+            statement_sha256=facts["statement_sha256"],
+            core_status=facts["core_status"],
+            keyid=facts["keyid"],
+        )
+        return 0 if result.ok else 1
 
     if result.ok and result.statement is not None:
         cand = result.statement["subject"][0]["digest"]["gitCommit"]
@@ -173,6 +264,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_ver.add_argument(
         "--core-identity", type=Path, default=None, help="Path to Core identity JSON pin file"
+    )
+    p_ver.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print verification result as a single JSON line on stdout "
+            "(keyid in facts is claimed by the envelope, not proof of which key verified)"
+        ),
     )
 
     return parser
