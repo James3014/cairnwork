@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from cairnwork.notary import Verdict
 from cairnwork_attest.assurance import Assurance
-from cairnwork_attest.record import AttestError, VerdictRecord
+from cairnwork_attest.record import AttestError, RecordNotVerified, VerdictRecord
 from cairnwork_protocol import canonical_hash, canonical_json
 
 PREDICATE_TYPE = "https://cairnwork.github.io/attestation/verified-change/v0.1"
@@ -30,6 +31,7 @@ class Producer:
 def build_statement(
     record: VerdictRecord,
     *,
+    verdict: Verdict,
     producer: Producer,
     assurance: Assurance,
     timestamp: str,
@@ -41,6 +43,20 @@ def build_statement(
     if not isinstance(record.base_commit, str) or not _OID.fullmatch(record.base_commit):
         raise StatementInputError(
             f"base_commit must be a 40-hex commit hash, got {record.base_commit!r}"
+        )
+    if not verdict.verified:
+        reason = (
+            verdict.reason or f"verdict status={verdict.status!r}, integrity={verdict.integrity!r}"
+        )
+        raise RecordNotVerified(reason, code="RECORD_NOT_VERIFIED")
+    if (
+        verdict.task_id != record.task_id
+        or verdict.attempt_id != record.attempt_id
+        or verdict.candidate_commit != record.candidate_commit
+    ):
+        raise RecordNotVerified(
+            "verdict does not match record task_id, attempt_id, or candidate_commit",
+            code="RECORD_NOT_VERIFIED",
         )
 
     core_identity: dict[str, Any] | None = None
@@ -60,13 +76,10 @@ def build_statement(
                 "name": f"git-commit:{record.candidate_commit}",
                 "digest": {"gitCommit": record.candidate_commit},
             },
-            {
-                "name": f"git-commit:{record.base_commit}",
-                "digest": {"gitCommit": record.base_commit},
-            },
         ],
         "predicateType": PREDICATE_TYPE,
         "predicate": {
+            "base_commit": record.base_commit,
             "request": record.request,
             "response": record.response,
             "request_hash": record.request_hash,

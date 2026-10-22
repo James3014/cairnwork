@@ -10,9 +10,9 @@ import pytest
 from conftest import commit_change, git
 
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
-from cairnwork.notary import Notary
+from cairnwork.notary import Notary, Verdict, default_core_identity
 from cairnwork_attest.assurance import Assurance
-from cairnwork_attest.record import VerdictRecord, read_record
+from cairnwork_attest.record import RecordNotVerified, VerdictRecord, verify_record
 from cairnwork_attest.statement import (
     PREDICATE_TYPE,
     Producer,
@@ -30,10 +30,7 @@ from cairnwork_protocol import (
     verification_plan_hash,
 )
 
-CORE_IDENTITY = {
-    "core_version": "0.1.0-test",
-    "deployment_id": "test-deployment",
-}
+CORE_IDENTITY = default_core_identity()
 
 
 def fake_core_verify(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -74,7 +71,7 @@ def setup_sample_notary(
 def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-    record = read_record(db_path, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
     assurance = Assurance(sandbox_backend="seatbelt", verifier_account_isolated=True)
@@ -82,6 +79,7 @@ def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
 
     statement = build_statement(
         record,
+        verdict=verdict,
         producer=producer,
         assurance=assurance,
         timestamp=timestamp,
@@ -91,13 +89,12 @@ def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
     assert statement["predicateType"] == PREDICATE_TYPE
 
     subjects = statement["subject"]
-    assert len(subjects) == 2
+    assert len(subjects) == 1
     assert subjects[0]["name"] == f"git-commit:{record.candidate_commit}"
     assert subjects[0]["digest"] == {"gitCommit": record.candidate_commit}
-    assert subjects[1]["name"] == f"git-commit:{record.base_commit}"
-    assert subjects[1]["digest"] == {"gitCommit": record.base_commit}
 
     pred = statement["predicate"]
+    assert pred["base_commit"] == record.base_commit
     assert pred["request"] == record.request
     assert pred["response"] == record.response
     assert pred["request_hash"] == record.request_hash
@@ -120,14 +117,18 @@ def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
 def test_statement_hash_stable_across_two_builds(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-    record = read_record(db_path, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
     assurance = Assurance(sandbox_backend="seatbelt")
     ts = "2026-10-22T09:00:00Z"
 
-    s1 = build_statement(record, producer=producer, assurance=assurance, timestamp=ts)
-    s2 = build_statement(record, producer=producer, assurance=assurance, timestamp=ts)
+    s1 = build_statement(
+        record, verdict=verdict, producer=producer, assurance=assurance, timestamp=ts
+    )
+    s2 = build_statement(
+        record, verdict=verdict, producer=producer, assurance=assurance, timestamp=ts
+    )
 
     assert statement_hash(s1) == statement_hash(s2)
     assert statement_bytes(s1) == statement_bytes(s2)
@@ -137,11 +138,9 @@ def test_statement_hash_stable_across_two_builds(tmp_path: Path, repo: Path) -> 
 @pytest.mark.parametrize(
     ("field_name", "modified_val"),
     [
-        ("http_status", 500),
-        ("status", "FAILED_VERIFICATION"),
-        ("integrity", "INVALID"),
         ("request_hash", "sha256:" + "9" * 64),
         ("timestamp", "2026-10-22T09:00:01Z"),
+        ("http_status", 201),
     ],
 )
 def test_statement_hash_changes_when_predicate_field_changes(
@@ -149,25 +148,25 @@ def test_statement_hash_changes_when_predicate_field_changes(
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-    record = read_record(db_path, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
     assurance = Assurance(sandbox_backend="seatbelt")
     base_ts = "2026-10-22T09:00:00Z"
 
     base_statement = build_statement(
-        record, producer=producer, assurance=assurance, timestamp=base_ts
+        record, verdict=verdict, producer=producer, assurance=assurance, timestamp=base_ts
     )
     base_hash = statement_hash(base_statement)
 
     if field_name == "timestamp":
         mod_statement = build_statement(
-            record, producer=producer, assurance=assurance, timestamp=modified_val
+            record, verdict=verdict, producer=producer, assurance=assurance, timestamp=modified_val
         )
     else:
         mod_record = replace(record, **{field_name: modified_val})
         mod_statement = build_statement(
-            mod_record, producer=producer, assurance=assurance, timestamp=base_ts
+            mod_record, verdict=verdict, producer=producer, assurance=assurance, timestamp=base_ts
         )
 
     assert statement_hash(mod_statement) != base_hash
@@ -189,7 +188,7 @@ def test_invalid_commit_raises_statement_input_error(
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-    record = read_record(db_path, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
 
     producer = Producer()
     assurance = Assurance()
@@ -197,11 +196,90 @@ def test_invalid_commit_raises_statement_input_error(
 
     bad_cand = replace(record, candidate_commit=bad_commit)
     with pytest.raises(StatementInputError):
-        build_statement(bad_cand, producer=producer, assurance=assurance, timestamp=ts)
+        build_statement(
+            bad_cand,
+            verdict=verdict,
+            producer=producer,
+            assurance=assurance,
+            timestamp=ts,
+        )
 
     bad_base = replace(record, base_commit=bad_commit)
     with pytest.raises(StatementInputError):
-        build_statement(bad_base, producer=producer, assurance=assurance, timestamp=ts)
+        build_statement(
+            bad_base,
+            verdict=verdict,
+            producer=producer,
+            assurance=assurance,
+            timestamp=ts,
+        )
+
+
+def test_build_statement_unverified_verdict_raises_record_not_verified(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    setup_sample_notary(db_path, repo, "task-1", "a1")
+    record, verified_verdict = verify_record(db_path, "task-1", "a1")
+
+    unverified = replace(verified_verdict, verified=False, status="FAILED_VERIFICATION")
+    with pytest.raises(RecordNotVerified) as exc_info:
+        build_statement(
+            record,
+            verdict=unverified,
+            producer=Producer(),
+            assurance=Assurance(),
+            timestamp="2026-10-22T09:00:00Z",
+        )
+    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+
+
+def test_build_statement_mismatched_verdict_raises_record_not_verified(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    setup_sample_notary(db_path, repo, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
+
+    mismatched_task = replace(verdict, task_id="other-task")
+    with pytest.raises(RecordNotVerified) as exc_info:
+        build_statement(
+            record,
+            verdict=mismatched_task,
+            producer=Producer(),
+            assurance=Assurance(),
+            timestamp="2026-10-22T09:00:00Z",
+        )
+    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+
+    mismatched_cand = replace(verdict, candidate_commit="0" * 40)
+    with pytest.raises(RecordNotVerified) as exc_info:
+        build_statement(
+            record,
+            verdict=mismatched_cand,
+            producer=Producer(),
+            assurance=Assurance(),
+            timestamp="2026-10-22T09:00:00Z",
+        )
+    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+
+
+def test_build_statement_subject_has_exactly_one_entry(tmp_path: Path, repo: Path) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    setup_sample_notary(db_path, repo, "task-1", "a1")
+    record, verdict = verify_record(db_path, "task-1", "a1")
+
+    statement = build_statement(
+        record,
+        verdict=verdict,
+        producer=Producer(),
+        assurance=Assurance(),
+        timestamp="2026-10-22T09:00:00Z",
+    )
+    assert len(statement["subject"]) == 1
+    assert statement["subject"][0]["name"] == f"git-commit:{record.candidate_commit}"
+    assert statement["subject"][0]["digest"] == {"gitCommit": record.candidate_commit}
+    assert statement["predicate"]["base_commit"] == record.base_commit
 
 
 def test_build_statement_missing_core_identity_and_observations() -> None:
@@ -220,8 +298,21 @@ def test_build_statement_missing_core_identity_and_observations() -> None:
         request={"evidence_bundle": {}},
         response={"verification": {"status": "VERIFIED"}},
     )
+    verdict = Verdict(
+        task_id="task-1",
+        attempt_id="a1",
+        base_commit="0" * 40,
+        candidate_commit="1" * 40,
+        request_hash="sha256:" + "a" * 64,
+        http_status=200,
+        status="VERIFIED",
+        integrity="VALID",
+        verified=True,
+        response={},
+    )
     statement = build_statement(
         record,
+        verdict=verdict,
         producer=Producer(),
         assurance=Assurance(),
         timestamp="2026-10-22T09:00:00Z",
