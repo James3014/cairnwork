@@ -223,14 +223,20 @@ def test_safe_unlink_preserves_file_when_inode_changed(tmp_path: Path) -> None:
     path.write_text("original content")
     st_orig = path.stat()
 
-    path.unlink()
-    path.write_text("replaced content")
+    temp_path = tmp_path / "temp_key"
+    temp_path.write_text("replaced content")
+    st_temp = temp_path.stat()
+    assert st_temp.st_ino != st_orig.st_ino
+
+    os.replace(temp_path, path)
     st_new = path.stat()
     assert st_new.st_ino != st_orig.st_ino
+    assert st_new.st_ino == st_temp.st_ino
 
     _safe_unlink(tmp_path, path.name, st_orig.st_dev, st_orig.st_ino)
     assert path.exists()
     assert path.read_text() == "replaced content"
+    assert path.stat().st_ino == st_new.st_ino
 
 
 def test_safe_unlink_deletes_when_dev_and_ino_match(tmp_path: Path) -> None:
