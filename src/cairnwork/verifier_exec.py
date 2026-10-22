@@ -11,14 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import secrets
 import stat
 from pathlib import Path
 
-from cairnwork import confined, report_guard
-from cairnwork.confined import RUN_TOKEN_VAR
-
-_ENV_KEEP = ("PATH", "LANG", "LC_ALL")
+from cairnwork import confined
 
 
 def _same_directory(path: Path, before: os.stat_result) -> bool:
@@ -51,34 +47,6 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account, back
         reap=account.reap,
     )
     return returncode, timed_out, survivors
-
-
-def _prepare_run(private: Path, ini: Path, ini_text: bytes):
-    """Create the per-run directory (the only place besides the checkout the child may
-    write), its HOME and TMPDIR, and the scrubbed environment."""
-    run_dir = private / "run"
-    home, tmp = run_dir / "home", run_dir / "tmp"
-    for directory in (run_dir, home, tmp):
-        directory.mkdir()
-    guard = private / "guard"
-    guard.mkdir()
-    report_guard.install_plugin(guard)  # the trusted plugin, read-only to the sandbox
-    guard.chmod(0o750)
-    _write_new(ini, ini_text)
-    env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
-    env.update(
-        HOME=str(home),
-        TMPDIR=str(tmp),
-        PYTHONDONTWRITEBYTECODE="1",
-        PYTHONNOUSERSITE="1",
-        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
-        PYTHONPATH=str(guard),
-    )
-    env[RUN_TOKEN_VAR] = secrets.token_hex(16)
-    verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
-    env[report_guard.PATH_ENV] = str(verdict_path)
-    env[report_guard.NONCE_ENV] = verdict_nonce
-    return run_dir, home, tmp, env, verdict_path, verdict_nonce
 
 
 def _record_digest(**fields) -> str:

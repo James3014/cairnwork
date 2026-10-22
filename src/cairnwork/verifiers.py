@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import shutil
 import sys
 import tempfile
@@ -57,7 +58,7 @@ from pathlib import Path
 
 import cairnwork_sandbox
 from cairnwork import pytest_config, report_guard
-from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES
+from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
 from cairnwork.treecompare import tree_differences
@@ -65,7 +66,6 @@ from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lo
 from cairnwork.verifier_exec import (  # low-level run primitives, split out for the 400-line cap
     _execute,
     _file_sha256,
-    _prepare_run,
     _record_digest,
     _same_directory,
     _write_new,
@@ -89,6 +89,9 @@ __all__ = [
 ]
 
 DEFAULT_TIMEOUT_SECONDS = 600
+# Kept here (not in verifier_exec) because tests monkeypatch verifiers._ENV_KEEP to inject env vars,
+# and _prepare_run below must read the patched value.
+_ENV_KEEP = ("PATH", "LANG", "LC_ALL")
 
 
 @dataclass(frozen=True)
@@ -236,6 +239,34 @@ def _remove_scratch(dirs, account) -> None:
         if account is not None:
             account.remove(scratch)
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _prepare_run(private: Path, ini: Path, ini_text: bytes):
+    """Create the per-run directory (the only place besides the checkout the child may
+    write), its HOME and TMPDIR, and the scrubbed environment."""
+    run_dir = private / "run"
+    home, tmp = run_dir / "home", run_dir / "tmp"
+    for directory in (run_dir, home, tmp):
+        directory.mkdir()
+    guard = private / "guard"
+    guard.mkdir()
+    report_guard.install_plugin(guard)  # the trusted plugin, read-only to the sandbox
+    guard.chmod(0o750)
+    _write_new(ini, ini_text)
+    env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
+    env.update(
+        HOME=str(home),
+        TMPDIR=str(tmp),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONNOUSERSITE="1",
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONPATH=str(guard),
+    )
+    env[RUN_TOKEN_VAR] = secrets.token_hex(16)
+    verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
+    env[report_guard.PATH_ENV] = str(verdict_path)
+    env[report_guard.NONCE_ENV] = verdict_nonce
+    return run_dir, home, tmp, env, verdict_path, verdict_nonce
 
 
 def _run_one(
