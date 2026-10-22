@@ -73,7 +73,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
     stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
-    return _emit(result, 1 if stuck else 0)
+    if stuck:
+        return _emit(result, 1)
+    return _emit(result, 3 if result.get("leftover_run_dirs") else 0)  # not a clean success
 
 
 def _dispatch(intake: Intake, args) -> Any:
@@ -106,8 +108,12 @@ def _dispatch(intake: Intake, args) -> Any:
             journal=intake.journal,
             run_root=intake.run_root,
             verifier_account=intake.verifier_account(),
+            leftovers_log=intake.state / "cleanup-leftovers.jsonl",
         )
-        return {"decisions": [d.__dict__ for d in decisions]}
+        return {
+            "decisions": [d.__dict__ for d in decisions],
+            "leftover_run_dirs": sum(d.leftover_run_dirs for d in decisions),
+        }
     return _run(intake, args.task_id)
 
 
