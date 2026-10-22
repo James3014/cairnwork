@@ -17,7 +17,7 @@
    - **證明 bug 的測試用 `test_commit` 提供（測試延後套用）**：開 Issue 的人先推一個分支，上面只有一個 commit，父 commit 是 main 上的某個版本，內容只新增或修改 `tests/` 底下的一般檔案，不能有 `conftest.py`。把它的 40 位 hex 填進區塊的 `test_commit`。
      - **私有存放區（#119，worker 隔離的來源端）**：測試 commit 不必、也不該推到目標 repo 的公開 `cwt-*` 分支（有網路的 worker 可以自己去抓）。改成在作者的 clone 上建單一 commit 的 bundle：`git bundle create tests.bundle <branch> ^<base>`，再由跑 Cairnwork 的帳號執行 `cairnwork-verify --state <目錄> import-tests --repo-path <mirror> --bundle tests.bundle`。匯入時在 state 底下的暫存 repo 驗證並重建成正規 bundle（只有一個 head、單親、父 commit 必須已在 mirror 裡），存成 `<state>/deferred-tests/<sha>.bundle`（檔案 0600；state 本來就必須是 owner 的 0700，worker 帳號和其他人進不去）。已匯入、已在 mirror、或已被燒掉（`verify-used-tests`）的 commit 一律拒絕，不覆蓋。
      - 取用：接手時父 commit 從 bundle 讀（不經 GitHub）；worker 結束後 Cairnwork 才從 bundle 抓進自己的 clone。單次使用、「從未出現過」、父 commit 綁定和可信身分檢查都不變。
-     - `config.json` 的 `test_source`：`"auto"`（預設，向下相容）有 bundle 就用，沒有才從 origin 抓（公開分支，worker 仍可能找得到）；**`"bundle"` 是嚴格模式**，沒匯入就拒絕（`TEST_COMMIT_NOT_IMPORTED`／`TASK_TEST_COMMIT_NOT_IMPORTED`），絕不退回 origin。第三輪 A/B 與 worker 帳號隔離上線（#121）時必須設 `"bundle"`。bundle 損壞或 state 目錄不安全（symlink、權限不是 0700）→ `TEST_COMMIT_UNREADABLE`／`TEST_STORE_UNSAFE`，不會產生成功狀態。
+     - `config.json` 的 `test_source`：`"auto"`（預設，向下相容）有 bundle 就用，沒有才從 origin 抓（公開分支，worker 仍可能找得到）；**`"bundle"` 是嚴格模式**，沒匯入就拒絕（`TEST_COMMIT_NOT_IMPORTED`／`TASK_TEST_COMMIT_NOT_IMPORTED`），絕不退回 origin。第三輪 A/B 與 worker 帳號隔離上線（#121）時必須設 `"bundle"`。**只有 `"bundle"` 模式可以宣稱「worker 看不到隱藏測試」**；`auto` 只是相容／示範用（quickstart、demo），任何文件、報告與證明包都不得在 `auto` 下主張測試保密。證明包記錄 `test_source`（見 `docs/ATTESTATION.md`）。bundle 損壞或 state 目錄不安全（symlink、權限不是 0700）→ `TEST_COMMIT_UNREADABLE`／`TEST_STORE_UNSAFE`，不會產生成功狀態。
      - **worker 在修 bug 的期間，這台機器上沒有任何地方有這個測試**：
        - 接手時只透過 GitHub API 讀取它的父 commit，不下載測試。
        - 給 worker 的指示裡不含 `eia-task` 區塊，也不含 commit id。
@@ -40,6 +40,17 @@
    - **格式不符**：留言一次說明原因，改標成 `cairnwork:needs-fix`，移出佇列。
    - **身分不可信**：照 EIA 的做法完全不碰，也不留言。
    - **Cairnwork 停止接新任務（drain）時**：Issue 留在佇列，下一輪再試。
+
+## 在 Issue 任務裡用私有測試 bundle（取代推 `cwt-*` 分支）
+
+要宣稱「worker 看不到隱藏測試」的任務，照這個順序做：
+
+1. 作者在自己的 clone 建單一 commit 的測試分支（父 commit 是 main 上的某個版本，只動 `tests/` 底下的一般檔案），**不要推到目標 repo**。
+2. `git bundle create tests.bundle <branch> ^<base>`。
+3. 由跑 Cairnwork 的帳號匯入：`cairnwork-verify --state <目錄> import-tests --repo-path <mirror> --bundle tests.bundle`（細節與拒絕條件見下方「私有存放區」）。
+4. state 的 `config.json` 設 `"test_source": "bundle"`（沒匯入就拒絕，絕不退回 origin）。
+5. Issue 的 `eia-task` 區塊把該 commit 的 40 位 hex 填進 `test_commit`，其餘照常。
+6. 要出證明時，確認證明包 `test_source` 是 `"bundle"`（`cairnwork-attest verify --json` 會印出）；是 `"auto"` 的證明不能拿來宣稱測試保密。
 
 ## 保證與限制
 

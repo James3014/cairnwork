@@ -61,6 +61,11 @@ cairnwork init --dir ~/.cairnwork/<repo>            # writes config.json
 cairnwork-issues --state ~/.cairnwork/<repo> --repo OWNER/NAME --clone <mirror> run-once
 ```
 
+The default `test_source` is `"auto"` (demo / compatibility): it may fetch the deferred tests
+from the target repository's public branch, so it makes **no** hidden-test confidentiality claim.
+Set `"test_source": "bundle"` in `config.json` and import the tests with `cairnwork-verify
+import-tests` to get the strict mode (see ISSUE_INTAKE.md).
+
 See [ISSUE_INTAKE.md](ISSUE_INTAKE.md) for how a task Issue is written (the `eia-task` block,
 deferred `test_commit`, the `cairnwork:queue` label and the trusted-identity rules).
 

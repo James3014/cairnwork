@@ -43,6 +43,11 @@ An attestation statement is an unsigned in-toto v1 Statement containing:
   - `core_identity`: Reported Core identity from the verification response.
   - `verifier_observations`: Exact list of observations from the evidence bundle.
   - `hidden_test_commit`: Null in Phase 1 (not carried in the notary record).
+  - `test_source`: `"bundle"` or `"auto"`, the hidden-test mode of the state at statement time
+    (read from the state's `config.json`; only an exact `"bundle"` is recorded as `bundle`, a
+    missing or unreadable config is `auto`). Confidentiality of the hidden tests is claimed only
+    for `bundle`; `auto` makes no such claim. The notary row does not record it, so a config
+    changed between notarization and `statement` is not detected.
   - `producer`: Software identity and version generating the statement.
   - `recorded_at`: Timestamp when the notary recorded the verdict in SQLite.
   - `timestamp`: Caller-supplied UTC ISO-8601 generation timestamp.
@@ -186,6 +191,10 @@ cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-re
 `--candidate <sha>` is required with no default. The caller must decide and pass the candidate commit explicitly (for example, `--candidate "$(git rev-parse HEAD)"`). The tool refuses to guess the candidate from HEAD or the local environment because an attacker-controlled checkout must never be trusted to choose the candidate commit under evaluation.
 
 Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
+
+`verify --json` also prints `test_source` (`"bundle"`, `"auto"`, or `null` when the bundle
+lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
+not yet refuse `auto` bundles.
 
 ## Planned Follow-ups (Phase 2+)
 

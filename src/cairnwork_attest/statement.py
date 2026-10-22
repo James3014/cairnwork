@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.assurance import assurance_from_record
@@ -20,6 +22,9 @@ STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 _OID = re.compile(r"^[0-9a-f]{40}$")
 
 
+TEST_SOURCES = ("bundle", "auto")
+
+
 class StatementInputError(AttestError):
     code: str = "STATEMENT_INPUT_ERROR"
 
@@ -29,6 +34,17 @@ class Producer:
     name: str = "cairnwork"
     version: str = "0.0.1.dev0"
     git_commit: str = ""
+
+
+def state_test_source(state_dir: Path) -> str:
+    """``"bundle"`` only if config.json says exactly that; anything else is ``"auto"``."""
+    try:
+        config = json.loads((Path(state_dir) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "auto"
+    return (
+        "bundle" if isinstance(config, dict) and config.get("test_source") == "bundle" else "auto"
+    )
 
 
 def _validate_verified_record(verified: VerifiedRecord) -> None:
@@ -76,7 +92,10 @@ def build_statement(
     *,
     producer: Producer,
     timestamp: str,
+    test_source: str = "auto",
 ) -> dict[str, Any]:
+    if test_source not in TEST_SOURCES:
+        raise StatementInputError(f"test_source must be one of {TEST_SOURCES}, got {test_source!r}")
     _validate_verified_record(verified)
     record = verified.record
     assurance = assurance_from_record(verified)
@@ -111,6 +130,7 @@ def build_statement(
             "core_identity": core_identity,
             "verifier_observations": verifier_observations,
             "hidden_test_commit": None,
+            "test_source": test_source,
             "producer": {
                 "name": producer.name,
                 "version": producer.version,
