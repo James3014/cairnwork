@@ -21,11 +21,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from cairnwork.attempt_gate import attempt_gate
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
+from cairnwork.issue_runner import DEFAULT_GH, TRUST_CHANGED, GitHub
 from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
@@ -121,8 +125,20 @@ def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     """The runner submit starts. It keeps the inherited lock fd open until it exits."""
     config = intake.config()
+    task = intake.load_request(task_id)
+    gate = None
+    if task.card_hash.startswith("gh:"):  # an Issue task: re-check its trust before the attempt
+        found = re.fullmatch(r"gh:(.+)#(\d+):(\w+)", task.card_hash)
+        try:
+            if found is None:
+                raise ValueError("unreadable link")
+            repo, number, block = found.groups()
+            roots = tuple(config.get("test_roots", ()))
+            gate = attempt_gate(GitHub(config["gh"] or DEFAULT_GH, repo), int(number), block, roots)
+        except Exception:  # noqa: BLE001 - any failure: refuse, the task ends FAILED
+            gate = lambda: TRUST_CHANGED  # noqa: E731
     result = run_bound_task(
-        intake.load_request(task_id),
+        replace(task, before_attempt=gate),
         task_id,
         ledger=intake.ledger,
         notary=intake.notary,

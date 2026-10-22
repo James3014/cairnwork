@@ -1,19 +1,13 @@
 """One governed task, end to end: bind → isolated attempt → candidate → verify → Core.
 
-``run_task`` is the bare core's main path. It owns no policy beyond the
-preserved behaviors: every step that fails leaves the task FAILED (or not
-COMPLETED) with a reason, and only a Core verdict that is verified for the
-exact candidate commit makes it COMPLETED.
+``run_task`` is the bare core's main path. It owns no policy beyond the preserved behaviors: every
+step that fails leaves the task FAILED (or not COMPLETED) with a reason, and only a Core verdict
+that is verified for the exact candidate commit makes it COMPLETED.
 
-Any exception after binding is recorded as FAILED with an ``INFRA_ERROR``
-reason; a crash of this process itself leaves the task DISPATCHED until restart
-recovery (preserved behavior #21) exists. A FAILED task keeps its card: to try
-again, move it to SUPERSEDED (``OwnershipLedger.set_status``) and submit with a
-new idempotency key.
-
-Workers are pluggable (``Worker``). A worker edits files in the clone it is
-given; Cairnwork snapshots the allowed files into a commit itself (see
-snapshot.py). The worker must have exited when ``run`` returns.
+Any exception after binding is recorded as FAILED with an ``INFRA_ERROR`` reason; a crash of this
+process leaves the task DISPATCHED until restart recovery. A FAILED task keeps its card: to retry,
+SUPERSEDE it (``OwnershipLedger.set_status``), then submit anew. A ``Worker``
+edits its clone and must have exited when ``run`` returns.
 """
 
 from __future__ import annotations
@@ -21,6 +15,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -86,6 +81,7 @@ class TaskSpec:
     test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
     p2p_mode: str = "off"  # state config p2p_selection (p2p.py); only used with a test_commit
     p2p_budget: int = 300  # state config p2p_time_budget_seconds
+    before_attempt: Callable[[], str] | None = None  # refusal code or ""; asked per attempt
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -104,9 +100,8 @@ class Worker(Protocol):
     """Edits the clone at workdir and returns when done.
 
     A worker that starts processes must give each one the environment variable
-    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so that restart
-    recovery can find and stop them if Cairnwork dies mid-run (AgyWorker does).
-    """
+    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so restart recovery can find and
+    stop them if Cairnwork dies mid-run (AgyWorker does)."""
 
     def run(self, workdir: Path, task: TaskSpec) -> None: ...
 
@@ -337,6 +332,12 @@ def judge_candidate(
 
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
+    gate = task.before_attempt or (  # trust re-check per attempt; a gh: card with no gate refuses
+        lambda: "TRUST_CHANGED_BEFORE_DISPATCH" * task.card_hash.startswith("gh:")
+    )
+    if refusal := gate():
+        result.reason = refusal
+        return
     if task.test_commit:
         try:
             never_seen(task.repo, task.test_commit)

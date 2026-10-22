@@ -107,6 +107,15 @@ def test_trusted_queue():
             },
             "TITLE_EDITED_BY_UNTRUSTED",
         ),
+        (  # same second as the label counts as after it
+            {
+                "events": (
+                    LABELED,
+                    {"event": "renamed", "actor": "someone", "at": "2026-10-20T07:00:00Z"},
+                )
+            },
+            "TITLE_EDITED_BY_UNTRUSTED",
+        ),
     ],
 )
 def test_untrusted_queue(kwargs, reason):

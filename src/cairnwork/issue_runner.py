@@ -59,6 +59,7 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
 )
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+TRUST_CHANGED = "TRUST_CHANGED_BEFORE_DISPATCH"
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
 
 
@@ -84,6 +85,16 @@ class GitHub:
         return json.loads(out)
 
     def trust(self, number: int, label: str) -> str:
+        try:
+            return self._trust(number, label)
+        except (TypeError, AttributeError, KeyError, ValueError):  # odd GitHub output: refuse
+            return "TRUST_CHECK_FAILED"
+
+    def current(self, number: int) -> dict[str, Any]:
+        out = self._run("issue", "view", str(number), "-R", self.repo, "--json", "body,title")
+        return json.loads(out)
+
+    def _trust(self, number: int, label: str) -> str:
         jq = (
             '.[] | select(.event=="labeled" or .event=="renamed") | '
             "{event, label: .label.name, actor: .actor.login, at: .created_at}"
@@ -213,6 +224,9 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     if task.test_commit:  # bind to the tests' parent; the tests stay off this machine
         payload["test_commit"] = task.test_commit
         payload["base_commit"] = _test_base(github, clone, task.test_commit, intake.test_store())
+    now = github.current(number)  # re-read: nothing may change between first check and dispatch
+    if now != {k: issue.get(k) for k in ("title", "body")} or github.trust(number, QUEUE):
+        return {"skipped": TRUST_CHANGED}
     out = intake.submit(payload)
     _remember(intake, github.repo, number, out["task_id"], task.block_sha256)
     github.relabel(number, RUNNING, QUEUE)
@@ -371,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         except BlockingIOError:
             print(json.dumps({"error": "BUSY", "detail": "another run-once is working"}))
             return 2
+        intake.remember_gh(args.gh)
         result = {"take": take(intake, github, clone), "settle": settle(intake, github, clone)}
     finally:
         os.close(fd)

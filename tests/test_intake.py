@@ -286,9 +286,11 @@ def test_agy_dispatch_defaults_to_off_and_accepts_valid_settings(intake):
 
 
 def test_route_hands_the_dispatcher_to_the_worker(monkeypatch):
+    from pathlib import Path
     from types import SimpleNamespace
 
     import cairnwork.route as route
+    from cairnwork.pipeline import TaskSpec
 
     made = []
     monkeypatch.setattr(route, "AgyWorker", lambda **kw: made.append(kw) or "worker")
@@ -297,7 +299,7 @@ def test_route_hands_the_dispatcher_to_the_worker(monkeypatch):
     def run(config):
         intake = SimpleNamespace(
             config=lambda: {**DEFAULT_CONFIG, **config},
-            load_request=lambda _t: None,
+            load_request=lambda _t: TaskSpec("k", "card", "t", "i", Path(), "0" * 40, ("a",), ()),
             ledger=None,
             notary=None,
             journal=None,
