@@ -6,6 +6,7 @@ from conftest import commit_change, git
 from test_issue_runner import FakeGitHub, _completed, issue
 
 import cairnwork.issue_runner as runner
+import cairnwork.lineage as lineage
 from cairnwork.intake import Intake
 
 setup = shared.setup  # the shared fixture (local clone, fake dispatch)
@@ -67,7 +68,7 @@ def test_other_origins_are_refused(tmp_path, urls, pushes, code):
 
 
 def test_an_empty_answer_is_refused(monkeypatch, tmp_path):
-    monkeypatch.setattr(runner, "_git", lambda *a: "")
+    monkeypatch.setattr(lineage, "run_git", lambda *a: "")
     with pytest.raises(RuntimeError, match="LINEAGE_REMOTE_UNKNOWN"):
         REAL_VERIFY(tmp_path, "James3014/demo")
 
