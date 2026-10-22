@@ -1,5 +1,6 @@
 import sys
 import time
+from dataclasses import replace
 
 import pytest
 from conftest import commit_change, git
@@ -295,3 +296,70 @@ def test_candidate_only_reachable_from_attempt_refs_can_be_verified(project, tmp
 def test_artifact_id_points_at_the_log(project, tmp_path):
     result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
     assert (tmp_path / "runs" / result.observation.artifact_id) == result.log_path
+
+
+# Issue #114: a run whose log shows passing tests failed with no recorded cause. Reading the
+# process list is slow on a loaded host; one timed-out read counted as "a process escaped".
+def test_unreadable_process_list_fails_closed_and_says_why(project, tmp_path, monkeypatch):
+    import cairnwork.confined as confined
+
+    monkeypatch.setattr(confined, "_processes_with_environment", lambda: None)
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    result = run(project, tmp_path, head, "tests/test_a.py::test_x")
+    assert result.returncode == 0 and b"passed" in result.log_path.read_bytes()
+    assert not result.observation.passed and result.survivors == 1
+    assert "outlived the run" in result.why
+
+
+def test_a_passing_run_has_no_failure_reason(project, tmp_path):
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    assert run(project, tmp_path, head, "tests/test_a.py::test_x").why == ""
+
+
+def test_a_failing_test_says_which_exit_code(project, tmp_path):
+    result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
+    assert f"pytest exit code {result.returncode}" in result.why
+
+
+class _NotedBackend:
+    """The selected backend, but its policy carries a note (as bwrap does when shm is withheld)."""
+
+    def __init__(self, real, notes):
+        self._real, self._notes = real, notes
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def policy(self, *args, **kwargs):
+        return replace(self._real.policy(*args, **kwargs), notes=self._notes)
+
+
+def _with_notes(monkeypatch, notes):
+    import cairnwork_sandbox
+
+    real = cairnwork_sandbox.select()
+    monkeypatch.setattr(cairnwork_sandbox, "select", lambda: _NotedBackend(real, notes))
+
+
+def test_policy_notes_reach_the_run_and_the_reason_but_not_the_hash(project, tmp_path, monkeypatch):
+    # #154: the operator sees why shm was withheld; the observation's hash inputs do not change
+    # (per-run paths make two digests differ anyway, so compare what is hashed).
+    from cairnwork import verifiers
+    from cairnwork.reasons import explain
+
+    seen = []
+    real_digest = verifiers._record_digest
+    monkeypatch.setattr(
+        verifiers, "_record_digest", lambda **kw: seen.append(kw) or real_digest(**kw)
+    )
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    plain = run(project, tmp_path / "a", head, "tests/test_a.py::test_x")
+    note = "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"
+    _with_notes(monkeypatch, (note,))
+    noted = run(project, tmp_path / "b", head, "tests/test_a.py::test_x")
+    assert plain.notes == () and noted.notes == (note,)
+    assert noted.observation.passed and explain([noted]) == ""
+    assert seen[0].keys() == seen[1].keys()
+    assert not any(note in str(value) for value in seen[1].values())
+    failing = run(project, tmp_path / "c", head, "tests/test_a.py::test_writes")
+    assert failing.notes == (note,) and f"({note})" in explain([failing])

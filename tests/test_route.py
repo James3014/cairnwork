@@ -37,6 +37,13 @@ def project(repo):
             ),
         },
     )
+    # The route runs in a subprocess, so the conftest patch of DEFAULT_CONFIG does not reach
+    # it: give the project a real origin whose main holds the base, so the lineage check
+    # (the product default) is exercised end to end.
+    origin = repo.parent / "origin.git"
+    git(repo.parent, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "-u", "origin", "main")
     return repo
 
 
@@ -110,7 +117,21 @@ def test_drained_by_default_and_unknown_tasks_are_reported(state, project):
     )
     code, out = route(state, "status", "--task-id", "task-nope")
     assert code == 3 and out["error"] == "UNKNOWN_TASK"
-    assert route(state, "in-flight")[1] == {"accepting": False, "count": 0, "task_ids": []}
+    assert route(state, "in-flight")[1] == {
+        "accepting": False,
+        "count": 0,
+        "task_ids": [],
+        "foreign_task_ids": [],
+    }
+
+
+def test_submit_refuses_a_base_that_is_not_on_origin_main(state, project):
+    route(state, "accept")
+    git(project, "checkout", "-q", "-b", "hidden")  # a commit that is on no main (the #76 class)
+    commit_change(project, {"src/calc.py": "x = 1\n"})
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 2 and out["error"] == "BASE_NOT_ON_MAIN"
+    assert route(state, "in-flight")[1]["count"] == 0
 
 
 def test_submitted_task_is_fixed_and_core_verified(state, project):
@@ -260,6 +281,7 @@ def test_another_submit_pinning_its_base_does_not_upset_a_running_attempt(state,
         assert time.monotonic() < deadline
         time.sleep(0.2)
     commit_change(project, {"README.md": "a newer base\n"})
+    git(project, "push", "-q", "origin", "main")  # the new base must be on main too
     code, second = route(state, "submit", stdin=request(project, key="gw-2"))
     assert code == 0, second
     assert wait_finished(state, first["task_id"])["status"] == "COMPLETED"

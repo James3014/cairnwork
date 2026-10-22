@@ -9,6 +9,7 @@ test_verifier_account.py.
 from pathlib import Path
 
 import cairnwork.verifier_account as va
+import cairnwork.verifier_escape as ve
 
 DAEMON = "/usr/sbin/distnoted"  # the one real launchd daemon seen on full-Xcode hosts
 
@@ -17,9 +18,9 @@ def _account(monkeypatch, procs, real, apple=(DAEMON,)):
     # The daemon exemption is macOS-only (proc_pidpath); force it on so the logic is tested on any
     # host (CI's test jobs run on Linux). A separate test covers the off-Darwin path.
     monkeypatch.setattr(va.sys, "platform", "darwin")
-    monkeypatch.setattr(va.VerifierAccount, "_list", lambda self: procs)
+    monkeypatch.setattr(va.VerifierAccount, "_list", lambda self, deadline=None, attempts=1: procs)
     monkeypatch.setattr(va.VerifierAccount, "_real_paths", lambda self, pids: real)
-    monkeypatch.setattr(va, "_apple_signed", lambda path: path in apple)
+    monkeypatch.setattr(ve, "apple_signed", lambda path: path in apple)
     return va.VerifierAccount(user="x", root=Path("/tmp/does-not-matter"))
 
 

@@ -135,6 +135,28 @@ def test_in_flight_ignores_a_task_another_owner_holds(intake):
     assert intake.in_flight()["count"] == 0
 
 
+def test_in_flight_lists_foreign_rows_apart_from_the_counted_ones(intake, repo):
+    ours = intake.submit(payload(repo))["task_id"]
+    theirs = intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    out = intake.in_flight()
+    assert out["count"] == 1 and out["task_ids"] == [ours]
+    assert out["foreign_task_ids"] == [theirs]
+
+
+def test_a_finished_foreign_task_is_not_listed(intake):
+    done = intake.ledger.bind("k1", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    live = intake.ledger.bind("k2", {"a": 2}, "nexus-new", "d" * 8).record.task_id
+    intake.ledger.set_status(done, "DISPATCHED")
+    intake.ledger.set_status(done, "COMPLETED")
+    assert intake.in_flight()["foreign_task_ids"] == [live]
+
+
+def test_in_flight_without_a_ledger_reports_the_whole_empty_payload(tmp_path):
+    (tmp_path / "state").mkdir()
+    out = Intake(tmp_path / "state").in_flight()
+    assert out == {"accepting": False, "count": 0, "task_ids": [], "foreign_task_ids": []}
+
+
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first
@@ -296,3 +318,65 @@ def test_route_hands_the_dispatcher_to_the_worker(monkeypatch):
     )["dispatch"]
     assert (got.path, got.pool_wait_seconds, got.provider_stall_seconds) == ("/opt/pool/d", 1, 2)
     assert got.stream_no_progress_seconds == 3
+
+
+def _with_origin(repo, tmp_path):
+    """The repo's main is also an origin's main, as on GitHub; returns the origin path."""
+    origin = tmp_path / "origin.git"
+    git(repo, "clone", "-q", "--bare", str(repo), str(origin))
+    git(repo, "remote", "add", "origin", str(origin))
+    return origin
+
+
+def _require(intake, value=True):
+    (intake.state / "config.json").write_text(json.dumps({"require_base_on_main": value}))
+
+
+def test_a_base_on_origin_main_is_taken_at_submit(intake, repo, tmp_path):
+    _with_origin(repo, tmp_path)
+    _require(intake)
+    assert intake.submit(payload(repo))["status"] == "BOUND"
+
+
+def test_a_base_not_on_origin_main_is_refused_at_submit_and_nothing_is_bound(
+    intake, repo, tmp_path
+):
+    _with_origin(repo, tmp_path)
+    _require(intake)
+    git(repo, "checkout", "-q", "-b", "hidden")  # a commit that is on no main (the #76 class)
+    (repo / "src" / "a.py").write_text("x = 2\n")
+    git(repo, "commit", "-qam", "hidden tests")
+    with pytest.raises(IntakeRefused, match="BASE_NOT_ON_MAIN"):
+        intake.submit(payload(repo))
+    assert FakePopen.held == [] and intake.in_flight()["count"] == 0
+
+
+def test_a_repository_without_origin_is_refused_when_the_check_is_on(intake, repo):
+    _require(intake)
+    with pytest.raises(IntakeRefused, match="ORIGIN_FETCH_FAILED") as err:
+        intake.submit(payload(repo))  # fails closed: origin main cannot be fetched
+    assert "require_base_on_main false" in str(err.value)
+
+
+def test_the_lineage_check_can_be_switched_off_and_must_be_a_boolean(intake, repo):
+    _require(intake, False)
+    assert intake.submit(payload(repo))["status"] == "BOUND"
+    (intake.state / "config.json").write_text('{"require_base_on_main": "no"}')
+    with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
+        intake.submit(payload(repo, key="gw-2"))
+
+
+def test_a_resend_of_a_bound_task_does_not_re_check_lineage(intake, repo, tmp_path):
+    _with_origin(repo, tmp_path)
+    _require(intake)
+    first = intake.submit(payload(repo))
+    git(repo, "remote", "remove", "origin")
+    again = intake.submit(payload(repo))
+    assert again["duplicate"] and again["task_id"] == first["task_id"]
+
+
+@pytest.mark.no_origin_patch
+def test_the_lineage_check_is_on_by_default():
+    from cairnwork import intake as intake_module
+
+    assert intake_module.DEFAULT_CONFIG["require_base_on_main"] is True

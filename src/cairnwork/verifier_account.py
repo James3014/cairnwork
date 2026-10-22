@@ -25,6 +25,7 @@ making sure the account runs nothing.
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 import pwd
 import subprocess
@@ -36,6 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from cairnwork import confined, verifier_escape
 from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
@@ -48,44 +50,27 @@ DEFAULT_ROOT = Path(
 )
 
 
-# A verifier run is bounded by its own timeout (verifiers.DEFAULT_TIMEOUT_SECONDS, 600 s);
-# a waiter gives up a little later than that instead of queueing behind a stuck holder.
+# A waiter gives up after this long instead of queueing behind a stuck holder. run_verifiers
+# holds the lock across every spec (each bounded by its timeout, 600 s by default), so it does
+# not use this fixed floor alone: lock_wait_seconds() sizes the wait from the spec count.
+# Waiters poll, so there is no FIFO order: under steady contention one can starve until its
+# own timeout, which is the bound.
 LOCK_TIMEOUT_SECONDS = 900.0
+_LOCK_MARGIN_SECONDS = 300.0
 _LOCK_POLL_SECONDS = 0.05
-
-# On a host with a full Xcode, running /usr/bin/git goes through xcrun/xcodebuild, and launchd
-# starts the account's own distnoted (ppid 1). It is harmless and killed with everything else, but
-# must not be mistaken for a process the candidate left behind (cairnwork#37). It is exempted only
-# its REAL executable path (proc_pidpath, never the forgeable argv[0]/ps-comm), its parent being
-# launchd (ppid 1), and an Apple code signature — so a candidate that renames itself to a daemon, or
-# re-parents to launchd while running another binary, keeps its own real path and is still counted.
-_SYSTEM_DAEMONS = frozenset({"/usr/sbin/distnoted"})
-# Printed, as the account, one "pid\treal-path" line per queried pid. proc_pidpath returns the
-# running image's vnode path from the kernel, which the target process cannot forge.
-_PIDPATH_HELPER = (
-    "import ctypes,sys\n"
-    "libc=ctypes.CDLL(None)\n"
-    "libc.proc_pidpath.restype=ctypes.c_int\n"
-    "b=ctypes.create_string_buffer(4096)\n"
-    "for a in sys.argv[1:]:\n"
-    "    n=libc.proc_pidpath(int(a),b,4096)\n"
-    "    if n>0: sys.stdout.write('%s\\t%s\\n'%(a,b.value[:n].decode('utf-8','replace')))\n"
-)
+# One budget for every process-list probe and kill of a single reap or idle check (Issue #114);
+# past it the answer is "survivor / unknown", never "clean".
+PROBE_DEADLINE_SECONDS = 120.0
 
 
-def _apple_signed(path: str) -> bool:
-    """True only if ``path`` is a genuine Apple-OS binary (the 'anchor apple' requirement, which a
-    third-party Developer ID signature does not satisfy). Reads the file on disk, as the owner."""
-    try:
-        done = subprocess.run(  # noqa: S603 - fixed argv, path from proc_pidpath
-            ["/usr/bin/codesign", "--verify", "-R=anchor apple", "--", path],
-            capture_output=True,
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
+def _remaining(deadline: float | None) -> float:
+    return confined.PS_TIMEOUT_SECONDS if deadline is None else deadline - time.monotonic()
+
+
+def lock_wait_seconds(spec_count: int, spec_timeout: float) -> float:
+    """How long a waiter should queue for a holder like itself: every spec at its full timeout,
+    plus a margin, never below LOCK_TIMEOUT_SECONDS (read at call time)."""
+    return max(LOCK_TIMEOUT_SECONDS, max(spec_count, 0) * spec_timeout + _LOCK_MARGIN_SECONDS)
 
 
 class VerifierAccountError(Exception):
@@ -164,35 +149,44 @@ class VerifierAccount:
         jailed = backend.wrap(inner, profile) if profile is not None else backend.unconfined(inner)
         return [SUDO, "-n", "-u", self.user, "--", *jailed]
 
-    def _list(self) -> list[tuple[int, int]] | None:
-        """(pid, ppid) for each process the account runs; None if it cannot be determined.
-        ppid is the kernel's parent pid, which the process cannot forge."""
-        try:
-            # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
-            # procps selects all of a user's processes with -U alone and rejects -x.
-            tty_flag = ["-x"] if sys.platform == "darwin" else []
-            done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid=,ppid="],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if done.returncode not in (0, 1) or done.stderr.strip():  # 1: nothing matched
-            return None  # e.g. an unknown user, which ps also reports with exit 1
-        procs: list[tuple[int, int]] = []
-        for line in done.stdout.split("\n"):
-            parts = line.split()
-            if len(parts) == 2 and all(p.isdigit() for p in parts):
-                procs.append((int(parts[0]), int(parts[1])))
-        return procs
+    def _list(self, deadline: float | None, attempts: int) -> list[tuple[int, int]] | None:
+        """(pid, ppid) for each process the account runs; None if it cannot be determined within the
+        deadline. ppid is the kernel's parent pid, which the process cannot forge. Retries like
+        count(): slow under load is not "cannot tell" (Issue #114)."""
+        # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
+        # procps selects all of a user's processes with -U alone and rejects -x.
+        tty_flag = ["-x"] if sys.platform == "darwin" else []
+        for _ in range(attempts):
+            budget = _remaining(deadline)
+            if budget <= 0:
+                break
+            try:
+                done = subprocess.run(  # noqa: S603 - fixed argv
+                    ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid=,ppid="],
+                    capture_output=True,
+                    text=True,
+                    timeout=min(budget, confined.PS_TIMEOUT_SECONDS),
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if done.returncode in (0, 1) and not done.stderr.strip():  # 1: nothing matched
+                procs: list[tuple[int, int]] = []
+                for line in done.stdout.split("\n"):
+                    parts = line.split()
+                    if len(parts) == 2 and all(p.isdigit() for p in parts):
+                        procs.append((int(parts[0]), int(parts[1])))
+                return procs
+        return None  # e.g. an unknown user, which ps also reports with exit 1
 
-    def count(self) -> int:
+    def count(self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS) -> int:
         """How many processes the account is running, launchd system daemons included (-1: cannot
-        tell). ``_escaped_count`` is the one that decides whether a run left anything behind."""
-        procs = self._list()
+        tell, or ``deadline`` passed). ``_escaped_count`` decides whether a run left anything.
+
+        Retry (``attempts`` > 1) only after a kill: asking again while a survivor is still alive
+        gives it time to undo the run's traces (Issue #114).
+        """
+        procs = self._list(deadline, attempts)
         return -1 if procs is None else len(procs)
 
     def _real_paths(self, pids: list[int]) -> dict[int, str] | None:
@@ -200,7 +194,9 @@ class VerifierAccount:
         query its own processes. None if the helper could not run (treated as "cannot tell")."""
         if not pids:
             return {}
-        argv = self.wrap([self.python, "-P", "-c", _PIDPATH_HELPER, *map(str, pids)], None)
+        argv = self.wrap(
+            [self.python, "-P", "-c", verifier_escape.PIDPATH_HELPER, *map(str, pids)], None
+        )
         try:
             done = subprocess.run(  # noqa: S603 - fixed argv, pids from ps
                 argv, capture_output=True, text=True, timeout=30, check=False
@@ -217,13 +213,15 @@ class VerifierAccount:
                     paths[int(pid_s)] = path
         return paths
 
-    def _escaped_count(self) -> int:
+    def _escaped_count(
+        self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS
+    ) -> int:
         """Processes the account runs that are NOT a launchd system daemon (-1: cannot tell).
         A daemon is exempt only when its real executable is allow-listed, its parent is launchd
         (ppid 1) and it is Apple-signed; anything else — a candidate's leftover process, however it
-        named itself — is counted. If the real paths cannot be read, the count is unknown (fail
-        closed), never zero."""
-        procs = self._list()
+        named itself — is counted. If the list or the real paths cannot be read, the count is
+        unknown (fail closed), never zero."""
+        procs = self._list(deadline, attempts)
         if procs is None:
             return -1
         if not procs or sys.platform != "darwin":
@@ -235,8 +233,7 @@ class VerifierAccount:
             return -1
         escaped = 0
         for pid, ppid in procs:
-            path = real.get(pid)
-            if ppid == 1 and path in _SYSTEM_DAEMONS and _apple_signed(path):
+            if verifier_escape.is_exempt(real.get(pid), ppid):
                 continue  # a launchd system daemon: killed like the rest, not an escape
             escaped += 1
         return escaped
@@ -244,33 +241,48 @@ class VerifierAccount:
     def reap(self) -> int:
         """Kill everything the account runs; return how many escaped processes were running.
 
-        Unknown counts, or a process that outlived the kill, count as one more, so a
-        caller never mistakes "cannot tell" for "nothing escaped".
+        The process list is read once, *before* the kill, with no retry: asking again while a
+        survivor is alive would give it time to undo the run's traces and exit before it is
+        counted (``kill -9 -1`` cannot report what it hit: it signals itself too, and ps is not
+        allowed inside the account's sandbox). Retrying is only done after a kill. An unknown
+        count, an expired probe deadline, or a process that outlived the kill count as one
+        more, so a caller never mistakes "cannot tell" for "nothing escaped".
         """
+        deadline = time.monotonic() + PROBE_DEADLINE_SECONDS
         try:
-            before = self._escaped_count()
-            left = self.kill_all()
+            before = self._escaped_count(deadline, attempts=1)
+            left = self._kill_until_clean(5, deadline)
         except (OSError, subprocess.SubprocessError):
             return 1
         return max(before, 0) + (1 if before < 0 or left != 0 else 0)
 
     def kill_all(self, attempts: int = 5) -> int:
-        """SIGKILL every process of the account; return how many escaped processes are left (-1:
-        unknown). A launchd system daemon is exempt from the count (``_escaped_count``), so a daemon
-        that launchd keeps restarting does not block termination.
+        """SIGKILL every process of the account; return how many ESCAPED processes are left (-1:
+        unknown). A launchd system daemon is exempt from the count (``_escaped_count``), so one that
+        launchd keeps restarting does not block termination."""
+        return self._kill_until_clean(attempts, time.monotonic() + PROBE_DEADLINE_SECONDS)
 
-        Repeated a few times: a process that forks while the signal is delivered
-        can leave a child behind.
+    def _kill_until_clean(self, attempts: int, deadline: float) -> int:
+        """How many processes are left after the kills (-1: unknown).
+
+        Repeated a few times: a process that forks while the signal is delivered can leave a
+        child behind. Everything shares ``deadline``; when it passes the answer is unknown.
         """
         left = -1
         for _ in range(attempts):
-            subprocess.run(  # noqa: S603 - fixed argv
-                [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
-                capture_output=True,
-                timeout=20,
-                check=False,
-            )
-            left = self._escaped_count()
+            budget = _remaining(deadline)
+            if budget <= 0:
+                return -1
+            try:
+                subprocess.run(  # noqa: S603 - fixed argv
+                    [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
+                    capture_output=True,
+                    timeout=min(budget, confined.PS_TIMEOUT_SECONDS),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                continue  # a loaded host: ask again
+            left = self._escaped_count(deadline)
             if left == 0:
                 break
         return left
@@ -334,14 +346,19 @@ class VerifierAccount:
         os.chmod(root, os.stat(root).st_mode | 0o055)
 
     @contextmanager
-    def exclusive(self, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    def exclusive(self, timeout: float | None = None) -> Iterator[None]:
         """One verifier at a time: kill_all() would otherwise end another run's processes.
 
         Waits at most ``timeout`` seconds, then raises RESOURCE_LEASE_TIMEOUT so a stuck but
         live holder turns into a recorded failure, not an endless queue (a dead holder's lock
         is released by the kernel). Not reentrant: flock locks per open file, so a nested call
-        waits until the timeout.
+        waits until the timeout. ``timeout`` must be a finite number >= 0 (default
+        LOCK_TIMEOUT_SECONDS, read at call time); anything else raises ValueError.
         """
+        if timeout is None:
+            timeout = LOCK_TIMEOUT_SECONDS
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"lock timeout must be a finite number >= 0, got {timeout!r}")
         fd = os.open(self.root / ".verifier.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             deadline = time.monotonic() + timeout
@@ -350,11 +367,12 @@ class VerifierAccount:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise VerifierAccountError(
                             f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
                         ) from None
-                    time.sleep(_LOCK_POLL_SECONDS)
+                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
             yield
         finally:
             os.close(fd)

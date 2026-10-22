@@ -18,6 +18,10 @@ RUN_TOKEN_VAR = "CAIRNWORK_VERIFIER_RUN"
 ATTEMPT_ENV = "CAIRNWORK_ATTEMPT"  # marks every process of an attempt, for recovery
 MAX_LOG_BYTES = 4 << 20
 MAX_REPORT_BYTES = 4 << 20
+# Reading the process list is a probe, not a verdict (Issue #114): a host under heavy load can
+# take longer than a short timeout. The account probe asks again, but only after a kill.
+PS_ATTEMPTS = 3
+PS_TIMEOUT_SECONDS = 60
 
 
 def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, bool, int]:
@@ -95,12 +99,15 @@ def _processes_with_environment():
     """[(pid, pgid, set of 'NAME=value' tokens)] or None if it cannot be read."""
     if sys.platform.startswith("linux"):
         return _linux_processes()
+    # One attempt, no retry: this sweep kills by token only after the read, so waiting for a
+    # second answer would give an escaped process time to undo its traces. A slow or failed read
+    # stays unknown, which counts as a survivor (Issue #114).
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv
             ["/bin/ps", "-axwwE", "-o", "pid=,pgid=,command="],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=PS_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
