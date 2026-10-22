@@ -107,3 +107,43 @@ def test_free_id_fails_when_quiet_range_is_full(tmp_path):
     env = dict(os.environ, PATH=f"{stub}:/usr/bin:/bin")
     r = run_zsh(f"{extract_function('free_id')}\nfree_id; echo rc=$?", env=env)
     assert r.returncode != 0 and "no id in 450..499" in r.stderr
+
+
+NESTED_CHECK = "check_no_nested_groups g && echo PASS"
+
+
+def _stub_dscl(tmp_path, output, rc):
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "dscl").write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\nexit {rc}\n")
+    (stub / "dscl").chmod(0o755)
+    return dict(os.environ, PATH=f"{stub}:/usr/bin:/bin")
+
+
+@needs_zsh
+@pytest.mark.parametrize("rc", [0, 56])
+def test_absent_nested_groups_key_passes_whatever_the_exit_status(tmp_path, rc):
+    # macOS 27 dscl prints "No such key" and exits 0 (the setup refused every host before this fix)
+    env = _stub_dscl(tmp_path, "No such key: NestedGroups", rc)
+    r = run_zsh(f"{extract_function('check_no_nested_groups')}\n{NESTED_CHECK}", env=env)
+    assert r.stdout.strip() == "PASS", r.stdout + r.stderr
+
+
+@needs_zsh
+@pytest.mark.parametrize(
+    ("output", "rc", "expected"),
+    [
+        ("NestedGroups: ABCDEF01-2345-6789-ABCD-EF0123456789", 0, "has nested groups"),
+        ("Group not found", 56, "cannot read NestedGroups"),
+        ("", 0, "cannot read NestedGroups"),
+    ],
+)
+def test_a_nested_group_or_an_unreadable_group_is_refused(tmp_path, output, rc, expected):
+    env = _stub_dscl(tmp_path, output, rc)
+    r = run_zsh(f"{extract_function('check_no_nested_groups')}\n{NESTED_CHECK}", env=env)
+    assert "PASS" not in r.stdout, r.stdout + r.stderr
+    assert "DIE:" in r.stdout and expected in r.stdout, r.stdout + r.stderr
+
+
+def test_the_run_group_check_is_called():
+    assert 'check_no_nested_groups "$RUNGROUP"' in SETUP.read_text()
