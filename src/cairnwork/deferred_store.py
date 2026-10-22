@@ -33,6 +33,11 @@ class DeferredStore:
     path: Path
     required: bool = False  # True: a test commit that is not in the store is refused
 
+    @classmethod
+    def for_state(cls, state: Path, test_source: str | None) -> DeferredStore:
+        """The store under ``state``; ``test_source == "bundle"`` is the strict mode."""
+        return cls(state / "deferred-tests", test_source == "bundle")
+
     def check_dir(self) -> None:
         try:
             info = self.path.lstat()

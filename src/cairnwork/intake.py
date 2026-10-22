@@ -91,7 +91,6 @@ DEFAULT_CONFIG = {
     "core_token_file": None,
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
-    "test_source": "auto",
 }
 
 
@@ -222,9 +221,7 @@ class Intake:
         return {**DEFAULT_CONFIG, **loaded}
 
     def test_store(self) -> DeferredStore:
-        return DeferredStore(
-            self.state / "deferred-tests", self.config()["test_source"] == "bundle"
-        )
+        return DeferredStore.for_state(self.state, self.config().get("test_source"))
 
     def verifier_account(self) -> VerifierAccount | None:
         return VerifierAccount() if self.config()["verifier_account"] else None
@@ -263,9 +260,8 @@ class Intake:
             os.close(fd)
 
     def submit(self, payload: Any) -> dict[str, Any]:
-        roots = tuple(self.config()["test_roots"])
-        task = task_from_payload(payload, roots, self.test_store())
         config = self.config()
+        task = task_from_payload(payload, tuple(config["test_roots"]), self.test_store())
         account = self.verifier_account()
         check_task(
             task, verifier_python=config["verifier_python"] or getattr(account, "python", None)
@@ -276,7 +272,7 @@ class Intake:
             if not Path(mirror).is_dir():
                 raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
             payload = {**payload, "repo": mirror}
-            task = task_from_payload(payload, roots, self.test_store())
+            task = task_from_payload(payload, task.test_roots, self.test_store())
         with self._intake_lock():
             return self._bind_and_start(task, payload, source)
 
