@@ -106,6 +106,7 @@ def _dispatch(intake: Intake, args) -> Any:
             journal=intake.journal,
             run_root=intake.run_root,
             verifier_account=intake.verifier_account(),
+            leftovers_log=intake.state / "cleanup-leftovers.jsonl",
         )
         return {"decisions": [d.__dict__ for d in decisions]}
     return _run(intake, args.task_id)
