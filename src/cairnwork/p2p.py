@@ -9,11 +9,15 @@ regression and is left out.
 Failure paths, none of which can end VERIFIED:
 
 * base probe times out (or cannot report) in ``whole-suite``: degrade to ``module-dir`` once and
-  say so in the record; when ``module-dir`` itself cannot be probed the task is REFUSED;
-* the candidate run times out or fails: its observation is not a pass, so Core says not verified;
+  say so in the record; when ``module-dir`` itself cannot be probed, or selects no test file at
+  all, the task is REFUSED (a degraded probe never turns into "nothing to run");
+* the candidate run times out: its observation is not a pass, so Core says not verified;
+* the candidate run fails without timing out: it is re-run once (flaky rule). A pass on the
+  re-run is what Core sees, with the first run's failing tests recorded in the rule (``rerun``);
+  a second failure is what Core sees, so not verified;
 * the p2p verifier id clashes with an author verifier: REFUSED.
 
-``p2p_time_budget_seconds`` bounds each of the three runs (probe, degraded probe, candidate run).
+``p2p_time_budget_seconds`` bounds each run (probe, degraded probe, candidate run, re-run).
 The rule actually used is a dict (``P2PPlan.rule``): it goes into the p2p observation's artifact
 hash (so Core's record binds it), into ``p2p-selection.json`` beside the verifier log, and into the
 task result. Core's notarisation contract is unchanged.
@@ -116,6 +120,10 @@ def plan_p2p(task, specs, test_files, mode, budget, run_root, result, verifying)
     for applied in (mode, "module-dir") if mode == "whole-suite" else (mode,):
         files = select_p2p_targets(task.allowed_files, existing, task.test_roots, applied)
         rule |= {"applied": applied, "selected_files": len(files)}
+        if not files and rule["degraded"]:  # #117 F1: a failed probe is not "nothing to run"
+            raise P2PRejected(
+                "P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']}; no module-dir test to fall back on"
+            )
         if not files:
             return P2PPlan(rule | {"targets": 0}, None, budget)
         if files == tried:  # the narrower mode would run the same files again
@@ -140,21 +148,33 @@ def _plan(task, specs, rule, targets, budget) -> P2PPlan:
 
 def run_plan(
     plan: P2PPlan, task, judged: str, run_root, result, verifying
-) -> tuple[VerifierRun, ...]:
-    """The base-passing tests on the judged commit; each run notes the rule it used."""
+) -> tuple[tuple[VerifierRun, ...], dict]:
+    """The base-passing tests on the judged commit, and the rule actually used. A run that fails
+    without timing out is re-run once; Core sees the re-run, whose note records the first run's
+    failures (``rerun``), so a flaky pass is not blocking but is bound into the record."""
     if plan.spec is None:
-        return ()
-    runs = run_verifiers(
-        task.repo, judged, (plan.spec,), run_root, f"{result.attempt_id}-q",
+        return (), plan.rule
+    run = _run_once(plan.spec, plan, plan.note, task, judged, run_root, result, verifying, "q")
+    if run.observation.passed or run.timed_out:
+        return (run,), plan.rule
+    failing = sorted(n for n, outcome in run.outcomes.items() if outcome != "passed")
+    rule = plan.rule | {"rerun": {"first_failed": failing, "first_returncode": run.returncode}}
+    note = json.dumps(rule, sort_keys=True)
+    run = _run_once(plan.spec, plan, note, task, judged, run_root, result, verifying, "r")
+    return (run,), rule
+
+
+def _run_once(spec, plan, note, task, judged, run_root, result, verifying, tag) -> VerifierRun:
+    (run,) = run_verifiers(
+        task.repo, judged, (spec,), run_root, f"{result.attempt_id}-{tag}",
         attempt_id=result.attempt_id, account=verifying[0], python=verifying[1],
-        base_commit=task.base_commit, timeout=plan.timeout, note=plan.note,
+        base_commit=task.base_commit, timeout=plan.timeout, note=note,
     )  # fmt: skip
-    for run in runs:
-        try:
-            (Path(run.log_path).parent / "p2p-selection.json").write_text(plan.note)
-        except OSError:
-            pass  # the hash already binds the rule
-    return runs
+    try:
+        (Path(run.log_path).parent / "p2p-selection.json").write_text(note)
+    except OSError:
+        pass  # the hash already binds the rule
+    return run
 
 
 def p2p_for(task, specs, test_files, run_root, result, verifying) -> P2PPlan | None:

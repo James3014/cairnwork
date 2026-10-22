@@ -311,8 +311,8 @@ def judge_candidate(
         base_commit=task.base_commit,
     )
     if p2p is not None:
-        runs += run_plan(p2p, task, judged, run_root, result, verifying)
-        result.p2p = p2p.rule
+        p2p_runs, result.p2p = run_plan(p2p, task, judged, run_root, result, verifying)
+        runs += p2p_runs
     result.logs = [str(run.log_path) for run in runs]
     spec = AcceptanceSpec(
         task_id,

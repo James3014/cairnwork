@@ -116,3 +116,20 @@ def test_a_candidate_run_that_times_out_is_not_verified(project, tmp_path):
     )  # fmt: skip
     assert result.p2p["degraded"] == "" and result.p2p["applied"] == "whole-suite"
     assert result.status == "FAILED" and not result.verified
+
+
+def test_a_degraded_probe_with_no_module_dir_test_refuses_instead_of_verifying(repo, tmp_path):
+    # #117 F1: only nested tests that map to no changed file, so module-dir selects nothing;
+    # the whole-suite probe times out. That must not end VERIFIED without any P2P run.
+    commit_change(
+        repo,
+        {
+            "src/calc.py": CALC,
+            "tests/conftest.py": CONFTEST,
+            "tests/unit/test_x.py": SIBLING,
+            "tests/slow/test_slow.py": SLEEP,
+        },
+    )
+    result = run(repo, tmp_path, {"src/calc.py": FIX_ADD}, mode="whole-suite", budget=10)
+    assert result.status == "FAILED" and not result.verified
+    assert "P2P_BASE_PROBE_UNUSABLE" in result.reason and "base-probe-timeout" in result.reason
