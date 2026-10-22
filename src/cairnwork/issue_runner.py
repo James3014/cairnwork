@@ -13,11 +13,10 @@ One pass does two things:
   gets ``cairnwork:running`` and a comment with the task id.
 * **settle**: for every ``cairnwork:running`` Issue, a COMPLETED, Core-verified task is
   pushed as branch ``cairnwork/<issue>-<attempt>`` and opened as a **draft** PR (it is
-  reviewed and merged like any other PR; Cairnwork never merges). A FAILED task gets a
-  comment with its reason and ``cairnwork:failed``.
+  reviewed and merged like any other PR; Cairnwork never merges). A FAILED task gets
+  a fixed-vocabulary comment (issue_publish) and ``cairnwork:failed``.
 
-GitHub calls go through ``--gh`` (the bot's gh wrapper). Any GitHub or git error leaves
-the Issue as it is for the next pass; nothing is guessed.
+GitHub calls use ``--gh`` (the bot's wrapper, checked); an error leaves the Issue for next pass.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ from typing import Any
 
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
+from cairnwork.issue_publish import failure_text, refusal_code, require_bot_gh
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
 from cairnwork.pipeline import TaskRejected
@@ -261,8 +261,8 @@ def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
         github.relabel(number, NEEDS_FIX, QUEUE)
         github.comment(
             number,
-            f"Cairnwork 不能接這張：`{exc}`。修正 ```eia-task 區塊後，移除 `{NEEDS_FIX}` 並重新"
-            f"加上 `{QUEUE}`。注意：驗證用的測試檔不能列在 allowed_files，要先放在 main 上。",
+            f"Cairnwork 不能接這張：`{refusal_code(exc)}`。修正 ```eia-task 區塊，移除 "
+            f"`{NEEDS_FIX}` 再加上 `{QUEUE}`。驗證用的測試檔不能列在 allowed_files，要先放在 main。",
         )
     except (RuntimeError, OSError) as gh_error:  # retried on the next pass
         return {"refused": str(exc), "error": f"{type(gh_error).__name__}: {gh_error}"}
@@ -286,9 +286,8 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
                 github.comment(number, f"Cairnwork 修好並通過 Core 驗證，draft PR：{url}")
                 results.append({"issue": number, "pr": url})
             else:
-                detail = status.get("detail") or status["status"]
                 github.relabel(number, FAILED_LABEL, RUNNING)
-                github.comment(number, f"Cairnwork 沒有完成：`{status['status']}`（{detail}）。")
+                github.comment(number, failure_text(status))
                 results.append({"issue": number, "status": status["status"]})
         except (OwnershipUnknown, RuntimeError, OSError, ValueError, KeyError) as exc:
             results.append({"issue": number, "error": f"{type(exc).__name__}: {exc}"})
@@ -376,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     github = GitHub(args.gh, args.repo)
     clone = Path(args.clone).resolve()
     try:
+        require_bot_gh(args.gh)
         _verify_origin(clone, github.repo)
     except RuntimeError as exc:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))

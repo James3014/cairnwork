@@ -171,12 +171,13 @@ def test_a_failed_task_is_reported_not_retried(setup, monkeypatch):
         lambda self, **kw: {
             "status": "FAILED",
             "core_verified": False,
-            "detail": "CORE_FAILED_VERIFICATION",
+            "phase": "FINISHED",
+            "detail": "FAILED",
         },
     )
     runner.settle(setup["intake"], github, setup["clone"])
     assert github.labels[7] == {runner.FAILED_LABEL} and github.prs == []
-    assert "CORE_FAILED_VERIFICATION" in github.comments[-1][1]
+    assert "`FAILED`" in github.comments[-1][1] and "`FINISHED`" in github.comments[-1][1]
 
 
 def test_a_running_task_is_left_alone(setup, monkeypatch):
@@ -289,7 +290,7 @@ def test_only_one_pass_runs_at_a_time(setup, capsys):
                 "--clone",
                 str(setup["clone"]),
                 "--gh",
-                "/bin/false",
+                "/bin/nexus-agent-gh",
                 "run-once",
             ]
         )
