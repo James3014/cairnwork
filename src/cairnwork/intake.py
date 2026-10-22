@@ -7,7 +7,7 @@ in one state directory (owner-only):
     ACCEPTING          present: new tasks are taken; absent (the default): refused
     config.json        {"model", "agy", "agy_dispatch", "agy_dispatch_*_seconds",
                         "verifier_account", "verifier_python", "gh", "mirror", "core_url",
-                        "core_token_file", "core_identity", "test_roots"}
+                        "core_token_file", "core_identity", "test_roots", "import_paths"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -40,7 +40,7 @@ from cairnwork import runlock
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.intake_request import IntakeRefused, task_from_payload
-from cairnwork.issue_task import check_test_roots
+from cairnwork.issue_task import check_import_paths, check_test_roots
 from cairnwork.journal import Journal
 from cairnwork.lineage import require_on_main
 from cairnwork.notary import Notary
@@ -87,6 +87,9 @@ DEFAULT_CONFIG = {
     "core_token_file": None,
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
+    # Dirs prepended to the verifier's import path so a src-layout project can import its own
+    # package (#82, issue_task.check_import_paths); default empty keeps the behaviour unchanged.
+    "import_paths": [],
     "test_source": "auto",
     # A new task's base must be in origin/main's history (lineage.require_on_main, the #76
     # class) before it is bound; False only for a repository that has no origin. This
@@ -170,6 +173,7 @@ class Intake:
             raise IntakeRefused("BAD_CONFIG", 'test_source must be "auto" or "bundle"')
         try:
             check_test_roots(loaded.get("test_roots", ["tests"]))
+            check_import_paths(loaded.get("import_paths", []))
             check_p2p_config(loaded)
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
@@ -230,7 +234,12 @@ class Intake:
 
     def submit(self, payload: Any) -> dict[str, Any]:
         config = self.config()
-        task = task_from_payload(payload, tuple(config["test_roots"]), self.test_store())
+        task = task_from_payload(
+            payload,
+            tuple(config["test_roots"]),
+            self.test_store(),
+            tuple(config["import_paths"]),
+        )
         python = config["verifier_python"] or getattr(self.verifier_account(), "python", None)
         check_submitted_paths(task, check_task(task, verifier_python=python))
         mirror = config["mirror"]  # a bad config is refused here, not by the runner
@@ -239,7 +248,7 @@ class Intake:
             if not Path(mirror).is_dir():
                 raise IntakeRefused("BAD_CONFIG", f"mirror {mirror} does not exist")
             payload = {**payload, "repo": mirror}
-            task = task_from_payload(payload, task.test_roots, self.test_store())
+            task = task_from_payload(payload, task.test_roots, self.test_store(), task.import_paths)
         with self._intake_lock():
             return self._bind_and_start(task, payload, source)
 
@@ -288,7 +297,9 @@ class Intake:
     def load_request(self, task_id: str) -> TaskSpec:
         path = self.state / "requests" / f"{task_id}.json"
         raw, config = json.loads(path.read_text()), self.config()
-        task = task_from_payload(raw, tuple(config["test_roots"]), self.test_store())
+        task = task_from_payload(
+            raw, tuple(config["test_roots"]), self.test_store(), tuple(config["import_paths"])
+        )
         p2p = {"p2p_mode": config["p2p_selection"], "p2p_budget": config["p2p_time_budget_seconds"]}
         return replace(task, **p2p)
 

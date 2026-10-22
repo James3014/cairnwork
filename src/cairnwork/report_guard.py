@@ -94,13 +94,15 @@ def install_plugin(directory: Path) -> None:
 class Verdict:
     ran: bool
     outcomes: dict[str, str]
+    too_big: bool = False  # the file exceeds MAX_REPORT_BYTES: nothing could be read from it
 
 
 def read_verdict(path: Path, nonce: str) -> Verdict:
     """Read the plugin's record. ``ran`` is true only when sessionfinish wrote it, it matches
     the nonce, at least one test was collected, every collected test produced a result, and all
     results are ``passed``. Outcomes are returned whenever the nonce matches (even when not all
-    passed) so failed_on_base can see a test that failed."""
+    passed) so failed_on_base can see a test that failed. A file over MAX_REPORT_BYTES (a suite
+    too large for one report, #184) is ``too_big`` so the caller can say why nothing was read."""
     try:
         # a candidate controls this path in run_dir: no symlink, and O_NONBLOCK + a regular-file
         # check so a FIFO planted in its place cannot hang the parent open().
@@ -111,7 +113,7 @@ def read_verdict(path: Path, nonce: str) -> Verdict:
         with os.fdopen(fd, "rb") as handle:
             raw = handle.read(MAX_REPORT_BYTES + 1)  # cap the read
         if len(raw) > MAX_REPORT_BYTES:
-            return Verdict(False, {})
+            return Verdict(False, {}, too_big=True)
         data = json.loads(raw)
     except (OSError, json.JSONDecodeError, ValueError):
         return Verdict(False, {})
