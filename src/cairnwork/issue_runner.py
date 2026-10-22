@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cairnwork.changeset import read_change_set
+from cairnwork.changeset import ChangeSetError, read_change_set
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.gitcmd import NETWORK_TIMEOUT_SECONDS, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
@@ -276,7 +276,14 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
                 github.relabel(number, FAILED_LABEL, RUNNING)
                 github.comment(number, failure_text(status))
                 results.append({"issue": number, "status": status["status"]})
-        except (OwnershipUnknown, RuntimeError, OSError, ValueError, KeyError) as exc:
+        except (
+            OwnershipUnknown,
+            ChangeSetError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            KeyError,
+        ) as exc:  # one task's failure is recorded; the others are still settled
             results.append({"issue": number, "error": f"{type(exc).__name__}: {exc}"})
     return results
 
