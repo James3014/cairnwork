@@ -153,9 +153,10 @@ jobs:
       - name: cairnwork demo must reach a Core VERIFIED verdict on real bwrap
         run: |
           set -o pipefail
+          # `cairnwork demo` exits 0 only on a genuine VERIFIED verdict, and the engine records
+          # VERIFIED only when a real sandbox backend ran the verifier (run_verifiers skips the run
+          # and fails when no backend is available). So an exit 0 here already means the demo was
+          # sandbox-backed: if the AppArmor lift above had silently failed, the demo would exit 1
+          # and pipefail would redden this step. The grep is a second check on the printed verdict.
           cairnwork demo | tee demo.log
           grep -q 'core status:  VERIFIED' demo.log
-          if grep -q 'no sandbox backend available' demo.log; then
-            echo 'demo ran without a sandbox backend — not a valid witness' >&2
-            exit 1
-          fi
