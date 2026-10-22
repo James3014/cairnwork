@@ -4,7 +4,9 @@
 # home and the agy account pool (Issue #19 Phase B). The dispatcher (nexus-agy-dispatch, run as the
 # owner) launches agy through the whitelisted wrapper /Users/Shared/cairnwork-worker/bin/agy-worker-exec
 # with `sudo -n -u _cairnwork_worker`; the wrapper (installed separately by the dispatcher change,
-# infra:agy-pool) is the ONLY command this account may run.
+# infra:agy-pool) is the only command the sudoers rule lets the OWNER start as this account. (The rule
+# says nothing about what code running as the worker may do; that boundary is the account's lack of
+# group/file access plus the dispatcher's per-run Seatbelt profile.)
 #
 # Layout (agreed with infra:agy-pool / 1d, option b): the worker tree is its OWN directory,
 # /Users/Shared/cairnwork-worker, so it never shares a directory with the verifier's
@@ -47,6 +49,10 @@ SUDOERS="/etc/sudoers.d/cairnwork-worker"
 id "$OWNER" >/dev/null
 
 die() { echo "refusing: $*" >&2; exit 1; }
+TMP_SUDOERS="$SUDOERS.tmp.$$"
+# Fail closed on re-runs: if ANY invariant below fails, the previously installed sudoers rule is removed
+# (and the temp file), so a worker that now violates an invariant cannot still be launched.
+trap 'rc=$?; if (( rc != 0 )); then rm -f "$SUDOERS" "$TMP_SUDOERS"; echo "setup failed: sudoers rule removed (if any); nothing is enabled" >&2; fi' EXIT
 
 # S1. refuse to operate on a path an unprivileged agent could have planted. /Users/Shared is
 #     world-writable (sticky), so ROOT is adopted only if it is absent (we then create it as root) or
@@ -64,6 +70,11 @@ require_real_dir_or_absent() {   # $1 path, $2.. allowed owners
 }
 [[ ! -L /Users/Shared && -d /Users/Shared ]] || die "/Users/Shared is not a real directory"
 require_real_dir_or_absent "$ROOT" root
+# First run: create ROOT RIGHT HERE with plain mkdir (no -p). It fails if anything (a planted symlink or
+# directory) appeared since the check, and a root-created directory is root-owned from the first instant,
+# so no later chown/chmod can be redirected through a link.
+[[ -e "$ROOT" ]] || mkdir "$ROOT" || die "cannot create $ROOT (something appeared there?)"
+[[ ! -L "$ROOT" && -d "$ROOT" && "$(stat -f %Su "$ROOT")" == root ]] || die "$ROOT is not a root-owned real directory"
 require_real_dir_or_absent "$BIN" root "$OWNER"
 require_real_dir_or_absent "$RUNS" root "$OWNER"
 
@@ -148,15 +159,36 @@ dscacheutil -flushcache 2>/dev/null || true
 #    data. Check both the directory's direct memberships and the effective set from id(1).
 direct=$(dscl . -search /Groups GroupMembership "$WORKER" | awk '/GroupMembership/{print $1}' | sort | tr '\n' ' ')
 [[ "$direct" == "$RUNGROUP " ]] || die "worker is a direct member of {$direct}, expected only {$RUNGROUP}"
-effective=$(id -Gn "$WORKER" | tr ' ' '\n' | sort | tr '\n' ' ')
-want=$(printf '%s\n' "$WGROUP" "$RUNGROUP" | sort | tr '\n' ' ')
-[[ "$effective" == "$want" ]] || die "worker effective groups are {$effective}, expected {$want}"
+# Implicit groups the OS adds to every account (everyone, localaccounts, com.apple.sharepoint.group.1,
+# _lpoperator ...) are expected and harmless, so the effective set is not compared for equality.
+# Instead refuse any group that grants access to something protected: staff, admin, wheel, cairnwork
+# (verifier logs), the owner's primary group, and any group that owns the owner's home, the verifier root
+# or the verifier runs directory.
+forbidden=(staff admin wheel cairnwork "$(id -gn "$OWNER")")
+for pth in "/Users/$OWNER" /Users/Shared/cairnwork /Users/Shared/cairnwork/runs; do
+  [[ -e "$pth" ]] && forbidden+=("$(stat -f %Sg "$pth")")
+done
+effective=(${(f)"$(id -Gn "$WORKER" | tr ' ' '\n')"})
+[[ ${#effective} -gt 0 ]] || die "cannot read the effective groups of $WORKER"
+(( ${effective[(Ie)$WGROUP]} && ${effective[(Ie)$RUNGROUP]} )) || die "worker effective groups {$effective} lack $WGROUP/$RUNGROUP"
+for g in $effective; do
+  if (( ${forbidden[(Ie)$g]} )); then die "worker is in protected group '$g' (effective groups: $effective)"; fi
+done
+# GroupMembers (GUIDs) is honoured by the kernel as well as GroupMembership (names): every GUID listed
+# must belong to the owner or the worker.
+okguids=("$(dscl . -read "/Users/$OWNER" GeneratedUID | awk '{print $2}')" "$(dscl . -read "/Users/$WORKER" GeneratedUID | awk '{print $2}')")
+if gm=$(dscl . -read "/Groups/$RUNGROUP" GroupMembers 2>&1); then
+  for guid in ${=${gm#GroupMembers:}}; do
+    (( ${okguids[(Ie)$guid]} )) || die "run group GroupMembers lists an unexpected GUID $guid"
+  done
+else
+  [[ "$gm" == *"No such key"* ]] || die "cannot read GroupMembers of $RUNGROUP: $gm"
+fi
 
 # 4. directories, all under the worker's own root (nothing touches the verifier's /Users/Shared/cairnwork).
 umask 022
-[[ -d "$ROOT" ]] || mkdir "$ROOT"            # created by root, so root-owned from the first instant
-chown root:wheel "$ROOT"; chmod 0755 "$ROOT"; chmod -N "$ROOT"
-[[ "$(stat -f %Su "$ROOT")" == root && ! -L "$ROOT" ]] || die "$ROOT is not a root-owned real directory"
+[[ ! -L "$ROOT" && -d "$ROOT" && "$(stat -f %Su "$ROOT")" == root ]] || die "$ROOT is not a root-owned real directory"
+chown -h root:wheel "$ROOT"; chmod 0755 "$ROOT"; chmod -N "$ROOT"
 for p in "$BIN" "$RUNS"; do [[ -d "$p" ]] || mkdir "$p"; done
 for p in "$BIN" "$RUNS"; do [[ -d "$p" && ! -L "$p" ]] || die "$p is not a real directory after mkdir"; done
 #    bin: owner-owned 0755 (the dispatcher installs the wrapper there; the worker cannot modify it).
@@ -184,7 +216,6 @@ verify_dir "$RUNS" "$OWNER" "$RUNGROUP" 2710
 #    S4. write the drop-in with a tight umask, root:wheel ownership and 0440 BEFORE it is installed,
 #    so it is never briefly writable or owned by anyone but root, and validate it before mv.
 mkdir -p /etc/sudoers.d
-TMP_SUDOERS="$SUDOERS.tmp.$$"
 umask 077
 cat > "$TMP_SUDOERS" <<EOF
 $OWNER ALL=($WORKER) NOPASSWD: $WRAPPER
@@ -196,6 +227,22 @@ if ! visudo -cf "$TMP_SUDOERS" >/dev/null; then
   echo "sudoers drop-in failed validation; nothing installed" >&2
   exit 1
 fi
+
+# H. isolation witness, BEFORE the rule goes live: actually run as the worker and require that it is
+#    denied the owner's home, the verifier's tree, the worker-runs listing, and any write into bin.
+#    A path that is readable (or writable) makes setup fail non-zero.
+witness_deny() {   # $1 description; rest = command run as the worker; it must FAIL
+  local what="$1"; shift
+  if sudo -n -u "$WORKER" "$@" >/dev/null 2>&1; then die "ISOLATION WITNESS FAILED: worker can $what"; fi
+  echo "witness ok: worker denied: $what"
+}
+witness_deny "list the owner's home /Users/$OWNER" /bin/ls "/Users/$OWNER"
+witness_deny "list worker-runs" /bin/ls "$RUNS"
+witness_deny "write into $BIN" /usr/bin/touch "$BIN/.witness.$$"
+rm -f "$BIN/.witness.$$"
+for v in /Users/Shared/cairnwork /Users/Shared/cairnwork/runs; do
+  [[ -e "$v" ]] && witness_deny "list the verifier tree $v" /bin/ls "$v"
+done
 mv "$TMP_SUDOERS" "$SUDOERS"
 
 echo "worker account: $(id "$WORKER")"

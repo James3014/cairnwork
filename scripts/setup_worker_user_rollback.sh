@@ -62,13 +62,14 @@ if dscl . -read "/Users/$WORKER" UniqueID >/dev/null 2>&1; then
   if [[ -n "$pids" ]]; then
     echo "stopping worker processes (uid $WUID): ${pids//$'\n'/ }"
     kill -TERM ${(f)pids} 2>/dev/null || true   # a pid may already have exited; verified below
-    for i in 1 2 3 4 5; do sleep 1; [[ -z "$(worker_pids "$WUID")" ]] && break; done
+    for i in 1 2 3 4 5; do sleep 1; cur=$(worker_pids "$WUID"); [[ -z "$cur" ]] && break; done
     left=$(worker_pids "$WUID")
     if [[ -n "$left" ]]; then
       kill -KILL ${(f)left} 2>/dev/null || true
       sleep 1
     fi
-    [[ -z "$(worker_pids "$WUID")" ]] || die "worker processes still running after KILL: $(worker_pids "$WUID" | tr '\n' ' ')"
+    final=$(worker_pids "$WUID")
+    [[ -z "$final" ]] || die "worker processes still running after KILL: ${final//$'\n'/ }"
   fi
 fi
 
@@ -90,7 +91,17 @@ if [[ -e "$RUNS" || -L "$RUNS" ]]; then
   echo "neutralised $RUNS (owner-only, 0700, no ACL)"
 fi
 
-# 4. the worker account
+# 4. the worker account. First refuse if the uid still owns files: add_service_ids hands the next free
+#    id to the next service account, which would inherit them (orphan files / uid reuse).
+if dscl . -read "/Users/$WORKER" UniqueID >/dev/null 2>&1; then
+  orphans=""
+  for d in "$ROOT" /tmp /var/tmp /private/var/folders; do
+    [[ -d "$d" ]] || continue
+    found=$(find "$d" -xdev -uid "$WUID" -print -quit) || die "find under $d failed; cannot prove no files are owned by uid $WUID"
+    [[ -z "$found" ]] || orphans+="$found "
+  done
+  [[ -z "$orphans" ]] || die "files owned by uid $WUID remain (e.g. $orphans); remove or chown them by hand, then re-run"
+fi
 if dscl . -read "/Users/$WORKER" >/dev/null 2>&1; then
   dscl . -delete "/Users/$WORKER" || die "cannot delete user $WORKER"
   dscl . -read "/Users/$WORKER" >/dev/null 2>&1 && die "user $WORKER still exists"
