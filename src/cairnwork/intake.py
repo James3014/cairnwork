@@ -6,7 +6,7 @@ in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
     config.json        {"model", "agy", "agy_dispatch", "agy_dispatch_*_seconds",
-                        "verifier_account", "verifier_python", "mirror", "core_url",
+                        "verifier_account", "verifier_python", "gh", "mirror", "core_url",
                         "core_token_file", "core_identity", "test_roots"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
@@ -70,6 +70,9 @@ DEFAULT_CONFIG = {
     "agy_dispatch_stream_no_progress_seconds": 900,
     "verifier_account": True,
     "verifier_python": None,
+    # The gh the Issue runner was started with (cairnwork-issues writes it), so the runner
+    # started by submit re-checks trust with the same one; None means DEFAULT_GH.
+    "gh": None,
     # Cairnwork's own repository for this target: the base is fetched into it from the
     # request's repo (read-only), and every ref or object Cairnwork writes lands here,
     # never in the caller's repository (e.g. the Gateway's live Controller).
@@ -139,7 +142,7 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
-        for key in ("verifier_python", "mirror", "core_token_file", "agy_dispatch"):
+        for key in ("verifier_python", "mirror", "core_token_file", "agy_dispatch", "gh"):
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
@@ -170,6 +173,16 @@ class Intake:
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
         return {**DEFAULT_CONFIG, **loaded}
+
+    def remember_gh(self, gh: str) -> None:
+        """Record the gh the Issue runner uses, for the runner that submit starts."""
+        path = self.state / "config.json"
+        loaded = json.loads(path.read_text()) if path.exists() else {}
+        if isinstance(loaded, dict) and loaded.get("gh") != gh:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({**loaded, "gh": gh}, sort_keys=True))
+            tmp.chmod(0o600)
+            tmp.replace(path)
 
     def test_store(self) -> DeferredStore:
         return DeferredStore.for_state(self.state, self.config().get("test_source"))

@@ -378,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))
         return 3
     intake.prepare()
+    intake.remember_gh(args.gh)
     fd = os.open(intake.state / "issues.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         try:

@@ -111,7 +111,7 @@ def test_the_gate_fails_closed_when_github_cannot_be_read():
     assert gate_module.attempt_gate(github, 7, SHA, ("tests",))() == runner.TRUST_CHANGED
 
 
-def _routed(monkeypatch, project, card_hash):
+def _routed(monkeypatch, project, card_hash, gh=None):
     import cairnwork.route as route
 
     seen = {}
@@ -121,7 +121,13 @@ def _routed(monkeypatch, project, card_hash):
         lambda *a, **k: seen.update(task=a[0]) or TaskResult("t", "a", "FAILED"),
     )
     monkeypatch.setattr(route, "agy_dispatch", lambda config: None)
-    config = {"model": "m", "agy": "agy", "verifier_python": None, "test_roots": ["tests"]}
+    config = {
+        "model": "m",
+        "agy": "agy",
+        "verifier_python": None,
+        "test_roots": ["tests"],
+        "gh": gh,
+    }
     intake = fake(
         config=lambda: config,
         load_request=lambda tid: replace(task(project), card_hash=card_hash),
@@ -139,3 +145,29 @@ def test_the_runner_gates_an_issue_task_and_leaves_other_tasks_alone(monkeypatch
     assert callable(_routed(monkeypatch, project, "gh:James3014/demo#7:" + SHA))
     assert _routed(monkeypatch, project, "card-1") is None
     assert _routed(monkeypatch, project, "gh:garbled")() == runner.TRUST_CHANGED
+
+
+def test_a_card_naming_a_bad_repo_gets_a_refusing_gate_not_a_crash(monkeypatch, project):
+    gate = _routed(monkeypatch, project, "gh:not a repo#7:" + SHA)
+    assert gate() == runner.TRUST_CHANGED
+
+
+def test_the_gate_uses_the_gh_the_issue_runner_was_started_with(monkeypatch, project):
+    import cairnwork.route as route
+
+    made = []
+    real = route.GitHub
+    monkeypatch.setattr(route, "GitHub", lambda gh, repo: made.append(gh) or real(gh, repo))
+    _routed(monkeypatch, project, "gh:James3014/demo#7:" + SHA, gh="/opt/bot/gh")
+    _routed(monkeypatch, project, "gh:James3014/demo#7:" + SHA)
+    assert made == ["/opt/bot/gh", runner.DEFAULT_GH]
+
+
+def test_the_issue_runner_records_its_gh_in_the_state_config(tmp_path):
+    from cairnwork.intake import Intake
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    (intake.state / "config.json").write_text('{"model": "m"}')
+    intake.remember_gh("/opt/bot/gh")
+    assert intake.config()["gh"] == "/opt/bot/gh" and intake.config()["model"] == "m"
