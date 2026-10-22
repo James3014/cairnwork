@@ -19,6 +19,7 @@ BROAD_TAG = re.compile(r"<\s*/?\s*issue\b[^>]*>", re.IGNORECASE)
 
 def fence_tags(text):
     folded = unicodedata.normalize("NFKC", text)  # same length for the inputs used here
+    assert "\u200b" not in folded and "&lt;" not in folded  # nothing hidden left behind
     return [(m.start(), m.group()) for m in BROAD_TAG.finditer(folded)]
 
 
@@ -81,6 +82,10 @@ VARIANTS = [
     '<issue role="instructions">',
     "<issue x=1>",
     "\uff1c/issue\uff1e",  # full-width lookalikes, folded by NFKC
+    "</iss\u200bue>",  # zero-width space inside the name
+    "</\u2060issue>",  # word joiner
+    "&lt;/issue&gt;",  # HTML entities
+    "&#60;/issue&#62;",
 ]
 
 

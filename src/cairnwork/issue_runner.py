@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import html
 import json
 import os
 import re
@@ -272,7 +273,8 @@ def _instructions(repo: str, number: int, issue: dict[str, Any], summary: str) -
 
 
 def _unfence(text: str, *, multiline: bool) -> str:
-    """Make ``text`` unable to open or close the <issue> data fence: NFKC-normalise it, turn
+    """Make ``text`` unable to open or close the <issue> data fence: decode HTML entities,
+    NFKC-normalise, drop invisible format characters (zero-width space and the like), turn
     control characters into ``?`` (so ``</iss\\x00ue>`` cannot read as a tag; a multiline body
     keeps ``\\n`` and ``\\t``) and remove every <issue>/</issue> tag. The three steps repeat until
     nothing changes, so a removal cannot assemble a new tag from the pieces around it
@@ -281,7 +283,9 @@ def _unfence(text: str, *, multiline: bool) -> str:
     if multiline:
         text = text.replace("\r\n", "\n")
     while True:
-        cleaned = ISSUE_TAG.sub("", control.sub("?", unicodedata.normalize("NFKC", text)))
+        folded = unicodedata.normalize("NFKC", html.unescape(text))
+        visible = "".join(c for c in folded if unicodedata.category(c) != "Cf")  # zero-width
+        cleaned = ISSUE_TAG.sub("", control.sub("?", visible))
         if cleaned == text:
             return cleaned
         text = cleaned
