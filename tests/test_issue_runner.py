@@ -382,3 +382,18 @@ def test_an_issue_with_a_verifier_under_a_configured_test_root_is_taken(setup):
     assert request.test_roots == ("pkg/tests",)
     again = runner.take(intake, FakeGitHub([issue(8)]), setup["clone"])  # default-root verifier
     assert again[0]["refused"].startswith("TASK_VERIFICATION_UNSUPPORTED")
+
+
+@pytest.mark.parametrize("bad", ["x y", "[a](http://evil)", "@team", "", "a" * 65, "-lead"])
+def test_a_malformed_task_id_is_refused_by_open_pr_itself(setup, monkeypatch, bad):
+    github = FakeGitHub([issue()])
+    taken = runner.take(setup["intake"], github, setup["clone"])[0]
+    commit = commit_change(setup["clone"], {"src/calc.py": "x = 2\n"})
+    request = setup["intake"].load_request(taken["task_id"])
+    status = {**_completed(setup, taken, commit)(None), "task_id": bad}
+    # load_request would accept it, so only the TASK_ID check in _open_pr stands in the way
+    monkeypatch.setattr(Intake, "load_request", lambda self, tid: request)
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    with pytest.raises(ValueError, match="unexpected task id"):
+        runner._open_pr(setup["intake"], github, setup["clone"], 7, status)
+    assert github.prs == []
