@@ -92,7 +92,12 @@ def step_shadow(state: Path, req: Json) -> bool:
 
 
 def step_accept_submit(state: Path, req: Json, model: str) -> tuple[bool, Json]:
-    config = {"model": model, "verifier_account": drill_normal.ACCOUNT is not None}
+    config = {
+        "model": model,
+        "verifier_account": drill_normal.ACCOUNT is not None,
+        # drill_normal's repository is an origin-less git init; the lineage check would refuse it
+        "require_base_on_main": False,
+    }
     state.joinpath("config.json").write_text(json.dumps(config))
     state.joinpath("config.json").chmod(0o600)
     code, out = route(state, "accept")
