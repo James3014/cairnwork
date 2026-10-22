@@ -9,7 +9,7 @@
 # (that is a separate, documented step for running untrusted third-party code).
 set -eu
 
-REPO="${CAIRNWORK_REPO:-https://github.com/James3014/cairnwork.git}"
+REPO="${CAIRNWORK_REPO:-https://github.com/cairnwork/cairnwork.git}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv not found — installing it from https://astral.sh/uv (no sudo)…"

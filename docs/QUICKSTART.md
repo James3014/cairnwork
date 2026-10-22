@@ -10,7 +10,7 @@ a verified fix in a couple of minutes.
 The main path is one command — no `curl | sh`:
 
 ```sh
-uv tool install --from git+https://github.com/James3014/cairnwork.git cairnwork
+uv tool install --from git+https://github.com/cairnwork/cairnwork.git cairnwork
 ```
 
 That puts `cairnwork`, `cairnwork-route`, `cairnwork-issues` and `cairnwork-verify` on your
