@@ -38,6 +38,7 @@ from cairnwork.journal import AlreadyDispatched, Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
 from cairnwork.p2p import P2PPlan, p2p_for, run_plan
+from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, DIRECT_MODE
 from cairnwork.protected_paths import path_refusal
 from cairnwork.reasons import explain, verdict_reason
 from cairnwork.snapshot import snapshot_candidate
@@ -67,6 +68,8 @@ class TaskRejected(Exception):
 
 @dataclass(frozen=True)
 class TaskSpec:
+    """One task. P2P is off by default here (a library/drill path, #174); Intake sets it."""
+
     idempotency_key: str
     card_hash: str
     title: str
@@ -79,8 +82,8 @@ class TaskSpec:
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
     test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
     test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
-    p2p_mode: str = "off"  # state config p2p_selection (p2p.py); only used with a test_commit
-    p2p_budget: int = 300  # state config p2p_time_budget_seconds
+    p2p_mode: str = DIRECT_MODE  # state config p2p_selection (p2p.py); only with a test_commit
+    p2p_budget: int = DEFAULT_BUDGET_SECONDS  # state config p2p_time_budget_seconds
     before_attempt: Callable[[], str] | None = None  # refusal code or ""; asked per attempt
 
     def request(self) -> dict:
@@ -166,6 +169,7 @@ def run_task(
     verifier_account: VerifierAccount | None = None,
     verifier_python: str | None = None,
 ) -> TaskResult:
+    """Run one task. A TaskSpec built directly has no P2P unless the caller sets p2p_mode (#174)."""
     specs = check_task(
         task, verifier_python=verifier_python or getattr(verifier_account, "python", None)
     )

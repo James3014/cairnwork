@@ -10,6 +10,7 @@ import contextlib
 import shutil
 from pathlib import Path
 
+import pytest
 from conftest import commit_change
 from test_recovery import GOOD, crash, stores  # reuse the crash drill
 
@@ -115,3 +116,18 @@ def test_recover_cleans_the_accounts_own_run_dirs(repo, tmp_path):
     ]
     assert not mine.exists() and mine in account.removed
     assert other.exists()
+
+
+@pytest.mark.parametrize("tag", ["p", "q", "r"])
+def test_account_leftover_cleanup_removes_p2p_run_directories(tmp_path, tag):
+    """#171: the account-side remover drops the P2P -p/-q/-r dirs too."""
+    runs = tmp_path / "acct-runs"
+    (runs / f"a1-{tag}-v0" / "tests").mkdir(parents=True)
+    (runs / f"a1-{tag}-v0.work").mkdir()
+    (runs / f"a1-{tag}-v0.abc" / "run").mkdir(parents=True)
+    (runs / f"a2-{tag}-v0").mkdir()
+
+    _remove_account_leftovers(_FakeAccount(runs), "a1")  # type: ignore[arg-type]
+
+    assert not list(runs.glob(f"a1-{tag}-*"))
+    assert (runs / f"a2-{tag}-v0").exists()

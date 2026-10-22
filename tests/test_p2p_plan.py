@@ -138,6 +138,7 @@ def candidate(monkeypatch, tmp_path, runs):
 def test_a_passing_candidate_run_is_not_re_run(monkeypatch, tmp_path):
     (runs, rule), notes = candidate(monkeypatch, tmp_path, [make_run(True, log_dir=tmp_path / "1")])
     assert len(notes) == 1 and runs[0].observation.passed and "rerun" not in rule
+    assert "p2p_rerun_passed" not in rule  # a clean pass carries no flag (#174)
 
 
 def test_a_candidate_timeout_is_never_verified_and_not_re_run(monkeypatch, tmp_path):
@@ -161,8 +162,10 @@ def test_a_failure_that_passes_on_the_re_run_is_not_blocking_but_recorded(monkey
         "survivors": 0,
         "ran": False,
     }
-    assert json.loads(notes[1]) == rule  # the re-run's artifact hash binds the flaky record
-    assert json.loads((tmp_path / "2" / "p2p-selection.json").read_text()) == rule
+    assert rule["p2p_rerun_passed"] is True  # #174: told apart from a clean pass
+    bound = {k: v for k, v in rule.items() if k != "p2p_rerun_passed"}
+    assert json.loads(notes[1]) == bound  # the re-run's artifact hash binds the flaky record
+    assert json.loads((tmp_path / "2" / "p2p-selection.json").read_text()) == bound
 
 
 def test_a_failure_on_both_runs_blocks(monkeypatch, tmp_path):
@@ -171,6 +174,16 @@ def test_a_failure_on_both_runs_blocks(monkeypatch, tmp_path):
     (runs, rule), notes = candidate(monkeypatch, tmp_path, [first, second])
     assert runs == (second,) and not runs[0].observation.passed
     assert len(notes) == 2 and rule["rerun"]["failed"] == ["tests/test_a.py::t"]
+    assert rule["p2p_rerun_passed"] is False
+
+
+def test_failing_test_names_in_the_record_are_sanitised(monkeypatch, tmp_path):
+    name = "tests/test_a.py::t\x1b[31m\n" + "x" * 500
+    first = make_run(False, outcomes={name: "failed"}, log_dir=tmp_path / "1")
+    second = make_run(True, log_dir=tmp_path / "2")
+    (_, rule), _ = candidate(monkeypatch, tmp_path, [first, second])
+    (failed,) = rule["rerun"]["failed"]
+    assert failed.isprintable() and len(failed) == 200 and failed.startswith("tests/test_a.py::t?")
 
 
 @pytest.mark.parametrize(
