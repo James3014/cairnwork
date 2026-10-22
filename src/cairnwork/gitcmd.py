@@ -34,9 +34,10 @@ _SAFE_OPTIONS = (
 )
 
 
-# Greedy to the last '@' in the whitespace-free token: a password may itself hold '@' or '/'.
+# Greedy to the last '@' in the run free of space and tab (newlines count as part of the run, so
+# one planted in the userinfo cannot split it): a password may itself hold '@' or '/'.
 # Fail-closed: an '@' later in a path also removes the text before it.
-_URL_USERINFO = re.compile(r"(?<=://)\S*@")
+_URL_USERINFO = re.compile(r"(?<=://)[^ \t]*@")
 _CONTROL = re.compile(r"[^\x20-\x7e\n\u00a0-\U0010ffff]|[\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
 
@@ -45,11 +46,25 @@ def stderr_tail(raw: str | bytes | None) -> str:
 
     URL credentials (``https://user:token@host``) are removed and control characters
     (terminal escapes, CR overwrites) are dropped, so the text can go to a log or an Issue.
+    Control characters go first, so none can split a credential before it is redacted. The
+    redaction is greedy to the last '@' of a token, so a URL with '@' in its path loses the
+    text before it: an accepted trade-off, redact rather than leak.
     """
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
-    text = _CONTROL.sub("", _URL_USERINFO.sub("", raw or "")).strip()
+    text = _URL_USERINFO.sub("", _CONTROL.sub("", raw or "")).strip()
     return text.replace("\n", " | ")[-STDERR_TAIL_CHARS:]
+
+
+def _subcommand(args: tuple[str, ...]) -> str:
+    """The git subcommand in args, skipping leading ``-c <name=value>`` pairs and other options."""
+    it = iter(args)
+    for arg in it:
+        if arg == "-c":
+            next(it, None)
+        elif not arg.startswith("-"):
+            return arg
+    return args[0] if args else "command"
 
 
 class GitCommandError(Exception):
@@ -97,7 +112,9 @@ def run_git(
         )
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
         tail = stderr_tail(getattr(exc, "stderr", None))
-        raise GitCommandError(f"git {args[0]} failed" + (f": {tail}" if tail else "")) from exc
+        raise GitCommandError(
+            f"git {_subcommand(args)} failed" + (f": {tail}" if tail else "")
+        ) from exc
     return done.stdout
 
 

@@ -51,6 +51,22 @@ def test_stderr_tail_strips_the_whole_userinfo_and_keeps_plain_urls(raw, expecte
     assert stderr_tail(raw) == expected
 
 
+@pytest.mark.parametrize("split", ["\r", "\x0b", "\x85", "\n", "\u202e"])
+def test_stderr_tail_redacts_userinfo_split_by_a_control_character(split):
+    tail = stderr_tail(f"fatal: https://u:p{split}@host/x failed")
+    assert "u:p" not in tail and "@" not in tail and "host/x failed" in tail
+
+
+def test_the_error_names_the_subcommand_not_a_leading_c_override(monkeypatch, tmp_path):
+    def boom(*a, **kw):
+        raise subprocess.TimeoutExpired("git", 1)
+
+    monkeypatch.setattr(gitcmd.subprocess, "run", boom)
+    with pytest.raises(GitCommandError) as caught:
+        run_git(tmp_path, "-c", "x=y", "--no-pager", "push")
+    assert str(caught.value) == "GIT_COMMAND_FAILED: git push failed"
+
+
 def test_stderr_tail_drops_bidi_and_line_separator_characters():
     raw = "a\u202eb\u202ac\u2066d\u2069e\u2028f\u2029g"
     assert stderr_tail(raw) == "abcdefg"
