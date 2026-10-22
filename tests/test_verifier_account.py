@@ -204,17 +204,43 @@ def test_files_the_account_leaves_in_home_are_removed(project):
     assert not (result.log_path.parent / "run" / "home").exists()
 
 
+def _account_pids_in_group(pgid: int) -> list[int]:
+    """PIDs the verifier account runs in process group `pgid` — the orphan started with
+    start_new_session=True is that group's leader, so this sees only this test's own tree and
+    concurrent runs on the shared account cannot change the result (Issue #71). pgid/pgid are
+    visible across users (unlike argv), so no marker is needed."""
+    tty = ["-x"] if sys.platform == "darwin" else []  # BSD ps needs -x; procps rejects it
+    done = subprocess.run(  # noqa: S603 - fixed argv
+        ["/bin/ps", *tty, "-U", ACCOUNT.user, "-o", "pid=,pgid="],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    out = []
+    for line in done.stdout.split("\n"):
+        fields = line.split()
+        if len(fields) == 2 and fields[1].isdigit() and int(fields[1]) == pgid:
+            out.append(int(fields[0]))
+    return out
+
+
+def _wait_for_account_group(pgid: int) -> None:
+    for _ in range(50):
+        if _account_pids_in_group(pgid):
+            return
+        time.sleep(0.1)
+    raise AssertionError("the account orphan did not start")
+
+
 def test_recovery_kills_what_a_dead_run_left_as_the_account(tmp_path):
     orphan = subprocess.Popen(
         ACCOUNT.wrap([ACCOUNT.python, "-P", "-c", "import time; time.sleep(60)"], None),
         cwd=ACCOUNT.root,
         start_new_session=True,
     )
-    for _ in range(50):
-        if ACCOUNT.count() > 0:
-            break
-        time.sleep(0.1)
-    assert ACCOUNT.count() > 0
+    group = os.getpgid(orphan.pid)
+    _wait_for_account_group(group)
     recover(
         ledger=OwnershipLedger(tmp_path / "own.sqlite"),
         notary=Notary(tmp_path / "notary.sqlite"),
@@ -222,8 +248,10 @@ def test_recovery_kills_what_a_dead_run_left_as_the_account(tmp_path):
         run_root=tmp_path / "runs",
         verifier_account=ACCOUNT,
     )
-    assert ACCOUNT.count() == 0
-    orphan.wait(timeout=10)
+    orphan.wait(
+        timeout=10
+    )  # recover ended our tree (a live sleep(60) would time out — fails closed)
+    assert _account_pids_in_group(group) == []  # none of our account processes remain
 
 
 def test_a_left_over_process_is_ended_before_the_next_run(project):
@@ -232,10 +260,7 @@ def test_a_left_over_process_is_ended_before_the_next_run(project):
         cwd=ACCOUNT.root,
         start_new_session=True,
     )
-    for _ in range(50):
-        if ACCOUNT.count() > 0:
-            break
-        time.sleep(0.1)
+    _wait_for_account_group(os.getpgid(orphan.pid))
     result = verify(project, None, "tests/test_ok.py")
     assert result.observation.passed, result.log_path.read_text()  # not blamed on this run
     assert orphan.wait(timeout=10) != 0
