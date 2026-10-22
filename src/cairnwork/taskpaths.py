@@ -12,6 +12,10 @@ from cairnwork.pipeline import TaskRejected, TaskSpec
 from cairnwork.verifier_spec import VerifierSpec
 
 _REGULAR = ("100644", "100755")
+_NEW_DIR_HINT = (
+    "new directories are refused: create the directory in the base commit first, "
+    "or list a path under an existing directory"
+)
 
 
 def check_task_paths(
@@ -19,11 +23,10 @@ def check_task_paths(
     base_commit: str,
     allowed_files: tuple[str, ...],
     verifier_targets: tuple[str, ...],
-    test_paths: tuple[str, ...] = (),
 ) -> None:
-    """Every parent of an allowed file is a real directory on the base, the file itself is
-    a regular file or absent, and a verifier target is on the base, an allowed file or in
-    ``test_paths`` (what the test commit adds)."""
+    """Every parent of an allowed file is a real directory on the base (a task may not
+    create a directory: fail closed, #149), the file itself is a regular file or absent,
+    and a verifier target is on the base or an allowed file."""
     targets = {t.split("::", 1)[0]: t for t in verifier_targets}
     wanted = {p for path in (*allowed_files, *targets) for p in _prefixes(path)}
     try:
@@ -33,12 +36,15 @@ def check_task_paths(
     modes = {e.split("\t", 1)[1]: e.split()[0] for e in raw.split("\0") if e}
     for path in allowed_files:
         for parent in _prefixes(path)[:-1]:
-            if modes.get(parent) != "040000":
-                raise TaskRejected("TASK_PATH_PARENT_INVALID", f"{path}: {parent} on the base")
+            mode = modes.get(parent)
+            if mode != "040000":
+                what = "does not exist" if mode is None else f"is {mode}, not a directory,"
+                detail = f"{path}: {parent} {what} on the base; {_NEW_DIR_HINT}"
+                raise TaskRejected("TASK_PATH_PARENT_INVALID", detail)
         if modes.get(path, "100644") not in _REGULAR:
             raise TaskRejected("TASK_PATH_NOT_REGULAR_FILE", f"{path} is {modes[path]} on the base")
     for path in targets:
-        if path not in modes and path not in (*allowed_files, *test_paths):
+        if path not in modes and path not in allowed_files:
             raise TaskRejected("TASK_VERIFIER_TARGET_MISSING", path)
         if modes.get(path, "100644") not in _REGULAR:
             raise TaskRejected("TASK_PATH_NOT_REGULAR_FILE", f"{path} is {modes[path]} on the base")

@@ -14,6 +14,7 @@
    - `verification` 只接受 `python3 -m pytest [-q] [-p no:cacheprovider] tests/...`，不接受 `git diff --check` 那種 shell 寫法。
    - `hard` 的 Issue 不收。
    - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。
+   - **`allowed_files` 不能需要新目錄（#149，fail closed）**：每個 allowed file 的上層目錄都必須已經在 base commit 裡、而且是真正的目錄（不能是檔案、symlink 或 submodule），否則送件時就拒絕 `TASK_PATH_PARENT_INVALID`（`route check` 也會預演這個拒絕）。要在新目錄裡加檔案，先在 base 上建立該目錄（例如先合併一個加 `__init__.py` 或 `.gitkeep` 的 commit，再以它當 base），或改列既有目錄底下的路徑。檔案本身可以還不存在（新檔），存在的話必須是一般檔案；驗證目標必須已在 base 上或列在 `allowed_files`（有 `test_commit` 的任務在送件時不比對驗證目標，因為測試 commit 要等 worker 結束才抓）。
    - **證明 bug 的測試用 `test_commit` 提供（測試延後套用）**：開 Issue 的人先推一個分支，上面只有一個 commit，父 commit 是 main 上的某個版本，內容只新增或修改 `tests/` 底下的一般檔案，不能有 `conftest.py`。把它的 40 位 hex 填進區塊的 `test_commit`。
      - **私有存放區（#119，worker 隔離的來源端）**：測試 commit 不必、也不該推到目標 repo 的公開 `cwt-*` 分支（有網路的 worker 可以自己去抓）。改成在作者的 clone 上建單一 commit 的 bundle：`git bundle create tests.bundle <branch> ^<base>`，再由跑 Cairnwork 的帳號執行 `cairnwork-verify --state <目錄> import-tests --repo-path <mirror> --bundle tests.bundle`。匯入時在 state 底下的暫存 repo 驗證並重建成正規 bundle（只有一個 head、單親、父 commit 必須已在 mirror 裡），存成 `<state>/deferred-tests/<sha>.bundle`（檔案 0600；state 本來就必須是 owner 的 0700，worker 帳號和其他人進不去）。已匯入、已在 mirror、或已被燒掉（`verify-used-tests`）的 commit 一律拒絕，不覆蓋。
      - 取用：接手時父 commit 從 bundle 讀（不經 GitHub）；worker 結束後 Cairnwork 才從 bundle 抓進自己的 clone。單次使用、「從未出現過」、父 commit 綁定和可信身分檢查都不變。
