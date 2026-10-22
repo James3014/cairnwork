@@ -76,7 +76,7 @@ def verify_candidate(
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
-        test_roots=tuple(intake.config()["test_roots"]),
+        test_roots=tuple(intake.config()["test_roots"]), test_store=intake.test_store(),
     )  # fmt: skip
     account = intake.verifier_account()
     python = intake.config()["verifier_python"]
