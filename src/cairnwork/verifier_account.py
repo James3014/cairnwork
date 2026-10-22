@@ -53,6 +53,13 @@ DEFAULT_ROOT = Path(
 # a waiter gives up a little later than that instead of queueing behind a stuck holder.
 LOCK_TIMEOUT_SECONDS = 900.0
 _LOCK_POLL_SECONDS = 0.05
+# One budget for every process-list probe and kill of a single reap or idle check (Issue #114);
+# past it the answer is "survivor / unknown", never "clean".
+PROBE_DEADLINE_SECONDS = 120.0
+
+
+def _remaining(deadline: float | None) -> float:
+    return confined.PS_TIMEOUT_SECONDS if deadline is None else deadline - time.monotonic()
 
 
 class VerifierAccountError(Exception):
@@ -131,18 +138,25 @@ class VerifierAccount:
         jailed = backend.wrap(inner, profile) if profile is not None else backend.unconfined(inner)
         return [SUDO, "-n", "-u", self.user, "--", *jailed]
 
-    def count(self) -> int:
-        """How many processes the account is running (-1: cannot tell)."""
+    def count(self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS) -> int:
+        """How many processes the account is running (-1: cannot tell, or ``deadline`` passed).
+
+        Retry (``attempts`` > 1) only after a kill: asking again while a survivor is still alive
+        gives it time to undo the run's traces (Issue #114).
+        """
         # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
         # procps selects all of a user's processes with -U alone and rejects -x.
         tty_flag = ["-x"] if sys.platform == "darwin" else []
-        for _ in range(confined.PS_ATTEMPTS):  # slow under load is not "cannot tell" (Issue #114)
+        for _ in range(attempts):  # slow under load is not "cannot tell" (Issue #114)
+            budget = _remaining(deadline)
+            if budget <= 0:
+                break
             try:
                 done = subprocess.run(  # noqa: S603 - fixed argv
                     ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
                     capture_output=True,
                     text=True,
-                    timeout=confined.PS_TIMEOUT_SECONDS,
+                    timeout=min(budget, confined.PS_TIMEOUT_SECONDS),
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError):
@@ -154,34 +168,46 @@ class VerifierAccount:
     def reap(self) -> int:
         """Kill everything the account runs; return how many were running.
 
-        Unknown counts, or a process that outlived the kill, count as one more, so a
-        caller never mistakes "cannot tell" for "nothing escaped".
+        The process list is read once, *before* the kill, with no retry: asking again while a
+        survivor is alive would give it time to undo the run's traces and exit before it is
+        counted (``kill -9 -1`` cannot report what it hit: it signals itself too, and ps is not
+        allowed inside the account's sandbox). Retrying is only done after a kill. An unknown
+        count, an expired probe deadline, or a process that outlived the kill count as one
+        more, so a caller never mistakes "cannot tell" for "nothing escaped".
         """
+        deadline = time.monotonic() + PROBE_DEADLINE_SECONDS
         try:
-            before = self.count()
-            left = self.kill_all()
+            before = self.count(deadline, attempts=1)
+            left = self._kill_until_clean(5, deadline)
         except (OSError, subprocess.SubprocessError):
             return 1
         return max(before, 0) + (1 if before < 0 or left != 0 else 0)
 
     def kill_all(self, attempts: int = 5) -> int:
-        """SIGKILL every process of the account; return how many are left (-1: unknown).
+        """SIGKILL every process of the account; return how many are left (-1: unknown)."""
+        return self._kill_until_clean(attempts, time.monotonic() + PROBE_DEADLINE_SECONDS)
 
-        Repeated a few times: a process that forks while the signal is delivered
-        can leave a child behind.
+    def _kill_until_clean(self, attempts: int, deadline: float) -> int:
+        """How many processes are left after the kills (-1: unknown).
+
+        Repeated a few times: a process that forks while the signal is delivered can leave a
+        child behind. Everything shares ``deadline``; when it passes the answer is unknown.
         """
         left = -1
         for _ in range(attempts):
+            budget = _remaining(deadline)
+            if budget <= 0:
+                return -1
             try:
                 subprocess.run(  # noqa: S603 - fixed argv
                     [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
                     capture_output=True,
-                    timeout=confined.PS_TIMEOUT_SECONDS,
+                    timeout=min(budget, confined.PS_TIMEOUT_SECONDS),
                     check=False,
                 )
             except subprocess.TimeoutExpired:
-                continue  # a loaded host: count() below says what is left, and we try again
-            left = self.count()
+                continue  # a loaded host: ask again
+            left = self.count(deadline)
             if left == 0:
                 break
         return left
