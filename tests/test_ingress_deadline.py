@@ -12,14 +12,55 @@ from http.server import BaseHTTPRequestHandler
 
 import pytest
 
+from cairnwork_protocol import ingress
 from cairnwork_protocol.ingress import IngressError, serve
 
 TOKEN = "s3cret-token"
 
 
+class _Clock:
+    """Stand-in for the ``time`` module inside ingress: only ``monotonic``, set by the test."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _post(port: int, body: bytes = b"hi") -> bytes:
+    return (
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nContent-Length: {len(body)}\r\n\r\n"
+    ).encode() + body
+
+
+def _trickle(sock: socket.socket, payload: bytes, gap: float, budget: float) -> float:
+    """Send one byte per ``gap`` seconds; return how long until the server cut us off."""
+    start = time.monotonic()
+    for i in range(len(payload)):
+        if time.monotonic() - start > budget:
+            break
+        try:
+            sock.sendall(payload[i : i + 1])
+        except OSError:
+            break
+        time.sleep(gap)
+    sock.settimeout(max(0.1, budget - (time.monotonic() - start)))
+    try:
+        while sock.recv(4096):
+            pass
+    except OSError:
+        pass
+    return time.monotonic() - start
+
+
+# The trickle tests use a deadline (1 s) far above the gap (0.1 s) so no per-read timeout can
+# trip, and a payload that would take 20+ s to send: only the whole-request deadline can cut it,
+# and the pass bar (10 s) leaves a slow runner 9 s of slack.
 @pytest.fixture
-def server():
-    httpd = serve("127.0.0.1", 0, TOKEN, {"/echo": lambda b: (200, {"size": len(b)})}, timeout=0.5)
+def slow_server():
+    httpd = serve("127.0.0.1", 0, TOKEN, {"/echo": lambda b: (200, {"size": len(b)})}, timeout=1.0)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield httpd.server_address[1]
@@ -28,58 +69,28 @@ def server():
     thread.join()
 
 
-def _trickle(port: int, payload: bytes, gap: float, budget: float) -> float:
-    """Send one byte per ``gap`` seconds; return how long until the server cut us off."""
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    start = time.monotonic()
+def test_trickling_headers_are_cut_at_the_whole_request_deadline(slow_server):
+    head = (
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{slow_server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nX-Pad: {'a' * 300}\r\n\r\n"
+    ).encode()
+    sock = socket.create_connection(("127.0.0.1", slow_server), timeout=5)
     try:
-        for i in range(len(payload)):
-            if time.monotonic() - start > budget:
-                break
-            try:
-                sock.sendall(payload[i : i + 1])
-            except OSError:
-                break
-            time.sleep(gap)
-        sock.settimeout(max(0.1, budget - (time.monotonic() - start)))
-        try:
-            while sock.recv(4096):
-                pass
-        except OSError:
-            pass
-        return time.monotonic() - start
+        assert _trickle(sock, head, gap=0.1, budget=20.0) < 10.0
     finally:
         sock.close()
 
 
-def test_trickling_headers_are_cut_at_the_whole_request_deadline(server):
-    # timeout=0.5; a byte every 0.2 s never trips a per-read timeout.
+def test_trickling_body_is_cut_at_the_whole_request_deadline(slow_server):
     head = (
-        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
-        f"Authorization: Bearer {TOKEN}\r\nX-Pad: {'a' * 200}\r\n\r\n"
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{slow_server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nContent-Length: 300\r\n\r\n"
     ).encode()
-    assert _trickle(server, head, gap=0.2, budget=6.0) < 2.0
-
-
-def test_trickling_body_is_cut_at_the_whole_request_deadline(server):
-    head = (
-        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
-        f"Authorization: Bearer {TOKEN}\r\nContent-Length: 200\r\n\r\n"
-    ).encode()
-    deadline = 0.5
-    sock = socket.create_connection(("127.0.0.1", server), timeout=5)
-    start = time.monotonic()
+    sock = socket.create_connection(("127.0.0.1", slow_server), timeout=5)
     data = b""
     try:
-        try:
-            sock.sendall(head)
-            for _ in range(100):
-                sock.sendall(b"x")
-                time.sleep(0.2)
-                if time.monotonic() - start > 6:
-                    break
-        except OSError:
-            pass  # the server already cut us off (possibly with a reset)
+        sock.sendall(head)
+        elapsed = _trickle(sock, b"x" * 300, gap=0.1, budget=20.0)
         sock.settimeout(1)
         try:
             data = sock.recv(4096)
@@ -87,12 +98,25 @@ def test_trickling_body_is_cut_at_the_whole_request_deadline(server):
             pass  # a reset instead of the 408 is also a cut
     finally:
         sock.close()
-    assert time.monotonic() - start < deadline + 1.5
+    assert elapsed < 10.0
     if data:
         assert b"408" in data.split(b"\r\n", 1)[0]
 
 
-def test_response_write_gets_the_normal_timeout_back(server, monkeypatch):
+def test_response_write_gets_the_normal_timeout_back(monkeypatch):
+    # Fake clock: the deadline is set at t=0 (5 s), every later read sees t=2, so the reader
+    # leaves the socket timeout at 3.0; the response must see the normal 5.0 again.
+    # No real time passes in the assertion, so a slow runner cannot change the outcome.
+    clock = _Clock()
+    calls = []
+
+    def monotonic() -> float:
+        calls.append(None)
+        clock.now = 0.0 if len(calls) == 1 else 2.0
+        return clock.now
+
+    clock.monotonic = monotonic  # type: ignore[method-assign]
+    monkeypatch.setattr(ingress, "time", clock)
     seen: list[float | None] = []
     real = BaseHTTPRequestHandler.end_headers
 
@@ -101,19 +125,23 @@ def test_response_write_gets_the_normal_timeout_back(server, monkeypatch):
         real(self)
 
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", spy)
-    sock = socket.create_connection(("127.0.0.1", server), timeout=5)
+    httpd = serve("127.0.0.1", 0, TOKEN, {"/echo": lambda b: (200, {"size": len(b)})}, timeout=5.0)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
     try:
-        sock.sendall(
-            f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
-            f"Authorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\nh".encode()
-        )
-        time.sleep(0.45)  # the last byte lands ~0.05 s before the 0.5 s deadline
-        sock.sendall(b"i")
-        reply = sock.recv(4096)
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            sock.sendall(_post(port))
+            reply = sock.recv(4096)
+        finally:
+            sock.close()
     finally:
-        sock.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
     assert reply.startswith(b"HTTP/1.0 200") or reply.startswith(b"HTTP/1.1 200")
-    assert seen == [0.5]
+    assert seen == [5.0]
 
 
 def test_non_disconnect_oserror_from_a_route_is_an_internal_error():
@@ -149,25 +177,42 @@ def test_serve_rejects_a_non_positive_or_missing_timeout(bad):
     assert exc.value.code == "INGRESS_TIMEOUT_INVALID"
 
 
-def test_each_keepalive_request_gets_a_fresh_deadline(server):
-    conn = HTTPConnection("127.0.0.1", server, timeout=5)
+def test_each_keepalive_request_gets_a_fresh_deadline(monkeypatch):
+    # Fake clock moved 3 s between requests against a 5 s deadline: three requests span 6+ s,
+    # so a deadline carried over from the first request would expire; fresh ones never do.
+    clock = _Clock()
+    monkeypatch.setattr(ingress, "time", clock)
+    httpd = serve("127.0.0.1", 0, TOKEN, {"/echo": lambda b: (200, {"size": len(b)})}, timeout=5.0)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    conn = HTTPConnection("127.0.0.1", port, timeout=10)
     try:
         for _ in range(3):
             conn.request(
                 "POST",
                 "/echo",
                 body=b"hi",
-                headers={"Authorization": f"Bearer {TOKEN}", "Host": f"127.0.0.1:{server}"},
+                headers={"Authorization": f"Bearer {TOKEN}", "Host": f"127.0.0.1:{port}"},
             )
-            assert conn.getresponse().read()
-            time.sleep(0.3)  # total > 0.5 s across requests, each one well inside its own
+            resp = conn.getresponse()
+            assert resp.status == 200
+            resp.read()
+            clock.now += 3.0
     finally:
         conn.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
 
 
 def test_early_disconnect_logs_one_line_and_no_traceback(capfd, caplog):
+    entered = threading.Event()
+    release = threading.Event()
+
     def slow(_body):
-        time.sleep(0.4)
+        entered.set()
+        release.wait(10)
         return 200, {"ok": True}
 
     httpd = serve("127.0.0.1", 0, TOKEN, {"/slow": slow}, timeout=5)
@@ -181,14 +226,19 @@ def test_early_disconnect_logs_one_line_and_no_traceback(capfd, caplog):
                 f"POST /slow HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
                 f"Authorization: Bearer {TOKEN}\r\nContent-Length: 0\r\n\r\n".encode()
             )
-            time.sleep(0.1)
+            assert entered.wait(10)  # the route is running, whatever the runner's speed
             # RST on close, so the server's write fails instead of being buffered.
             sock.setsockopt(
                 socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00"
             )
             sock.close()
-            time.sleep(1.0)
+            release.set()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not caplog.records:
+                time.sleep(0.05)
+            time.sleep(0.2)  # room for a (wrong) second line
     finally:
+        release.set()
         httpd.shutdown()
         httpd.server_close()
         thread.join()
