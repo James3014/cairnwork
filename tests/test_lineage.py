@@ -77,7 +77,7 @@ def _settle_with_base(setup, monkeypatch, base):
     pushes = []
     real_git = runner._git
     monkeypatch.setattr(
-        runner, "_git", lambda r, *a: pushes.append(a) if "push" in a else real_git(r, *a)
+        runner, "_git", lambda r, *a, **k: pushes.append(a) if "push" in a else real_git(r, *a, **k)
     )
     return runner.settle(setup["intake"], github, setup["clone"]), pushes, github
 

@@ -193,7 +193,7 @@ def test_a_running_task_is_left_alone(setup, monkeypatch):
     assert github.labels[7] == {runner.RUNNING}
 
 
-def _git_without_credentials(repo, *args):
+def _git_without_credentials(repo, *args, **_kw):
     """The real helper with the bot credential options removed (no gh in tests)."""
     args = list(args)
     while args and args[0] == "-c":

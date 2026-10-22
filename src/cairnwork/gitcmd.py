@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 
 GIT_TIMEOUT_SECONDS = 60
+NETWORK_TIMEOUT_SECONDS = 300  # fetch and push over a network; local commands keep the default
+STDERR_TAIL_CHARS = 400
 OID = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -32,6 +34,39 @@ _SAFE_OPTIONS = (
 )
 
 
+# Greedy to the last '@' in the run free of space and tab (newlines count as part of the run, so
+# one planted in the userinfo cannot split it): a password may itself hold '@' or '/'.
+# Fail-closed: an '@' later in a path also removes the text before it.
+_URL_USERINFO = re.compile(r"(?<=://)[^ \t]*@")
+_CONTROL = re.compile(r"[^\x20-\x7e\n\u00a0-\U0010ffff]|[\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def stderr_tail(raw: str | bytes | None) -> str:
+    """Last STDERR_TAIL_CHARS of git's stderr, one line per line, safe to put in an error.
+
+    URL credentials (``https://user:token@host``) are removed and control characters
+    (terminal escapes, CR overwrites) are dropped, so the text can go to a log or an Issue.
+    Control characters go first, so none can split a credential before it is redacted. The
+    redaction is greedy to the last '@' of a token, so a URL with '@' in its path loses the
+    text before it: an accepted trade-off, redact rather than leak.
+    """
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    text = _URL_USERINFO.sub("", _CONTROL.sub("", raw or "")).strip()
+    return text.replace("\n", " | ")[-STDERR_TAIL_CHARS:]
+
+
+def _subcommand(args: tuple[str, ...]) -> str:
+    """The git subcommand in args, skipping leading ``-c <name=value>`` pairs and other options."""
+    it = iter(args)
+    for arg in it:
+        if arg == "-c":
+            next(it, None)
+        elif not arg.startswith("-"):
+            return arg
+    return args[0] if args else "command"
+
+
 class GitCommandError(Exception):
     code = "GIT_COMMAND_FAILED"
 
@@ -40,7 +75,11 @@ class GitCommandError(Exception):
 
 
 def run_git(
-    repo: Path, *args: str, index_file: Path | None = None, isolate_config: bool = False
+    repo: Path,
+    *args: str,
+    index_file: Path | None = None,
+    isolate_config: bool = False,
+    timeout: float = GIT_TIMEOUT_SECONDS,
 ) -> str:
     """Run git in repo; index_file points git at a private index (GIT_INDEX_FILE).
 
@@ -49,7 +88,12 @@ def run_git(
     stop git reading ``~/.gitconfig``/``/etc/gitconfig``, where a setting such as
     ``gc.recentObjectsHook`` runs a command during a prune — which ``core.hooksPath``
     does not cover. Use it for maintenance commands (gc, prune) on a worker's clone.
+
+    timeout is in seconds; pass NETWORK_TIMEOUT_SECONDS for a fetch or push over a network.
+    A failure carries a bounded, sanitised tail of git's stderr (see stderr_tail).
     """
+    if not timeout or timeout <= 0:
+        raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if index_file is not None:
         env["GIT_INDEX_FILE"] = str(index_file)
@@ -63,11 +107,14 @@ def run_git(
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
             env=env,
         )
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
-        raise GitCommandError(f"git {args[0]} failed") from exc
+        tail = stderr_tail(getattr(exc, "stderr", None))
+        raise GitCommandError(
+            f"git {_subcommand(args)} failed" + (f": {tail}" if tail else "")
+        ) from exc
     return done.stdout
 
 
