@@ -24,6 +24,7 @@ class FakeGitHub(runner.GitHub):
         super().__init__("/bin/false", "James3014/demo")
         self.labels = {i["number"]: {runner.QUEUE} for i in issues}
         self.bodies = {i["number"]: i for i in issues}
+        self.current = lambda n: {k: self.bodies[n][k] for k in ("title", "body")}  # re-read
         self.trusted = trusted
         self.comments, self.prs = [], []
         self.commits = {}
