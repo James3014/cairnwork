@@ -143,8 +143,32 @@ def _verify_origin(clone: Path, repo: str) -> None:
                 raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
 
 
+def _verify_single_branch(clone: Path) -> None:
+    """The mirror must be single-branch (only main), so the single-commit branches that hold
+    deferred hidden tests are never pre-fetched into it and reachable by the worker (Issue #76).
+    A wildcard fetch refspec means a full clone that pulled every branch."""
+    # check=False: git config exits 1 when the key is absent, which is the no-refspec case below,
+    # not a command failure — reading it through _git would raise a generic "git config failed".
+    done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
+        ["git", "-C", str(clone), "config", "--get-all", "remote.origin.fetch"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    specs = [s for s in done.stdout.splitlines() if s]
+    advice = "re-clone with: git clone --single-branch --branch main <url>"
+    code = "LINEAGE_MIRROR_NOT_SINGLE_BRANCH"
+    if not specs:
+        raise RuntimeError(f"{code}: origin has no fetch refspec; {advice}")
+    for spec in specs:
+        if "*" in spec or "refs/heads/main" not in spec:
+            raise RuntimeError(f"{code}: origin fetch {spec!r} pulls more than main; {advice}")
+
+
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
     _verify_origin(clone, github.repo)
+    _verify_single_branch(clone)
     _git(clone, "fetch", "-q", "origin", "main")
     base = _git(clone, "rev-parse", "origin/main").strip()
     results = []

@@ -29,6 +29,7 @@
    - repo 是公開的，所以會逐一檢查：Issue 作者、最後一次貼標籤的人、貼標籤之後所有的標題和內文修改，都必須是可信身分。
    - 編輯歷史不完整也一律拒絕。
 3. 執行 `cairnwork-issues --state <Cairnwork state> --repo James3014/<repo> --clone <專用 clone> run-once`。
+   - **專用 clone(mirror)一定要單分支**：用 `git clone --single-branch --branch main <url>` 建立。整包 clone 會把放延後(隱藏)測試的單 commit 分支也抓進 mirror,讓 worker 本機就讀得到。runner 啟動時會檢查 `remote.origin.fetch` 只含 main,否則以 `LINEAGE_MIRROR_NOT_SINGLE_BRANCH` 拒絕(#76)。
    - **接手**：符合條件的 Issue 交給 Cairnwork，改標成 `cairnwork:running`，並留言附上 task id。
    - **收尾**：
      - 完成而且 Core 判定 VERIFIED：推出分支 `cairnwork/<issue>-<attempt>`，開成 **draft PR**。PR 內文寫 `Refs #N` 並附上 Nexus 的標記，Issue 標成 `cairnwork:pr-opened`。
