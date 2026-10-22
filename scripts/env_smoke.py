@@ -70,7 +70,9 @@ class RepoProbe:
 @dataclass(frozen=True)
 class ProbeResult:
     repo: str
-    verdict: str  # ENV_OK | ENV_COUPLING | SKIPPED_TESTS | REPO_TESTS_NOT_GREEN | SKIP_BARE_TIMEOUT
+    # ENV_OK | ENV_COUPLING | SKIPPED_TESTS | REPO_TESTS_NOT_GREEN | SKIP_BARE_TIMEOUT
+    # | MIRROR_MULTI_BRANCH
+    verdict: str
     reason: str
 
 
@@ -123,10 +125,50 @@ def _bare_is_green(probe: RepoProbe, commit: str, run_root: Path, timeout: int) 
         remove_attempt_clone(run_root, clone_id)
 
 
+def _mirror_multi_branch_reason(repo: Path) -> str | None:
+    """A reason if repo is a mirror whose origin is not single-branch (Issue #76), else None.
+    A repo with no origin fetch refspec (a local probe checkout) is not applicable."""
+    got = subprocess.run(  # noqa: S603, S607 - fixed argv, no shell
+        ["git", "-C", str(repo), "config", "--get-all", "remote.origin.fetch"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    specs = [s for s in got.stdout.splitlines() if s.strip()]
+    advice = "re-clone with: git clone --single-branch --branch main <url>"
+    if not specs:
+        return None
+    # The source of "[+]<src>:<dst>" must be exactly main; a wildcard or another branch is refused.
+    if any(spec.lstrip("+").split(":", 1)[0] != "refs/heads/main" for spec in specs):
+        return f"mirror not single-branch; {advice}"
+    # The config only governs future fetches; refuse a mirror that already holds a non-main branch.
+    refs = subprocess.run(  # noqa: S603, S607 - fixed argv, no shell
+        [
+            "git",
+            "-C",
+            str(repo),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],  # fmt: skip
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    allowed = {"refs/heads/main", "refs/remotes/origin/main", "refs/remotes/origin/HEAD"}
+    if any(r not in allowed for r in refs.stdout.split()):
+        return f"mirror holds a branch beyond main; {advice}"
+    return None
+
+
 def probe_repo(probe: RepoProbe, *, timeout: int = 300) -> ProbeResult:
     spec = parse_verifier("env-smoke", ["python3", "-m", "pytest", "-q", *probe.targets])
-    commit = _head(probe.repo)
     name = probe.repo.name
+    multi = _mirror_multi_branch_reason(probe.repo)
+    if multi is not None:  # a full mirror pre-fetched the hidden-test branches (Issue #76)
+        return ProbeResult(name, "MIRROR_MULTI_BRANCH", multi)
+    commit = _head(probe.repo)
     # resolve(): on macOS mkdtemp returns /var/folders/... (a symlink to /private/var/...); the
     # sandbox profile uses the realpath, so the checkout must too or pytest collection walks the
     # symlink and is denied at /private.
@@ -226,7 +268,9 @@ def main(argv: list[str]) -> int:
     # Distinct code: a repo we could not probe at all (not green bare, or bare timed out) is not
     # the same signal as a coupling, but still not a clean onboarding.
     if any(
-        r.verdict in ("SKIPPED_TESTS", "REPO_TESTS_NOT_GREEN", "SKIP_BARE_TIMEOUT") for r in results
+        r.verdict
+        in ("SKIPPED_TESTS", "REPO_TESTS_NOT_GREEN", "SKIP_BARE_TIMEOUT", "MIRROR_MULTI_BRANCH")
+        for r in results
     ):
         return 2
     return 0

@@ -143,8 +143,41 @@ def _verify_origin(clone: Path, repo: str) -> None:
                 raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
 
 
+def _verify_single_branch(clone: Path) -> None:
+    """The mirror must be single-branch (only main), so the single-commit branches that hold
+    deferred hidden tests are never pre-fetched into it and reachable by the worker (Issue #76).
+    A wildcard fetch refspec means a full clone that pulled every branch."""
+    # check=False: git config exits 1 when the key is absent, which is the no-refspec case below,
+    # not a command failure — reading it through _git would raise a generic "git config failed".
+    done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
+        ["git", "-C", str(clone), "config", "--get-all", "remote.origin.fetch"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    specs = [s for s in done.stdout.splitlines() if s]
+    advice = "re-clone with: git clone --single-branch --branch main <url>"
+    code = "LINEAGE_MIRROR_NOT_SINGLE_BRANCH"
+    if not specs:
+        raise RuntimeError(f"{code}: origin has no fetch refspec; {advice}")
+    for spec in specs:
+        # The source of a fetch refspec is "[+]<src>:<dst>"; accept only main exactly, so a
+        # wildcard ("refs/heads/*") or another branch ("refs/heads/mainline") is refused.
+        if spec.lstrip("+").split(":", 1)[0] != "refs/heads/main":
+            raise RuntimeError(f"{code}: origin fetch {spec!r} is not refs/heads/main; {advice}")
+    # The config only governs future fetches; a mirror full-cloned once and later reconfigured still
+    # holds the branches it already fetched. Refuse if any branch beyond main is actually present.
+    allowed = {"refs/heads/main", "refs/remotes/origin/main", "refs/remotes/origin/HEAD"}
+    refs = _git(clone, "for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/origin/")
+    extra = [r for r in refs.split() if r not in allowed]
+    if extra:
+        raise RuntimeError(f"{code}: mirror holds a branch beyond main ({extra[0]}); {advice}")
+
+
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
     _verify_origin(clone, github.repo)
+    _verify_single_branch(clone)
     _git(clone, "fetch", "-q", "origin", "main")
     base = _git(clone, "rev-parse", "origin/main").strip()
     results = []

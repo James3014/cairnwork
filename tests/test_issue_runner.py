@@ -68,7 +68,11 @@ def setup(repo, tmp_path, monkeypatch):
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)
     clone = tmp_path / "clone"
-    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    # Single-branch mirror (Issue #76): a full clone would pre-fetch the hidden-test branches.
+    subprocess.run(
+        ["git", "clone", "-q", "--single-branch", "--branch", "main", str(origin), str(clone)],
+        check=True,
+    )
     git(clone, "config", "user.email", "t@e")  # CI runners have no git identity
     git(clone, "config", "user.name", "t")
     started = []
@@ -102,6 +106,23 @@ def test_a_trusted_issue_is_taken_once(setup):
     assert status["status"] == "BOUND"
     request = setup["intake"].load_request(first[0]["task_id"])
     assert request.base_commit == base and request.repo == setup["clone"].resolve()
+
+
+def test_a_multi_branch_mirror_is_refused_at_startup(setup):
+    # A mirror cloned without --single-branch pulls every branch, including the ones that hold
+    # deferred hidden tests; the runner must refuse it at startup (Issue #76).
+    git(setup["clone"], "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    with pytest.raises(RuntimeError, match="LINEAGE_MIRROR_NOT_SINGLE_BRANCH"):
+        runner.take(setup["intake"], FakeGitHub([issue()]), setup["clone"])
+
+
+def test_a_mirror_holding_an_extra_branch_is_refused(setup):
+    # Even with a main-only fetch config, a mirror that already fetched another branch (a full clone
+    # later reconfigured) still holds the hidden-test branch; the ref check refuses it (Issue #76).
+    head = git(setup["clone"], "rev-parse", "HEAD").strip()
+    git(setup["clone"], "update-ref", "refs/remotes/origin/hidden", head)
+    with pytest.raises(RuntimeError, match="LINEAGE_MIRROR_NOT_SINGLE_BRANCH"):
+        runner.take(setup["intake"], FakeGitHub([issue()]), setup["clone"])
 
 
 def test_untrusted_or_malformed_issues_are_not_taken(setup):
