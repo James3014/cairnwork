@@ -59,6 +59,7 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
 )
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+TRUST_CHANGED = "TRUST_CHANGED_BEFORE_DISPATCH"
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
 
 
@@ -225,7 +226,7 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
         payload["base_commit"] = _test_base(github, clone, task.test_commit, intake.test_store())
     now = github.current(number)  # re-read: nothing may change between first check and dispatch
     if now != {k: issue.get(k) for k in ("title", "body")} or github.trust(number, QUEUE):
-        return {"skipped": "TRUST_CHANGED_BEFORE_DISPATCH"}
+        return {"skipped": TRUST_CHANGED}
     out = intake.submit(payload)
     _remember(intake, github.repo, number, out["task_id"], task.block_sha256)
     github.relabel(number, RUNNING, QUEUE)
@@ -234,6 +235,21 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
             number, f"Cairnwork 已接手：task `{out['task_id']}`，base `{payload['base_commit']}`。"
         )
     return out
+
+
+def attempt_gate(github: GitHub, number: int, block_sha256: str, roots: tuple[str, ...]):
+    """Run before every attempt: the Issue's task block and queueing must still be trusted."""
+
+    def gate() -> str:
+        try:
+            body = github.current(number).get("body") or ""
+            if parse_task_block(body, roots).block_sha256 != block_sha256:
+                return TRUST_CHANGED
+            return TRUST_CHANGED if github.trust(number, QUEUE) else ""
+        except Exception:  # noqa: BLE001 - anything unreadable is a refusal
+            return TRUST_CHANGED
+
+    return gate
 
 
 def _test_base(github: GitHub, clone: Path, test_commit: str, store) -> str:

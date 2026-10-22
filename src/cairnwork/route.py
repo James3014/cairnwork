@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
+from cairnwork.issue_runner import DEFAULT_GH, TRUST_CHANGED, GitHub, attempt_gate
 from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
@@ -121,8 +123,18 @@ def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     """The runner submit starts. It keeps the inherited lock fd open until it exits."""
     config = intake.config()
+    task = intake.load_request(task_id)
+    gate = None
+    if task.card_hash.startswith("gh:"):  # an Issue task: re-check its trust before the attempt
+        found = re.fullmatch(r"gh:(.+)#(\d+):(\w+)", task.card_hash)
+        if found is None:
+            gate = lambda: TRUST_CHANGED  # noqa: E731 - unreadable link: refuse
+        else:
+            repo, number, block = found.groups()
+            roots = tuple(config["test_roots"])
+            gate = attempt_gate(GitHub(DEFAULT_GH, repo), int(number), block, roots)
     result = run_bound_task(
-        intake.load_request(task_id),
+        task,
         task_id,
         ledger=intake.ledger,
         notary=intake.notary,
@@ -131,6 +143,7 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         run_root=intake.run_root,
         verifier_account=intake.verifier_account(),
         verifier_python=config["verifier_python"],
+        before_attempt=gate,
     )
     return {k: v for k, v in result.__dict__.items() if k != "logs"}
 

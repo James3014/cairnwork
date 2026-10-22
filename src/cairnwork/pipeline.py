@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -193,6 +194,7 @@ def run_bound_task(
     run_root: Path,
     verifier_account: VerifierAccount | None = None,
     verifier_python: str | None = None,
+    before_attempt: Callable[[], str] | None = None,
 ) -> TaskResult:
     """Run a task bound earlier (intake.submit). Its request must be the one bound;
     a task that is no longer BOUND (cancelled, or already run) is not run again."""
@@ -209,10 +211,23 @@ def run_bound_task(
             raise TaskRejected("REQUEST_MISMATCH", f"{task_id} was bound to another request")
         if record.status != "BOUND":
             return TaskResult(task_id, "", record.status, reason="NOT_BOUND")
-        return _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying)
+        return _execute(
+            task,
+            specs,
+            record,
+            ledger,
+            notary,
+            journal,
+            worker,
+            run_root,
+            verifying,
+            before_attempt,
+        )
 
 
-def _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying):
+def _execute(
+    task, specs, record, ledger, notary, journal, worker, run_root, verifying, before_attempt=None
+):
     """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
     attempt_id = f"a{secrets.token_hex(8)}"
     steps = _Steps(journal, record.task_id, attempt_id)
@@ -234,6 +249,7 @@ def _execute(task, specs, record, ledger, notary, journal, worker, run_root, ver
             result,
             steps,
             verifying,
+            before_attempt,
         )
     except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
         result.verified = False
@@ -348,8 +364,14 @@ def judge_candidate(
     result.reason = _verdict_reason(result.verified, verdict, recorded)
 
 
-def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
-    """verifying = (verifier account or None, verifier Python or None)."""
+def _attempt(
+    task, specs, digest, notary, worker, run_root, result, steps, verifying, before_attempt=None
+) -> None:
+    """verifying = (verifier account or None, verifier Python or None). before_attempt returns
+    a refusal code (or "") and runs before every attempt; a refusal fails the attempt closed."""
+    if before_attempt is not None and (refusal := before_attempt()):
+        result.reason = refusal
+        return
     if task.test_commit:
         try:
             never_seen(task.repo, task.test_commit)
