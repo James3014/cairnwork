@@ -35,6 +35,7 @@ packages = [
     "src/cairnwork_protocol",
     "src/cairnwork_sandbox",
     "src/cairnwork_quickstart",
+    "src/cairnwork_attest",
 ]
 
 [tool.pytest.ini_options]
@@ -56,7 +57,13 @@ select = ["E", "F", "W", "I", "B", "BLE", "S110", "S112", "UP"]
 "tests/**" = ["S"]
 
 [tool.importlinter]
-root_packages = ["cairnwork", "cairnwork_protocol", "cairnwork_sandbox", "cairnwork_quickstart"]
+root_packages = [
+    "cairnwork",
+    "cairnwork_protocol",
+    "cairnwork_sandbox",
+    "cairnwork_quickstart",
+    "cairnwork_attest",
+]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -71,6 +78,13 @@ name = "Quickstart depends on the core, never the other way"
 type = "forbidden"
 source_modules = ["cairnwork"]
 forbidden_modules = ["cairnwork_quickstart"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "Core never imports attest (attest reads the core's outputs, one-way)"
+type = "forbidden"
+source_modules = ["cairnwork"]
+forbidden_modules = ["cairnwork_attest"]
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
