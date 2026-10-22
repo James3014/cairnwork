@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
@@ -219,7 +220,9 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     }
     if task.test_commit:  # bind to the tests' parent; the tests stay off this machine
         payload["test_commit"] = task.test_commit
-        payload["base_commit"] = _test_base(github, clone, task.test_commit, base)
+        payload["base_commit"] = _test_base(
+            github, clone, task.test_commit, base, intake.test_store()
+        )
     out = intake.submit(payload)
     _remember(intake, github.repo, number, out["task_id"], task.block_sha256)
     github.relabel(number, RUNNING, QUEUE)
@@ -230,11 +233,15 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     return out
 
 
-def _test_base(github: GitHub, clone: Path, test_commit: str, main: str) -> str:
-    """The test commit's only parent, read through the GitHub API (fetching the commit
-    would put the tests where the worker could read them); it must be on main."""
+def _test_base(github: GitHub, clone: Path, test_commit: str, main: str, store) -> str:
+    """The test commit's only parent (private store #119, else GitHub API); must be on main."""
     try:
-        parents = github.parents(test_commit)
+        if store.has(test_commit) or store.required:
+            parents = [store.parent(test_commit, clone)]
+        else:
+            parents = github.parents(test_commit)
+    except TestCommitRejected as exc:
+        raise IssueRefused(f"TASK_{exc.code}", test_commit) from exc
     except RuntimeError as exc:
         if "404" in str(exc) or "422" in str(exc) or "Not Found" in str(exc):
             raise IssueRefused("TASK_TEST_COMMIT_UNKNOWN", test_commit) from exc

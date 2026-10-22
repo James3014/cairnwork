@@ -14,8 +14,9 @@ only). The worker never gets it: its attempt clone holds the base. Cairnwork the
 
 So the worker can neither read nor weaken the tests that judge it (the same idea as
 SWE-bench applying its tests after the model's patch), as long as it cannot reach the
-test commit elsewhere: the Issue runner never tells it the commit id, but a worker
-with network access could still look for a public test branch.
+test commit elsewhere: the Issue runner never tells it the commit id. A test commit kept in
+the private store (deferred_store.py) is on no remote at all; one pushed to a public branch
+could still be found by a worker with network access.
 """
 
 from __future__ import annotations
@@ -57,10 +58,12 @@ def never_seen(repo: Path, test_commit: str) -> None:
     raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push the tests as a new commit")
 
 
-def ensure_test_commit(repo: Path, test_commit: str) -> None:
+def ensure_test_commit(repo: Path, test_commit: str, store=None) -> None:
     """Fetch the test commit into repo only now, after the worker is done: until then
     nothing on this machine holds the tests (the Issue runner reads its parent via the
-    GitHub API)."""
+    GitHub API, or from the private store). With a store (deferred_store.py, Issue #119)
+    the commit comes from its bundle and never from a remote the worker could also reach;
+    a ``required`` store refuses a commit that was not imported instead of falling back."""
     if not OID.fullmatch(test_commit):
         raise TestCommitRejected("TEST_COMMIT_INVALID", "not a 40-hex commit id")
     try:
@@ -68,6 +71,11 @@ def ensure_test_commit(repo: Path, test_commit: str) -> None:
         return
     except GitCommandError:
         pass
+    if store is not None and store.has(test_commit):
+        store.fetch_into(repo, test_commit)
+        return
+    if store is not None and store.required:
+        raise TestCommitRejected("TEST_COMMIT_NOT_IMPORTED", test_commit)
     try:
         run_git(repo, "fetch", "--quiet", "--no-tags", "origin", test_commit)
         run_git(repo, "cat-file", "-e", f"{test_commit}^{{commit}}")

@@ -77,7 +77,7 @@ def verify_candidate(
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
-        test_roots=tuple(intake.config()["test_roots"]),
+        test_roots=tuple(intake.config()["test_roots"]), test_store=intake.test_store(),
         p2p_mode=intake.config()["p2p_selection"],
         p2p_budget=intake.config()["p2p_time_budget_seconds"],
     )  # fmt: skip

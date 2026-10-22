@@ -15,6 +15,9 @@
    - `hard` 的 Issue 不收。
    - **驗證用的測試檔不能列在 `allowed_files`**。Cairnwork 不讓 worker 改驗證會讀的檔案，以防它把測試改成永遠通過。
    - **證明 bug 的測試用 `test_commit` 提供（測試延後套用）**：開 Issue 的人先推一個分支，上面只有一個 commit，父 commit 是 main 上的某個版本，內容只新增或修改 `tests/` 底下的一般檔案，不能有 `conftest.py`。把它的 40 位 hex 填進區塊的 `test_commit`。
+     - **私有存放區（#119，worker 隔離的來源端）**：測試 commit 不必、也不該推到目標 repo 的公開 `cwt-*` 分支（有網路的 worker 可以自己去抓）。改成在作者的 clone 上建單一 commit 的 bundle：`git bundle create tests.bundle <branch> ^<base>`，再由跑 Cairnwork 的帳號執行 `cairnwork-verify --state <目錄> import-tests --repo-path <mirror> --bundle tests.bundle`。匯入時在 state 底下的暫存 repo 驗證並重建成正規 bundle（只有一個 head、單親、父 commit 必須已在 mirror 裡），存成 `<state>/deferred-tests/<sha>.bundle`（檔案 0600；state 本來就必須是 owner 的 0700，worker 帳號和其他人進不去）。已匯入、已在 mirror、或已被燒掉（`verify-used-tests`）的 commit 一律拒絕，不覆蓋。
+     - 取用：接手時父 commit 從 bundle 讀（不經 GitHub）；worker 結束後 Cairnwork 才從 bundle 抓進自己的 clone。單次使用、「從未出現過」、父 commit 綁定和可信身分檢查都不變。
+     - `config.json` 的 `test_source`：`"auto"`（預設，向下相容）有 bundle 就用，沒有才從 origin 抓（公開分支，worker 仍可能找得到）；**`"bundle"` 是嚴格模式**，沒匯入就拒絕（`TEST_COMMIT_NOT_IMPORTED`／`TASK_TEST_COMMIT_NOT_IMPORTED`），絕不退回 origin。第三輪 A/B 與 worker 帳號隔離上線（#121）時必須設 `"bundle"`。bundle 損壞或 state 目錄不安全（symlink、權限不是 0700）→ `TEST_COMMIT_UNREADABLE`／`TEST_STORE_UNSAFE`，不會產生成功狀態。
      - **worker 在修 bug 的期間，這台機器上沒有任何地方有這個測試**：
        - 接手時只透過 GitHub API 讀取它的父 commit，不下載測試。
        - 給 worker 的指示裡不含 `eia-task` 區塊，也不含 commit id。
