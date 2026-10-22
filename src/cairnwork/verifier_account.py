@@ -212,13 +212,25 @@ class VerifierAccount:
 
     @staticmethod
     def grant_read(root: Path) -> None:
-        """Let the account read, never write, a checkout, whatever the umask was."""
+        """Let the account read and traverse, never write, a checkout, whatever the umask was.
+
+        Read is granted to *other*, not only the shared group (Issue #91). The checkout cannot be
+        relied on to carry the shared ``cairnwork`` group: its parent ``work`` inherits the group
+        and the setgid bit from the run root, but the per-run ``chmod`` that opens ``work`` to the
+        group strips setgid on Linux whenever the owner process is not an effective member of the
+        group (a service whose session predates ``usermod -aG``), so git clones the checkout under
+        the owner's own primary group instead. Group bits then never reach the account. With the
+        default umask the clone happens to be other-readable and the run works; under a strict umask
+        (077) it is not, and the account cannot enter the checkout — the run fails. Granting *other*
+        read/traverse makes the account's access umask- and group-independent; it is no wider than
+        the default-umask clone already is, and is scoped to this throwaway checkout of the
+        code under test, never the owner's home or the run scratch."""
         for top, dirs, files in os.walk(root):
-            for name, bits in [(d, 0o050) for d in dirs] + [(f, 0o040) for f in files]:
+            for name, bits in [(d, 0o055) for d in dirs] + [(f, 0o044) for f in files]:
                 path = os.path.join(top, name)
                 if not os.path.islink(path):
                     os.chmod(path, os.stat(path).st_mode | bits)
-        os.chmod(root, os.stat(root).st_mode | 0o050)
+        os.chmod(root, os.stat(root).st_mode | 0o055)
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
