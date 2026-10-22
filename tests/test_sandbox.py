@@ -350,3 +350,47 @@ def test_x11_and_daemon_sockets_are_masked(project, tmp_path, monkeypatch):
     )
     result = verify(project, tmp_path, {"tests/test_sock.py": code}, "tests/test_sock.py")
     assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.sandbox
+def test_multiprocessing_primitives_pass_inside_the_sandbox(project, tmp_path):
+    code = (
+        "from multiprocessing import Lock, Process, Queue\n"
+        "\n"
+        "def _worker(q):\n"
+        "    q.put('cw-mp-ok')\n"
+        "\n"
+        "def test_mp():\n"
+        "    lock = Lock()\n"
+        "    assert lock.acquire()\n"
+        "    lock.release()\n"
+        "    queue = Queue()\n"
+        "    p = Process(target=_worker, args=(queue,))\n"
+        "    p.start()\n"
+        "    assert queue.get(timeout=10) == 'cw-mp-ok'\n"
+        "    p.join(timeout=10)\n"
+        "    assert p.exitcode == 0\n"
+    )
+    result = verify(project, tmp_path, {"tests/test_mp.py": code}, "tests/test_mp.py")
+    assert result.observation.passed, result.log_path.read_text()
+
+
+@pytest.mark.sandbox
+def test_non_matching_posix_semaphore_name_is_denied_on_macos(project, tmp_path):
+    backend = cairnwork_sandbox.platform_backend()
+    if backend is None or backend.name != "seatbelt":
+        pytest.skip("Seatbelt-specific narrow rule witness (skip on Linux)")
+    from cairnwork_sandbox import seatbelt
+
+    # No skip here: on a host that needs the broad fallback or fails closed, this must fail.
+    assert "ipc-posix-name-regex" in seatbelt.posix_sem_rule()
+    code = (
+        "import _multiprocessing, pytest\n"
+        "def test_denied():\n"
+        "    with pytest.raises(OSError):\n"
+        "        _multiprocessing.SemLock(0, 1, 1, '/forbidden_sem_name', 1)\n"
+    )
+    result = verify(
+        project, tmp_path, {"tests/test_sem_denied.py": code}, "tests/test_sem_denied.py"
+    )
+    assert result.observation.passed, result.log_path.read_text()

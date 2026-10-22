@@ -86,6 +86,36 @@ def _probe(policy: str) -> int | None:
     return done.returncode
 
 
+def _sem_rule_from_probes(regex_rule: str, baseline: int | None, regex: int | None) -> str:
+    """Pick the semaphore rule from the two probe exit codes (pure, so it is testable).
+
+    Only a *confirmed* regex rejection (the baseline policy runs, the regex policy gets a
+    definite non-zero exit) falls back to the broad (allow ipc-posix-sem). A probe that could
+    not run or was inconclusive (None: timeout/OSError; or a failing baseline) fails closed:
+    no semaphore rule at all, so semaphores stay denied.
+    """
+    if regex == 0:
+        return regex_rule
+    if baseline == 0 and regex is not None:
+        return "(allow ipc-posix-sem)"
+    return ""
+
+
+@lru_cache(maxsize=1)
+def posix_sem_rule() -> str:
+    """The narrowest rule allowing multiprocessing's POSIX named semaphores.
+
+    CPython names them /mp-<random>. If sandbox-exec definitely rejects the regex form on
+    this host, fall back to (allow ipc-posix-sem); if the probe is inconclusive, allow nothing.
+    """
+    regex_rule = '(allow ipc-posix-sem (ipc-posix-name-regex #"^/mp-"))'
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        return regex_rule
+    baseline = _probe("(version 1) (allow default)")
+    regex = _probe(f"(version 1) (allow default) {regex_rule}")
+    return _sem_rule_from_probes(regex_rule, baseline, regex)
+
+
 def sbpl_path(path: Path | str) -> str:
     """The real path, checked so it cannot break out of an SBPL string."""
     real = os.path.realpath(path)
@@ -135,6 +165,7 @@ def build_profile(
         "(allow process-exec)",
         "(allow signal (target same-sandbox))",
         "(allow sysctl-read)",
+        posix_sem_rule(),
         "(allow file-read-metadata)",
         "(allow file-read*",
         *[f'  (subpath "{p}")' for p in SYSTEM_READ_SUBPATHS],
