@@ -382,8 +382,8 @@ def test_non_matching_posix_semaphore_name_is_denied_on_macos(project, tmp_path)
         pytest.skip("Seatbelt-specific narrow rule witness (skip on Linux)")
     from cairnwork_sandbox import seatbelt
 
-    if "ipc-posix-name-regex" not in seatbelt.posix_sem_rule():
-        pytest.skip("regex fallback was needed: ipc-posix-name-regex unsupported")
+    # No skip here: on a host that needs the broad fallback or fails closed, this must fail.
+    assert "ipc-posix-name-regex" in seatbelt.posix_sem_rule()
     code = (
         "import _multiprocessing, pytest\n"
         "def test_denied():\n"
