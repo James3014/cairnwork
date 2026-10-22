@@ -101,6 +101,7 @@ class VerifierRun:
     # a plain test failure: the guard reported a failed test and nothing about the run itself
     # is suspect (no timeout, mutation, survivor or oversized log); p2p.py may re-run only this
     plain_failure: bool = False
+    report_too_big: bool = False  # the guard's report exceeded MAX_REPORT_BYTES: no verdict read
     why: str = ""  # in words, why the run did not pass ("" when it passed): reasons.py
     # facts about the sandbox policy used (e.g. "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"); not
     # in the observation's artifact hash, so recording them changes no bound digest
@@ -278,7 +279,7 @@ def _run_one(
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0
     too_big = log_path.stat().st_size > MAX_LOG_BYTES
-    clean = clean and not too_big
+    clean = clean and not too_big and not verdict.too_big
     passed = profile is not None and returncode == 0 and clean and ran
     plain_failure = (
         profile is not None and returncode == 1 and clean and "failed" in verdict.outcomes.values()
@@ -286,6 +287,7 @@ def _run_one(
     why = "" if passed else why_not_passed(
         ran_sandboxed=profile is not None, returncode=returncode, timed_out=timed_out,
         mutated=mutated, survivors=survivors, log_too_big=too_big, tests_ran=ran,
+        report_too_big=verdict.too_big,
     )  # fmt: skip
     _remove_scratch((home, tmp), account)
     digest = _record_digest(
@@ -308,7 +310,7 @@ def _run_one(
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes,
         survivors=survivors, ran=ran, plain_failure=plain_failure, why=why,
-        notes=profile.notes if profile else (),
+        report_too_big=verdict.too_big, notes=profile.notes if profile else (),
     )  # fmt: skip
 
 

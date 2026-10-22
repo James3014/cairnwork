@@ -8,10 +8,11 @@ regression and is left out.
 
 Failure paths, none of which can end VERIFIED:
 
-* base probe times out (or cannot report) in ``whole-suite``: degrade to ``module-dir`` once and
-  say so in the record; when ``module-dir`` itself cannot be probed, or selects no test file at
-  all, or none of its tests passes on the base, the task is REFUSED (a degraded probe never
-  turns into "nothing to run");
+* base probe times out, cannot report, or its report exceeds the size cap (a suite too large for
+  one guard report, #184: ``base-probe-report-over-cap``) in ``whole-suite``: degrade to
+  ``module-dir`` once and say so in the record; when ``module-dir`` itself cannot be probed, or
+  would run the same files again, or selects no test file at all, or none of its tests passes on
+  the base, the task is REFUSED (a degraded probe never turns into "nothing to run");
 * the candidate run times out: its observation is not a pass, so Core says not verified;
 * the candidate run fails only because a test failed (``VerifierRun.plain_failure``: no timeout,
   mutated checkout, surviving process or oversized log, and the guard reported a failed test):
@@ -90,6 +91,8 @@ def _probe(task, files, run_root, result, verifying, budget):
     run = runs[0]
     if run.timed_out:
         return None, "base-probe-timeout"
+    if run.report_too_big:
+        return None, "base-probe-report-over-cap"
     if run.returncode not in (0, 1) or not run.outcomes:
         return None, "base-probe-failed"
     return run.outcomes, ""
@@ -129,7 +132,7 @@ def plan_p2p(task, specs, test_files, mode, budget, run_root, result, verifying)
         if not files:
             return P2PPlan(rule | {"targets": 0}, None, budget)
         if files == tried:  # the narrower mode would run the same files again
-            break
+            raise _unusable(rule, "module-dir selects the same files")
         outcomes, why = _probe(task, files, run_root, result, verifying, budget)
         if outcomes is not None:
             plan = _plan(task, specs, rule, _passing_targets(outcomes), budget)

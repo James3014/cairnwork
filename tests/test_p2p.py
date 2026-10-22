@@ -8,6 +8,7 @@ from conftest import commit_change
 from test_deferred_tests import CHECK, REGRESSION, make_test_commit
 from test_pipeline import EditWorker
 
+from cairnwork import report_guard
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
@@ -189,3 +190,32 @@ def test_a_failure_that_also_taints_the_run_is_not_plain_and_not_re_run(
     assert result.p2p["applied"] == "whole-suite" and "rerun" not in result.p2p
     assert recorded in result.reason  # the cause is what the record says, not just FAILED
     assert not list((tmp_path / "state" / "runs").glob("*-r-*"))  # and no second run happened
+
+
+BIG = "import pytest\n@pytest.mark.parametrize('i', range(100))\ndef test_x(i):\n    assert True\n"
+
+
+@pytest.mark.parametrize(
+    ("big_path", "status", "degraded"),
+    [
+        ("tests/big/test_big.py", "COMPLETED", "base-probe-report-over-cap"),
+        ("tests/test_big.py", "FAILED", None),
+    ],
+    ids=["nested: degrades to module-dir", "flat: refused, same files"],
+)
+def test_a_suite_too_large_for_one_report_degrades_or_refuses_and_says_so(
+    project, tmp_path, monkeypatch, big_path, status, degraded
+):
+    # #184: 100 nodes overflow a 1500-byte report cap on the whole-suite probe; the flat tests fit
+    monkeypatch.setattr(report_guard, "MAX_REPORT_BYTES", 1500)
+    result = run(
+        project, tmp_path, {"src/calc.py": FIX_ADD}, mode="whole-suite", extra={big_path: BIG}
+    )
+    assert result.status == status, result.reason
+    if degraded:
+        assert result.verified and result.p2p["degraded"] == degraded
+        assert result.p2p["applied"] == "module-dir" and result.p2p["targets"] >= 1
+    else:
+        assert not result.verified and "P2P_BASE_PROBE_UNUSABLE" in result.reason
+        assert "base-probe-report-over-cap" in result.reason
+        assert "module-dir selects the same files" in result.reason
