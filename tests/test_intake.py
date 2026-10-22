@@ -143,9 +143,18 @@ def test_in_flight_lists_foreign_rows_apart_from_the_counted_ones(intake, repo):
     assert out["foreign_task_ids"] == [theirs]
 
 
-def test_in_flight_without_a_ledger_has_no_foreign_rows(tmp_path):
+def test_a_finished_foreign_task_is_not_listed(intake):
+    done = intake.ledger.bind("k1", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    live = intake.ledger.bind("k2", {"a": 2}, "nexus-new", "d" * 8).record.task_id
+    intake.ledger.set_status(done, "DISPATCHED")
+    intake.ledger.set_status(done, "COMPLETED")
+    assert intake.in_flight()["foreign_task_ids"] == [live]
+
+
+def test_in_flight_without_a_ledger_reports_the_whole_empty_payload(tmp_path):
     (tmp_path / "state").mkdir()
-    assert Intake(tmp_path / "state").in_flight()["foreign_task_ids"] == []
+    out = Intake(tmp_path / "state").in_flight()
+    assert out == {"accepting": False, "count": 0, "task_ids": [], "foreign_task_ids": []}
 
 
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):

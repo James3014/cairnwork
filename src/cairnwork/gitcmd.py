@@ -57,10 +57,10 @@ def stderr_tail(raw: str | bytes | None) -> str:
 
 
 def _subcommand(args: tuple[str, ...]) -> str:
-    """The git subcommand in args, skipping leading ``-c <name=value>`` pairs and other options."""
+    """The git subcommand in args, skipping ``-c <name=value>``, ``-C <path>`` and other options."""
     it = iter(args)
     for arg in it:
-        if arg == "-c":
+        if arg in ("-c", "-C"):
             next(it, None)
         elif not arg.startswith("-"):
             return arg
