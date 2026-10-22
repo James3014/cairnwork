@@ -114,13 +114,19 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
     except OSError as exc:
         raise KeyFileError(f"cannot create key file: {exc}", code="KEY_UNWRITABLE") from exc
 
-    created_dev: int | None = None
-    created_ino: int | None = None
     try:
         created_stat = os.fstat(fd)
-        created_dev = created_stat.st_dev
-        created_ino = created_stat.st_ino
+    except OSError as exc:
+        os.close(fd)
+        raise KeyFileError(
+            f"key file at {path} was created but could not be inspected ({exc}) "
+            "and was left in place for manual review",
+            code="KEY_UNWRITABLE",
+        ) from exc
 
+    created_dev = created_stat.st_dev
+    created_ino = created_stat.st_ino
+    try:
         os.fchmod(fd, 0o600)  # independent of umask and of what O_CREAT honoured
         offset = 0
         while offset < len(pem):
@@ -131,17 +137,7 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)
-        if created_dev is not None and created_ino is not None:
-            _safe_unlink(state_dir, path.name, created_dev, created_ino)
-        else:
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                _already_gone = True
-            except OSError as unlink_exc:
-                raise KeyFileError(
-                    f"cannot clean up key file: {unlink_exc}", code="KEY_CLEANUP_FAILED"
-                ) from unlink_exc
+        _safe_unlink(state_dir, path.name, created_dev, created_ino)
         raise KeyFileError(f"cannot write key file: {exc}", code="KEY_UNWRITABLE") from exc
 
     os.close(fd)
@@ -149,8 +145,7 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
     try:
         _fsync_dir(state_dir)
     except OSError as exc:
-        if created_dev is not None and created_ino is not None:
-            _safe_unlink(state_dir, path.name, created_dev, created_ino)
+        _safe_unlink(state_dir, path.name, created_dev, created_ino)
         raise KeyFileError(f"cannot sync directory: {exc}", code="KEY_UNWRITABLE") from exc
 
     return private_key.public_key()
