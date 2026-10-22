@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import os
-import subprocess
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -25,6 +25,8 @@ from cairnwork_attest.record import AttestError, parse_strict_json, verify_recor
 from cairnwork_attest.statement import Producer, build_statement
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
+
+_OID = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
@@ -101,23 +103,12 @@ def _cmd_statement(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    repo = Path(args.repo)
-    if args.candidate is not None:
-        candidate = args.candidate
-    else:
-        try:
-            res = subprocess.run(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-                shell=False,
-            )
-            candidate = res.stdout.strip()
-        except (subprocess.SubprocessError, OSError) as exc:
-            print(f"ERROR: cannot resolve HEAD from {repo}: {exc}", file=sys.stderr)
-            return 2
+    candidate = args.candidate
+    if not _OID.fullmatch(candidate):
+        print(f"ERROR: malformed --candidate: {candidate!r} (must be 40-hex)", file=sys.stderr)
+        return 2
 
+    repo = Path(args.repo)
     print(f"Candidate: {candidate}", file=sys.stderr)
 
     core_id_pin: Mapping[str, Any] | None = None
@@ -137,17 +128,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             print(f"ERROR: cannot read core-identity: {exc}", file=sys.stderr)
             return 2
 
-    try:
-        result = verify_bundle(
-            Path(args.bundle),
-            public_key_pem=Path(args.public_key),
-            repo=repo,
-            expected_candidate=candidate,
-            core_identity_pin=core_id_pin,
-        )
-    except BundleError as exc:
-        print(f"{exc.code}: {exc}", file=sys.stderr)
-        return 1
+    result = verify_bundle(
+        Path(args.bundle),
+        public_key_pem=Path(args.public_key),
+        repo=repo,
+        expected_candidate=candidate,
+        core_identity_pin=core_id_pin,
+    )
 
     if result.ok and result.statement is not None:
         cand = result.statement["subject"][0]["digest"]["gitCommit"]
@@ -182,7 +169,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--public-key", type=Path, required=True, help="Public key PEM file path")
     p_ver.add_argument("--repo", type=Path, required=True, help="Git repository directory")
     p_ver.add_argument(
-        "--candidate", type=str, default=None, help="Expected candidate commit SHA (40-hex)"
+        "--candidate", type=str, required=True, help="Expected candidate commit SHA (40-hex)"
     )
     p_ver.add_argument(
         "--core-identity", type=Path, default=None, help="Path to Core identity JSON pin file"
@@ -193,7 +180,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
     if args.command == "keygen":
         return _cmd_keygen(args)
     if args.command == "statement":

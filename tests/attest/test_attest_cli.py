@@ -233,6 +233,8 @@ def test_cli_verify_roundtrip_and_no_network(
             str(pub_pem_file),
             "--repo",
             str(repo),
+            "--candidate",
+            candidate,
         ]
     )
     assert rc_ver == 0
@@ -249,6 +251,8 @@ def test_cli_verify_roundtrip_and_no_network(
             str(pub_pem_file),
             "--repo",
             str(repo),
+            "--candidate",
+            candidate,
         ]
     )
     assert rc_bad == 1

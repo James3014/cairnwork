@@ -288,58 +288,87 @@ def test_cli_verify_candidate_pinning_and_head_movement(
     state_dir = tmp_path / "state"
     bundle, pub_pem, _, commit_a = setup_verified_bundle_fixture(state_dir, repo)
 
-    # 1. Verification with explicit --candidate A passes
-    assert (
-        main(
-            [
-                "verify",
-                str(bundle),
-                "--public-key",
-                str(pub_pem),
-                "--repo",
-                str(repo),
-                "--candidate",
-                commit_a,
-            ]
+    def run_cli(*extra: str) -> int:
+        return main(
+            ["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo), *extra]
         )
-        == 0
-    )
-    captured = capsys.readouterr()
-    assert f"Candidate: {commit_a}" in captured.err
-    assert f"OK {commit_a}" in captured.out
 
-    # 2. Verification with default candidate (HEAD is commit A) passes
-    assert main(["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo)]) == 0
+    # 1. Verification with explicit --candidate A passes
+    assert run_cli("--candidate", commit_a) == 0
     captured = capsys.readouterr()
-    assert f"Candidate: {commit_a}" in captured.err
-    assert f"OK {commit_a}" in captured.out
+    assert f"Candidate: {commit_a}" in captured.err and f"OK {commit_a}" in captured.out
 
-    # 3. Move HEAD to commit B
+    # 2. Move HEAD to commit B
     commit_b = commit_change(repo, {"src/b.py": "y = 99\n"}, message="candidate B")
     assert commit_b != commit_a
 
-    # 4. Default candidate now resolves to commit B -> fails with CANDIDATE_MISMATCH
-    assert main(["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo)]) == 1
+    # 3. Explicit --candidate commit A still passes even when HEAD is at commit B
+    assert run_cli("--candidate", commit_a) == 0
     captured = capsys.readouterr()
-    assert f"Candidate: {commit_b}" in captured.err
-    assert "CANDIDATE_MISMATCH" in captured.out
+    assert f"Candidate: {commit_a}" in captured.err and f"OK {commit_a}" in captured.out
 
-    # 5. Explicit --candidate commit A still passes even when HEAD is at commit B
-    assert (
-        main(
-            [
-                "verify",
-                str(bundle),
-                "--public-key",
-                str(pub_pem),
-                "--repo",
-                str(repo),
-                "--candidate",
-                commit_a,
-            ]
-        )
-        == 0
-    )
+    # 4. Explicit --candidate commit B fails with CANDIDATE_MISMATCH
+    assert run_cli("--candidate", commit_b) == 1
     captured = capsys.readouterr()
-    assert f"Candidate: {commit_a}" in captured.err
-    assert f"OK {commit_a}" in captured.out
+    assert f"Candidate: {commit_b}" in captured.err and "CANDIDATE_MISMATCH" in captured.out
+
+
+def test_cli_verify_candidate_required_and_validated(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_dir = tmp_path / "state"
+    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
+
+    def run_cli(*extra: str) -> int:
+        return main(
+            ["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo), *extra]
+        )
+
+    # Missing --candidate -> exit 2 and no OK
+    assert run_cli() == 2
+    captured = capsys.readouterr()
+    assert "OK" not in captured.out and "--candidate" in captured.err
+
+    # Malformed --candidate (not 40-hex) -> exit 2 and no OK
+    for bad in ["not-40-hex", "1" * 39, "1" * 41, "Z" * 40]:
+        assert run_cli("--candidate", bad) == 2
+        captured = capsys.readouterr()
+        assert "OK" not in captured.out and "ERROR" in captured.err
+
+
+def test_verify_bundle_read_and_envelope_errors(tmp_path: Path, repo: Path) -> None:
+    state_dir = tmp_path / "state"
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(state_dir, repo)
+
+    def check(p: Path) -> Any:
+        return verify_bundle(p, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
+
+    # Missing file -> BUNDLE_UNREADABLE (no exception raised)
+    res = check(tmp_path / "nonexistent.json")
+    assert res.ok is False and res.code == "BUNDLE_UNREADABLE"
+
+    # Oversize file -> BUNDLE_UNREADABLE (no exception raised)
+    large = tmp_path / "large.json"
+    large.write_bytes(b" " * (4 * 1024 * 1024 + 1))
+    res = check(large)
+    assert res.ok is False and res.code == "BUNDLE_UNREADABLE"
+
+    # Malformed JSON -> BUNDLE_MALFORMED (no exception raised)
+    malformed = tmp_path / "bad.json"
+    malformed.write_text("{invalid json", encoding="utf-8")
+    res = check(malformed)
+    assert res.ok is False and res.code == "BUNDLE_MALFORMED"
+
+    # Strict JSON duplicate key -> BUNDLE_MALFORMED
+    dup_key = tmp_path / "dup.json"
+    dup_key.write_text('{"a": 1, "a": 2}', encoding="utf-8")
+    res = check(dup_key)
+    assert res.ok is False and res.code == "BUNDLE_MALFORMED"
+
+    # Envelope shape error (extra key) -> ENVELOPE_SHAPE
+    envelope = read_bundle(bundle)
+    envelope["extra_key"] = "forbidden"
+    bad_env_path = tmp_path / "bad_envelope.json"
+    write_bundle(bad_env_path, envelope)
+    res = check(bad_env_path)
+    assert res.ok is False and res.code == "ENVELOPE_SHAPE"

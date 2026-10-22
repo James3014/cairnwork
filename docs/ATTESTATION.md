@@ -144,6 +144,12 @@ Offline verification (`cairnwork_attest.verify.verify_bundle`) validates a DSSE
 attestation bundle against local git repository objects and a trusted Ed25519
 public key. Verification is completely fail-closed and runs with **no network access**.
 
+`verify_bundle` returns a `VerifyResult(ok=bool, code=str, detail=str, statement=dict | None)`
+and never raises exceptions for external input or verification failures. Bundle read
+errors (missing file, oversize file, non-regular file) return `BUNDLE_UNREADABLE`;
+strict-JSON decode failures return `BUNDLE_MALFORMED`; envelope structural problems
+return `ENVELOPE_SHAPE`. Only programmer errors (such as wrong argument types) may raise.
+
 ### What Is Recomputed vs. What Is Trusted
 
 - **What is trusted**:
@@ -151,7 +157,7 @@ public key. Verification is completely fail-closed and runs with **no network ac
   - The local git repository objects (`cat-file` and `diff-tree`).
   - Without a Core identity pin, the signing key vouches for the reported Core identity.
 - **What is recomputed and checked** (in order, failing closed at the first violation):
-  1. `SIGNATURE_INVALID` / `ENVELOPE_SHAPE`: Bundle envelope is read using a single `os.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` call, verified with `fstat` to be a regular file with `st_size <= MAX` (4 MiB), and at most MAX+1 bytes are read from the fd (refusing if more arrives). The envelope must decode as strict JSON containing strictly `payloadType`, `payload`, `signatures` (any extra key → `ENVELOPE_SHAPE`), and its DSSE signature verified over `PAE(payloadType, payload)` using the supplied public key.
+  1. `BUNDLE_UNREADABLE` / `BUNDLE_MALFORMED` / `ENVELOPE_SHAPE` / `SIGNATURE_INVALID`: Bundle envelope is read using a single `os.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` call, verified with `fstat` to be a regular file with `st_size <= MAX` (4 MiB), and at most MAX+1 bytes are read from the fd (refusing if more arrives). Any missing file, oversize file, non-regular file, or read failure returns `BUNDLE_UNREADABLE`. Strict JSON decode failures (including duplicate keys) return `BUNDLE_MALFORMED`. The envelope must decode as strict JSON containing strictly `payloadType`, `payload`, `signatures` (any extra key → `ENVELOPE_SHAPE`), and its DSSE signature verified over `PAE(payloadType, payload)` using the supplied public key (`SIGNATURE_INVALID`).
   2. `STATEMENT_SHAPE`: Statement payload decodes as strict JSON with `_type == "https://in-toto.io/Statement/v1"`, `predicateType == "https://cairnwork.github.io/attestation/verified-change/v0.1"`, and an object `predicate`. Unknown fields inside the signed Statement may stay for forward compatibility.
   3. `SUBJECT_SHAPE`: Statement has exactly one subject entry with a valid 40-hex `gitCommit` digest, and `predicate.base_commit` is a 40-hex commit hash.
   4. `CANDIDATE_MISMATCH`: The Statement's subject `gitCommit` must equal `expected_candidate` (checked right after signature and shape checks). Verifying without pinning the candidate proves only that "some commit was verified".
@@ -174,10 +180,12 @@ cairnwork-attest keygen --state <state-dir>
 cairnwork-attest statement --state <state-dir> --task-id <id> --attempt-id <id> --candidate <sha> --out bundle.json --sign
 
 # 3. Offline verification: verify the signed bundle using public key and git repo
-cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo> [--candidate <sha>] [--core-identity <json>]
+cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo> --candidate <sha> [--core-identity <json>]
 ```
 
-`--candidate <sha>` defaults to `git rev-parse HEAD` of `--repo` (run without shell). The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
+`--candidate <sha>` is required with no default. The caller must decide and pass the candidate commit explicitly (for example, `--candidate "$(git rev-parse HEAD)"`). The tool refuses to guess the candidate from HEAD or the local environment because an attacker-controlled checkout must never be trusted to choose the candidate commit under evaluation.
+
+Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
 
 ## Planned Follow-ups (Phase 2+)
 

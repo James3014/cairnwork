@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from cairnwork_attest.bundle import BundleError, read_bundle, write_bundle
+from cairnwork_attest.bundle import read_bundle, write_bundle
 from cairnwork_attest.cli import main
 from cairnwork_attest.record import _digest, parse_strict_json
 from cairnwork_attest.verify import verify_bundle
@@ -170,9 +170,11 @@ def test_negative_bundle_larger_than_max(tmp_path: Path, repo: Path) -> None:
     large_bundle = tmp_path / "too_large.json"
     large_bundle.write_bytes(b" " * (4 * 1024 * 1024 + 1))
 
-    with pytest.raises(BundleError) as exc:
-        verify_bundle(large_bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
-    assert exc.value.code == "BUNDLE_TOO_LARGE"
+    result = verify_bundle(
+        large_bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
+    assert result.ok is False
+    assert result.code == "BUNDLE_UNREADABLE"
 
 
 def test_cli_verify_with_core_identity_pin(

@@ -47,21 +47,27 @@ def _verify_envelope_and_payload(
     bundle_path: Path, public_key_pem: Path
 ) -> tuple[bytes | None, VerifyResult | None]:
     try:
+        envelope = read_bundle(Path(bundle_path))
+    except BundleError as exc:
+        if exc.code in ("BUNDLE_MALFORMED", "DUPLICATE_KEY"):
+            return None, _fail("BUNDLE_MALFORMED", str(exc))
+        return None, _fail("BUNDLE_UNREADABLE", str(exc))
+    except OSError as exc:
+        return None, _fail("BUNDLE_UNREADABLE", f"cannot read bundle: {exc}")
+
+    try:
         pem_bytes = Path(public_key_pem).read_bytes()
         pubkey = load_public_key_pem(pem_bytes)
     except (KeyFileError, OSError) as exc:
         return None, _fail("SIGNATURE_INVALID", f"cannot load public key: {exc}")
 
-    try:
-        envelope = read_bundle(Path(bundle_path))
-    except BundleError:
-        raise
-    except OSError as exc:
-        return None, _fail("SIGNATURE_INVALID", f"cannot read bundle: {exc}")
-
     verif = verify_envelope(envelope, pubkey)
     if not verif.ok or verif.payload is None:
-        code = "ENVELOPE_SHAPE" if verif.reason == "ENVELOPE_SHAPE" else "SIGNATURE_INVALID"
+        code = (
+            "ENVELOPE_SHAPE"
+            if verif.reason in ("ENVELOPE_SHAPE", "ENVELOPE_NOT_OBJECT")
+            else "SIGNATURE_INVALID"
+        )
         return None, _fail(code, f"signature invalid: {verif.reason}")
 
     return verif.payload, None
@@ -327,7 +333,16 @@ def verify_bundle(
     expected_candidate: str,
     core_identity_pin: Mapping[str, Any] | None = None,
 ) -> VerifyResult:
-    """Verify an attestation bundle against local git objects and a trusted public key."""
+    """Verify an attestation bundle against local git objects and a trusted public key.
+
+    All verification and input errors (missing or unreadable bundle files,
+    oversize bundles, non-regular files, strict-JSON decode failures, envelope
+    structural problems, or cryptographic mismatches) are returned as a
+    VerifyResult with ok=False and the corresponding failure code
+    (e.g. BUNDLE_UNREADABLE, BUNDLE_MALFORMED, ENVELOPE_SHAPE). This function
+    never raises for external input or verification failures; only programmer
+    errors (such as wrong argument types) may raise.
+    """
     payload_bytes, err = _verify_envelope_and_payload(bundle_path, public_key_pem)
     if err is not None:
         return err
