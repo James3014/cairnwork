@@ -183,3 +183,53 @@ def test_the_cli_imports_a_bundle_and_refuses_a_second_import(project, tmp_path)
     code, out = cli(state, *args)
     assert code == 2 and out["error"] == "TEST_BUNDLE_EXISTS"
     assert base  # the parent was read from the mirror, not from the bundle
+
+
+def _strict_state(tmp_path):
+    import json
+
+    state = tmp_path / "wired"
+    state.mkdir(mode=0o700)
+    (state / "config.json").write_text(json.dumps({"test_source": "bundle"}))
+    return state
+
+
+def test_config_test_source_reaches_the_store(tmp_path):
+    import json
+
+    from cairnwork.intake import Intake, IntakeRefused
+
+    state = _strict_state(tmp_path)
+    assert Intake(state).test_store().required is True
+    (state / "config.json").write_text("{}")
+    assert Intake(state).test_store().required is False  # "auto" is the default
+    (state / "config.json").write_text(json.dumps({"test_source": "origin"}))
+    with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
+        Intake(state).test_store()
+
+
+def test_a_strict_issue_never_asks_github_for_an_unimported_commit(tmp_path):
+    from cairnwork.intake import Intake
+    from cairnwork.issue_runner import IssueRefused, _test_base
+
+    class NoGithub:
+        def parents(self, _sha):
+            raise AssertionError("a strict store must not ask GitHub")
+
+    intake = Intake(_strict_state(tmp_path))
+    intake.prepare()
+    store = intake.test_store()
+    with pytest.raises(IssueRefused, match="TASK_TEST_COMMIT_NOT_IMPORTED"):
+        _test_base(NoGithub(), tmp_path, "a" * 40, "b" * 40, store)
+
+
+def test_a_submitted_task_carries_the_strict_store(project, tmp_path):  # noqa: F811
+    from cairnwork.intake import Intake, task_from_payload
+
+    store = Intake(_strict_state(tmp_path)).test_store()
+    payload = {
+        "idempotency_key": "k", "card_hash": "c", "title": "t", "instructions": "i",
+        "repo": str(project), "base_commit": "a" * 40, "allowed_files": ["src/calc.py"],
+        "verifiers": [["v", ["python3", "-m", "pytest"]]],
+    }  # fmt: skip
+    assert task_from_payload(payload, ("tests",), store).test_store.required is True

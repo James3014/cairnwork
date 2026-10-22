@@ -92,6 +92,8 @@ class DeferredStore:
                 if len(heads) != 1 or not OID.fullmatch(heads[0][0]):
                     raise TestCommitRejected("TEST_BUNDLE_SHAPE", "exactly one head is required")
                 sha, ref = heads[0][0], heads[0][1]
+                if not ref.startswith("refs/") and ref != "HEAD":
+                    raise TestCommitRejected("TEST_BUNDLE_SHAPE", "unexpected head name")
                 run_git(scratch, "fetch", "--quiet", "--no-tags", str(bundle), f"{ref}:{HEAD_REF}")
                 if run_git(scratch, "cat-file", "-t", sha).strip() != "commit":
                     raise TestCommitRejected("TEST_BUNDLE_SHAPE", "the head is not a commit")
