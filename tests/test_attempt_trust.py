@@ -224,7 +224,7 @@ def test_main_records_the_gh_it_ran_with(tmp_path, monkeypatch):
 
     recorded = []
     monkeypatch.setattr(Intake, "remember_gh", lambda self, gh: recorded.append(gh))
-    monkeypatch.setattr(ir, "require_bot_gh", lambda gh: None)
+    monkeypatch.setattr(ir, "require_bot_gh", lambda gh, repo, cwd: None)
     monkeypatch.setattr(ir, "_verify_origin", lambda clone, repo: None)
     monkeypatch.setattr(ir, "take", lambda *a: [])
     monkeypatch.setattr(ir, "settle", lambda *a: [])
