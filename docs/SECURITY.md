@@ -34,9 +34,10 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
   matching `^/mp-` only; if `sandbox-exec` definitely rejects the regex form the rule widens to all
   semaphore names, and if the probe is inconclusive (timeout, failure) no semaphore rule is emitted
   and semaphores stay denied. Linux: `/dev/shm` is a fresh private tmpfs (writable, so in-sandbox
-  shared-memory objects work but never reach the host), capped at 64 MiB only when the installed
-  bwrap supports `--size`; without that support it is uncapped. Mach IPC and host shared memory
-  remain denied.
+  shared-memory objects work but never reach the host) capped at 64 MiB, and it is mounted ONLY
+  when the installed bwrap supports `--size`; without that support `/dev/shm` is not mounted at all
+  (reason `BWRAP_TMPFS_SIZE_UNSUPPORTED`) and multiprocessing targets stay unverifiable (fail
+  closed) rather than getting an uncapped tmpfs. Mach IPC and host shared memory remain denied.
 
   **Deployment note:** a verifier write root or state directory must not live under a masked path
   (a masked credential dir such as `~/.config` or `~/.local/state`, or a masked socket tree such as

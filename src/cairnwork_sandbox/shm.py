@@ -35,5 +35,14 @@ def supports_tmpfs_size(binary: str) -> bool:
 
 
 def shm_flags(binary: str) -> list[str]:
-    flags = ["--size", "67108864"] if supports_tmpfs_size(binary) else []
-    return [*flags, "--tmpfs", "/dev/shm"]
+    """Bubblewrap flags to mount a capped /dev/shm, or [] if --size is unsupported."""
+    if not supports_tmpfs_size(binary):
+        return []
+    return ["--size", "67108864", "--tmpfs", "/dev/shm"]
+
+
+def shm_unavailable_reason(binary: str) -> str | None:
+    """Reason why the /dev/shm mount was withheld, or None if available."""
+    if not supports_tmpfs_size(binary):
+        return "BWRAP_TMPFS_SIZE_UNSUPPORTED"
+    return None

@@ -124,10 +124,13 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
     assert lines[netrc - 2 : netrc + 1] == ["--ro-bind", "/dev/null", f"{real_home}/.netrc"]
 
 
-def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path):
+def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path, monkeypatch):
     # Under the dedicated account (#84) the sandbox runs as a uid that cannot enter the owner's
     # 0700 home, so those tmpfs mounts would EPERM; mask_home_credentials=False then masks nothing.
     # The narrow-check still uses the real home, and the write bind is unaffected.
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
     home, work = _home(tmp_path), tmp_path / "work"
     work.mkdir()
     for rel in bwrap._CRED_DIRS:
@@ -290,14 +293,20 @@ def test_x11_socket_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
 
 
 def test_socket_dirs_absent_add_no_tmpfs(tmp_path, monkeypatch):
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
     monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: False)
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
     assert _tmpfs_targets(lines) == ["/dev/shm"]
 
 
-def test_absent_credentials_are_not_masked(tmp_path):
+def test_absent_credentials_are_not_masked(tmp_path, monkeypatch):
     # Masking applies only to paths that exist, so an empty home adds no credential masks (a
     # tmpfs over a non-existent path fails on top of the read-only root).
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
     home = _home(tmp_path)
     lines = bwrap.BACKEND.policy((), (), home=home).text.splitlines()
     assert _tmpfs_targets(lines) == ["/dev/shm"]
@@ -309,10 +318,22 @@ def test_shm_size_precedes_its_tmpfs(monkeypatch):
     # otherwise; a trailing --size broke every Linux sandbox run (#125 CI).
     from cairnwork_sandbox import shm
 
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: False)
+    assert shm.shm_flags("/usr/bin/bwrap") == []
+    assert shm.shm_unavailable_reason("/usr/bin/bwrap") == "BWRAP_TMPFS_SIZE_UNSUPPORTED"
     monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
     assert shm.shm_flags("/usr/bin/bwrap") == ["--size", "67108864", "--tmpfs", "/dev/shm"]
+    assert shm.shm_unavailable_reason("/usr/bin/bwrap") is None
+
+
+def test_policy_omits_shm_when_size_unsupported(monkeypatch, tmp_path):
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(bwrap, "bwrap_path", lambda: "/usr/bin/bwrap")
     monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: False)
-    assert shm.shm_flags("/usr/bin/bwrap") == ["--tmpfs", "/dev/shm"]
+    lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
+    assert "/dev/shm" not in lines
+    assert "--size" not in lines
 
 
 def test_wrap_reads_the_policy_file(monkeypatch, tmp_path):
