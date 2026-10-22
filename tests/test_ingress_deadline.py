@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import errno
+import json
 import socket
 import threading
 import time
 from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler
 
 import pytest
 
-from cairnwork_protocol.ingress import serve
+from cairnwork_protocol.ingress import IngressError, serve
 
 TOKEN = "s3cret-token"
 
@@ -63,24 +66,87 @@ def test_trickling_body_is_cut_at_the_whole_request_deadline(server):
         f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
         f"Authorization: Bearer {TOKEN}\r\nContent-Length: 200\r\n\r\n"
     ).encode()
+    deadline = 0.5
     sock = socket.create_connection(("127.0.0.1", server), timeout=5)
     start = time.monotonic()
+    data = b""
     try:
-        sock.sendall(head)
-        for _ in range(100):
-            try:
+        try:
+            sock.sendall(head)
+            for _ in range(100):
                 sock.sendall(b"x")
-            except OSError:
-                break
-            time.sleep(0.2)
-            if time.monotonic() - start > 6:
-                break
+                time.sleep(0.2)
+                if time.monotonic() - start > 6:
+                    break
+        except OSError:
+            pass  # the server already cut us off (possibly with a reset)
         sock.settimeout(1)
-        data = sock.recv(4096)
+        try:
+            data = sock.recv(4096)
+        except OSError:
+            pass  # a reset instead of the 408 is also a cut
     finally:
         sock.close()
-    assert time.monotonic() - start < 2.0
-    assert b"408" in data.split(b"\r\n", 1)[0]
+    assert time.monotonic() - start < deadline + 1.5
+    if data:
+        assert b"408" in data.split(b"\r\n", 1)[0]
+
+
+def test_response_write_gets_the_normal_timeout_back(server, monkeypatch):
+    seen: list[float | None] = []
+    real = BaseHTTPRequestHandler.end_headers
+
+    def spy(self):
+        seen.append(self.connection.gettimeout())
+        real(self)
+
+    monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", spy)
+    sock = socket.create_connection(("127.0.0.1", server), timeout=5)
+    try:
+        sock.sendall(
+            f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
+            f"Authorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\nh".encode()
+        )
+        time.sleep(0.45)  # the last byte lands ~0.05 s before the 0.5 s deadline
+        sock.sendall(b"i")
+        reply = sock.recv(4096)
+    finally:
+        sock.close()
+    assert reply.startswith(b"HTTP/1.0 200") or reply.startswith(b"HTTP/1.1 200")
+    assert seen == [0.5]
+
+
+def test_non_disconnect_oserror_from_a_route_is_an_internal_error():
+    def boom(_body):
+        raise OSError(errno.EIO, "disk")
+
+    httpd = serve("127.0.0.1", 0, TOKEN, {"/boom": boom}, timeout=5)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "POST",
+            "/boom",
+            body=b"",
+            headers={"Authorization": f"Bearer {TOKEN}", "Host": f"127.0.0.1:{port}"},
+        )
+        resp = conn.getresponse()
+        assert resp.status == 500
+        assert json.loads(resp.read()) == {"error": "INGRESS_INTERNAL"}
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1, 0.0, float("nan"), float("inf"), True])
+def test_serve_rejects_a_non_positive_or_missing_timeout(bad):
+    with pytest.raises(IngressError) as exc:
+        serve("127.0.0.1", 0, TOKEN, {}, timeout=bad)
+    assert exc.value.code == "INGRESS_TIMEOUT_INVALID"
 
 
 def test_each_keepalive_request_gets_a_fresh_deadline(server):

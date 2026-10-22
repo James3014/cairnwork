@@ -15,6 +15,7 @@ import io
 import ipaddress
 import json
 import logging
+import math
 import socket
 import time
 from collections.abc import Callable, Mapping
@@ -144,7 +145,7 @@ class _DeadlineHandler(BaseHTTPRequestHandler):
         self.rfile = io.BufferedReader(_DeadlineReader(self.connection, lambda: self._deadline))
 
     def handle_one_request(self) -> None:
-        self._deadline = time.monotonic() + float(self.timeout or 0)
+        self._deadline = time.monotonic() + cast(float, self.timeout)
         super().handle_one_request()
 
     def handle(self) -> None:
@@ -168,6 +169,9 @@ def _make_handler(
             return "cairnwork"
 
         def _send(self, status: int, payload: Mapping[str, Any], allow: str | None = None) -> None:
+            # The deadline reader leaves the socket timeout at whatever was left of the
+            # deadline; the response write gets the normal per-connection timeout back.
+            self.connection.settimeout(self.timeout)
             data = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -229,6 +233,13 @@ def serve(
 ) -> ThreadingHTTPServer:
     """Build (not start) a loopback-only server; refuses any non-loopback ``host``."""
     check_bind(host, port)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise IngressError("INGRESS_TIMEOUT_INVALID")
     handler = _make_handler(token, routes, timeout)
 
     class Server(ThreadingHTTPServer):
