@@ -36,7 +36,7 @@ p2p._run_once = once
 
 
 class Worker:
-    def run(self, workdir, _task):
+    def run(self, workdir, task):
         slow = step != "n"
         (workdir / "src" / "calc.py").write_text(
             f"SLOW = {slow}\ndef add(a, b):\n    return a + b\n"
