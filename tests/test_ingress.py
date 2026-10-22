@@ -6,10 +6,11 @@ import ast
 import hmac
 import io
 import json
+import socket
 import threading
+import time
 from email.message import Message
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,9 @@ from cairnwork_protocol.ingress import (
     IngressError,
     authorized,
     check_bind,
-    make_handler,
     read_body,
     require_token,
+    serve,
 )
 
 TOKEN = "s3cret-token"
@@ -37,9 +38,7 @@ def server():
     def boom(_body):
         raise RuntimeError("/secret/path exploded")
 
-    httpd = ThreadingHTTPServer(
-        ("127.0.0.1", 0), make_handler(TOKEN, {"/echo": _echo, "/boom": boom})
-    )
+    httpd = serve("127.0.0.1", 0, TOKEN, {"/echo": _echo, "/boom": boom}, timeout=0.5)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield httpd.server_address[1]
@@ -56,10 +55,9 @@ def _post(
     raw_length: str | None = None,
 ):
     conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.putrequest("POST", path)
-    for key, value in (
-        headers if headers is not None else {"Authorization": f"Bearer {TOKEN}"}
-    ).items():
+    sent = headers if headers is not None else {"Authorization": f"Bearer {TOKEN}"}
+    conn.putrequest("POST", path, skip_host="Host" in sent)
+    for key, value in sent.items():
         conn.putheader(key, value)
     if raw_length is not None:
         conn.putheader("Content-Length", raw_length)
@@ -127,7 +125,7 @@ def test_empty_token_fails_at_startup(value):
         require_token(value)
     assert err.value.code == "INGRESS_TOKEN_REQUIRED"
     with pytest.raises(IngressError):
-        make_handler(value, {})
+        serve("127.0.0.1", 0, value, {})
 
 
 def _headers(*lengths):
@@ -145,6 +143,8 @@ def _headers(*lengths):
         (("-1",), "INGRESS_LENGTH_INVALID", 400),
         (("١",), "INGRESS_LENGTH_INVALID", 400),
         (("1", "1"), "INGRESS_LENGTH_INVALID", 400),
+        (("1" * 5000,), "INGRESS_LENGTH_INVALID", 400),
+        (("123456789",), "INGRESS_LENGTH_INVALID", 400),
         ((str((1 << 20) + 1),), "INGRESS_BODY_TOO_LARGE", 413),
     ],
 )
@@ -197,6 +197,10 @@ def test_token_comparison_uses_compare_digest(monkeypatch):
     assert calls == [(bytes, bytes)] * 2
 
 
+_LISTEN_ATTRS = {"listen", "serve_forever", "create_server", "start_server"}
+_LISTEN_MODULES = {"http.server", "socketserver", "wsgiref.simple_server", "xmlrpc.server"}
+
+
 def _listens(path: Path) -> list[str]:
     found = []
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -207,12 +211,27 @@ def _listens(path: Path) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             names = [node.module or ""]
         found += [
-            n for n in names if n.split(".")[0] in {"http", "socketserver"} and n != "http.client"
+            n
+            for n in names
+            if n.split(".")[0] in {"http", "socketserver", "wsgiref", "xmlrpc"}
+            and n not in {"http.client", "xmlrpc.client"}
         ]
-        if isinstance(node, ast.ImportFrom) and node.module == "http":
-            found += [a.name for a in node.names if a.name == "server"]
-        if isinstance(node, ast.Attribute) and node.attr in {"listen", "serve_forever"}:
+        if isinstance(node, ast.ImportFrom) and node.module in {"http", "wsgiref", "xmlrpc"}:
+            found += [a.name for a in node.names if a.name in {"server", "simple_server"}]
+        if isinstance(node, ast.Attribute) and node.attr in _LISTEN_ATTRS:
             found.append(node.attr)
+        if (  # socket.bind((host, port)) / bind("/path"); ledger.bind(key, ...) is not a socket
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "bind"
+            and node.args
+            and isinstance(node.args[0], ast.Tuple | ast.Constant)
+        ):
+            found.append("bind")
+        if isinstance(node, ast.Name) and node.id in _LISTEN_ATTRS:
+            found.append(node.id)
+        if isinstance(node, ast.Constant) and node.value in _LISTEN_MODULES:
+            found.append(node.value)  # importlib.import_module("http.server") and friends
     return found
 
 
@@ -227,7 +246,103 @@ def test_guard_scan_catches_a_planted_listener(tmp_path):
         "from http.server import HTTPServer",
         "from http import server",
         "s.listen(1)",
+        "import socket\nsocket.create_server(('', 1))",
+        "import asyncio\nasyncio.start_server(f, '', 1)",
+        "import wsgiref.simple_server",
+        "from wsgiref.simple_server import make_server",
+        "import xmlrpc.server",
+        "import importlib\nimportlib.import_module('http.server')",
+        "s = x()\ns.bind(('', 1))",
     ):
         planted = tmp_path / "planted.py"
         planted.write_text(source + "\n", encoding="utf-8")
         assert _listens(planted), source
+
+
+def _raw(port: int, payload: bytes, wait: float = 3.0) -> bytes:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=wait)
+    sock.sendall(payload)
+    start, data = time.monotonic(), b""
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:  # peer closed
+                break
+            data += chunk
+    finally:
+        sock.close()
+    assert time.monotonic() - start < wait
+    return data
+
+
+def test_stalled_headers_are_closed(server):
+    _raw(server, b"POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+
+
+def test_short_body_is_closed(server):
+    data = _raw(
+        server,
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\nab".encode(),
+    )
+    assert b"408" in data.split(b"\r\n", 1)[0]
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "example.com", "192.168.1.5"])
+def test_serve_refuses_non_loopback(host):
+    with pytest.raises(IngressError) as err:
+        serve(host, 0, TOKEN, {})
+    assert err.value.code == "INGRESS_BIND_NOT_LOOPBACK"
+
+
+def test_serve_binds_loopback_only(server):
+    assert _post(server)[0] == 200
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT", "DELETE", "OPTIONS", "PATCH", "FOO"])
+def test_other_methods_get_json_405_and_neutral_server_header(server, method):
+    conn = HTTPConnection("127.0.0.1", server, timeout=5)
+    conn.request(method, "/echo")
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    assert resp.status == 405
+    assert json.loads(data) == {"error": "INGRESS_METHOD_NOT_ALLOWED"}
+    assert resp.getheader("Content-Type") == "application/json"
+    assert resp.getheader("Server") == "cairnwork"
+    assert "Python" not in (resp.getheader("Server") or "")
+
+
+def test_malformed_request_line_is_json(server):
+    data = _raw(server, b"POST\r\n\r\n")
+    assert data.endswith(b'{"error": "INGRESS_BAD_REQUEST"}') or b"INGRESS_" in data
+    assert b"<html" not in data.lower()
+
+
+def test_duplicate_authorization_is_refused(server):
+    conn = HTTPConnection("127.0.0.1", server, timeout=5)
+    conn.putrequest("POST", "/echo")
+    conn.putheader("Authorization", f"Bearer {TOKEN}")
+    conn.putheader("Authorization", f"Bearer {TOKEN}")
+    conn.putheader("Content-Length", "2")
+    conn.endheaders(b"{}")
+    resp = conn.getresponse()
+    assert resp.status == 401
+    conn.close()
+
+
+def test_bearer_prefix_is_case_sensitive():
+    assert authorized(f"bearer {TOKEN}", TOKEN) is False
+
+
+@pytest.mark.parametrize("host", ["evil.example", "127.0.0.1:1", "127.0.0.1", "localhost"])
+def test_host_header_allow_list(server, host):
+    status, data = _post(server, headers={"Authorization": f"Bearer {TOKEN}", "Host": host})
+    assert status == 421
+    assert json.loads(data) == {"error": "INGRESS_HOST_NOT_ALLOWED"}
+
+
+@pytest.mark.parametrize("name", ["localhost", "127.0.0.1", "[::1]", "LOCALHOST"])
+def test_host_header_allowed_names(server, name):
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": f"{name}:{server}"}
+    assert _post(server, headers=headers)[0] == 200
