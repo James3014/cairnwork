@@ -65,3 +65,11 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "sandbox" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _no_origin_in_test_repos(monkeypatch):
+    """Test repositories have no origin; tests of the lineage check set the key to true."""
+    from cairnwork import intake
+
+    monkeypatch.setitem(intake.DEFAULT_CONFIG, "require_base_on_main", False)

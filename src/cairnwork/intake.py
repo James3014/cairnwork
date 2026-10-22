@@ -41,6 +41,7 @@ from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.intake_request import IntakeRefused, task_from_payload
 from cairnwork.issue_task import check_test_roots
 from cairnwork.journal import Journal
+from cairnwork.lineage import require_on_main
 from cairnwork.notary import Notary
 from cairnwork.ownership import (
     OWNER,
@@ -83,6 +84,9 @@ DEFAULT_CONFIG = {
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
     "test_source": "auto",
+    # A new task's base must be in origin/main's history (lineage.require_on_main, the #76
+    # class) before it is bound; False only for a repository that has no origin.
+    "require_base_on_main": True,
     # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
     "p2p_selection": "whole-suite",
     "p2p_time_budget_seconds": 300,
@@ -154,6 +158,8 @@ class Intake:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
             if not _has_token(loaded.get("core_token_file")):
                 raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
+        if not isinstance(loaded.get("require_base_on_main", True), bool):
+            raise IntakeRefused("BAD_CONFIG", "require_base_on_main must be true or false")
         if loaded.get("test_source", "auto") not in ("auto", "bundle"):
             raise IntakeRefused("BAD_CONFIG", 'test_source must be "auto" or "bundle"')
         try:
@@ -227,6 +233,11 @@ class Intake:
             raise IntakeRefused("NOT_ACCEPTING", "Cairnwork takes no new tasks")
         if known is None and source.resolve() != task.repo.resolve():
             _mirror_base(task.repo, source, task.base_commit)  # new work only, under the lock
+        if known is None and self.config()["require_base_on_main"]:
+            try:  # fetches origin/main of the repository the task is bound to
+                require_on_main(task.repo, task.base_commit)
+            except RuntimeError as exc:
+                raise IntakeRefused("BASE_NOT_ON_MAIN", str(exc)) from exc
         fd = runlock.shared_fd(ledger.path)
         try:
             bound = ledger.bind(task.idempotency_key, task.request(), OWNER, task.card_hash)
