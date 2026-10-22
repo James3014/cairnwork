@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork import confined
+from cairnwork import confined, verifier_escape
 from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
@@ -149,22 +149,20 @@ class VerifierAccount:
         jailed = backend.wrap(inner, profile) if profile is not None else backend.unconfined(inner)
         return [SUDO, "-n", "-u", self.user, "--", *jailed]
 
-    def count(self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS) -> int:
-        """How many processes the account is running (-1: cannot tell, or ``deadline`` passed).
-
-        Retry (``attempts`` > 1) only after a kill: asking again while a survivor is still alive
-        gives it time to undo the run's traces (Issue #114).
-        """
+    def _list(self, deadline: float | None, attempts: int) -> list[tuple[int, int]] | None:
+        """(pid, ppid) for each process the account runs; None if it cannot be determined within the
+        deadline. ppid is the kernel's parent pid, which the process cannot forge. Retries like
+        count(): slow under load is not "cannot tell" (Issue #114)."""
         # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
         # procps selects all of a user's processes with -U alone and rejects -x.
         tty_flag = ["-x"] if sys.platform == "darwin" else []
-        for _ in range(attempts):  # slow under load is not "cannot tell" (Issue #114)
+        for _ in range(attempts):
             budget = _remaining(deadline)
             if budget <= 0:
                 break
             try:
                 done = subprocess.run(  # noqa: S603 - fixed argv
-                    ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
+                    ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid=,ppid="],
                     capture_output=True,
                     text=True,
                     timeout=min(budget, confined.PS_TIMEOUT_SECONDS),
@@ -173,11 +171,73 @@ class VerifierAccount:
             except (OSError, subprocess.SubprocessError):
                 continue
             if done.returncode in (0, 1) and not done.stderr.strip():  # 1: nothing matched
-                return len(done.stdout.split())
-        return -1  # e.g. an unknown user, which ps also reports with exit 1
+                procs: list[tuple[int, int]] = []
+                for line in done.stdout.split("\n"):
+                    parts = line.split()
+                    if len(parts) == 2 and all(p.isdigit() for p in parts):
+                        procs.append((int(parts[0]), int(parts[1])))
+                return procs
+        return None  # e.g. an unknown user, which ps also reports with exit 1
+
+    def count(self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS) -> int:
+        """How many processes the account is running, launchd system daemons included (-1: cannot
+        tell, or ``deadline`` passed). ``_escaped_count`` decides whether a run left anything.
+
+        Retry (``attempts`` > 1) only after a kill: asking again while a survivor is still alive
+        gives it time to undo the run's traces (Issue #114).
+        """
+        procs = self._list(deadline, attempts)
+        return -1 if procs is None else len(procs)
+
+    def _real_paths(self, pids: list[int]) -> dict[int, str] | None:
+        """Map each pid to its real executable path (proc_pidpath), run AS THE ACCOUNT so it may
+        query its own processes. None if the helper could not run (treated as "cannot tell")."""
+        if not pids:
+            return {}
+        argv = self.wrap(
+            [self.python, "-P", "-c", verifier_escape.PIDPATH_HELPER, *map(str, pids)], None
+        )
+        try:
+            done = subprocess.run(  # noqa: S603 - fixed argv, pids from ps
+                argv, capture_output=True, text=True, timeout=30, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode != 0:
+            return None
+        paths: dict[int, str] = {}
+        for line in done.stdout.split("\n"):
+            if "\t" in line:
+                pid_s, path = line.split("\t", 1)
+                if pid_s.isdigit():
+                    paths[int(pid_s)] = path
+        return paths
+
+    def _escaped_count(
+        self, deadline: float | None = None, attempts: int = confined.PS_ATTEMPTS
+    ) -> int:
+        """Processes the account runs that are NOT a launchd system daemon (-1: cannot tell).
+        A daemon is exempt only when its real executable is allow-listed, its parent is launchd
+        (ppid 1) and it is Apple-signed; anything else — a candidate's leftover process, however it
+        named itself — is counted. If the list or the real paths cannot be read, the count is
+        unknown (fail closed), never zero."""
+        procs = self._list(deadline, attempts)
+        if procs is None:
+            return -1
+        # Only a launchd child (ppid 1) can be an exempt daemon, and proc_pidpath is macOS-only, so
+        # resolve real paths (a separate probe, as the account) ONLY for those pids, and not at all
+        # off Darwin or when none have ppid 1 — every other process simply counts.
+        launchd = [pid for pid, ppid in procs if ppid == 1]
+        if not launchd or sys.platform != "darwin":
+            return len(procs)
+        real = self._real_paths(launchd)
+        if real is None:
+            return -1
+        exempt = sum(1 for pid in launchd if verifier_escape.is_exempt(real.get(pid), 1))
+        return len(procs) - exempt
 
     def reap(self) -> int:
-        """Kill everything the account runs; return how many were running.
+        """Kill everything the account runs; return how many escaped processes were running.
 
         The process list is read once, *before* the kill, with no retry: asking again while a
         survivor is alive would give it time to undo the run's traces and exit before it is
@@ -188,14 +248,16 @@ class VerifierAccount:
         """
         deadline = time.monotonic() + PROBE_DEADLINE_SECONDS
         try:
-            before = self.count(deadline, attempts=1)
+            before = self._escaped_count(deadline, attempts=1)
             left = self._kill_until_clean(5, deadline)
         except (OSError, subprocess.SubprocessError):
             return 1
         return max(before, 0) + (1 if before < 0 or left != 0 else 0)
 
     def kill_all(self, attempts: int = 5) -> int:
-        """SIGKILL every process of the account; return how many are left (-1: unknown)."""
+        """SIGKILL every process of the account; return how many ESCAPED processes are left (-1:
+        unknown). A launchd system daemon is exempt from the count (``_escaped_count``), so one that
+        launchd keeps restarting does not block termination."""
         return self._kill_until_clean(attempts, time.monotonic() + PROBE_DEADLINE_SECONDS)
 
     def _kill_until_clean(self, attempts: int, deadline: float) -> int:
@@ -218,7 +280,7 @@ class VerifierAccount:
                 )
             except subprocess.TimeoutExpired:
                 continue  # a loaded host: ask again
-            left = self.count(deadline)
+            left = self._escaped_count(deadline)
             if left == 0:
                 break
         return left
