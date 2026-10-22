@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cairnwork_attest.dsse import sign, verify
+from cairnwork_attest.dsse import _sign_bytes, verify
 from cairnwork_attest.keys import (
     KeyFileError,
     generate_keypair,
@@ -28,7 +28,7 @@ def test_generate_writes_private_key_0600(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     private_key = load_private_key(tmp_path)
     assert keyid(private_key.public_key()) == keyid(public_key)
-    assert verify(sign(b"{}", private_key), public_key) is True
+    assert verify(_sign_bytes(b"{}", private_key), public_key) is True
 
 
 def test_generate_refuses_to_overwrite(tmp_path: Path) -> None:
@@ -57,6 +57,47 @@ def test_generate_needs_state_dir(tmp_path: Path) -> None:
     assert excinfo.value.code == "STATE_DIR_NOT_FOUND"
 
 
+def test_generate_write_loop_one_byte(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_write = os.write
+
+    def write_one_byte(fd: int, data: bytes | memoryview) -> int:
+        return real_write(fd, bytes(data)[:1])
+
+    monkeypatch.setattr(os, "write", write_one_byte)
+    public_key = generate_keypair(tmp_path)
+    priv = load_private_key(tmp_path)
+    assert keyid(priv.public_key()) == keyid(public_key)
+
+
+def test_generate_failure_leaves_no_stray_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_fsync(fd: int) -> None:
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    with pytest.raises(KeyFileError) as excinfo:
+        generate_keypair(tmp_path)
+    assert excinfo.value.code == "KEY_UNWRITABLE"
+    assert not private_key_path(tmp_path).exists()
+
+
+def test_generate_failure_never_deletes_foreign_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fsync_and_swap(fd: int) -> None:
+        path = private_key_path(tmp_path)
+        path.unlink()
+        path.write_text("foreign content")
+        raise OSError("simulated failure after swap")
+
+    monkeypatch.setattr(os, "fsync", fsync_and_swap)
+    with pytest.raises(KeyFileError) as excinfo:
+        generate_keypair(tmp_path)
+    assert excinfo.value.code == "KEY_UNWRITABLE"
+    assert private_key_path(tmp_path).read_text() == "foreign content"
+
+
 def test_load_missing_key(tmp_path: Path) -> None:
     with pytest.raises(KeyFileError) as excinfo:
         load_private_key(tmp_path)
@@ -70,7 +111,16 @@ def test_load_rejects_loose_permissions(tmp_path: Path, mode: int) -> None:
 
     with pytest.raises(KeyFileError) as excinfo:
         load_private_key(tmp_path)
-    assert excinfo.value.code == "KEY_PERMISSIONS"
+    assert excinfo.value.code == "KEY_PERMISSIONS_LOOSE"
+
+
+def test_load_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    generate_keypair(tmp_path)
+    monkeypatch.setattr(os, "getuid", lambda: 99999)
+
+    with pytest.raises(KeyFileError) as excinfo:
+        load_private_key(tmp_path)
+    assert excinfo.value.code == "KEY_WRONG_OWNER"
 
 
 def test_load_rejects_symlinked_key(tmp_path: Path) -> None:
@@ -78,6 +128,20 @@ def test_load_rejects_symlinked_key(tmp_path: Path) -> None:
     real.mkdir()
     generate_keypair(real)
     private_key_path(tmp_path).symlink_to(private_key_path(real))
+
+    with pytest.raises(KeyFileError) as excinfo:
+        load_private_key(tmp_path)
+    assert excinfo.value.code == "KEY_NOT_REGULAR"
+
+
+def test_load_swapped_symlink_fails_closed(tmp_path: Path) -> None:
+    generate_keypair(tmp_path)
+    real = tmp_path / "real"
+    real.mkdir()
+    generate_keypair(real)
+    path = private_key_path(tmp_path)
+    path.unlink()
+    path.symlink_to(private_key_path(real))
 
     with pytest.raises(KeyFileError) as excinfo:
         load_private_key(tmp_path)

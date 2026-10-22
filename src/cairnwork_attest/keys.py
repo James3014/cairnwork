@@ -8,6 +8,7 @@ an error, so signing fails closed.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import stat
@@ -55,6 +56,23 @@ def load_public_key_pem(pem: str | bytes) -> Ed25519PublicKey:
     return key
 
 
+def _safe_unlink(path: Path, expected_dev: int, expected_ino: int) -> None:
+    try:
+        st = os.lstat(path)
+        if st.st_dev == expected_dev and st.st_ino == expected_ino:
+            path.unlink()
+    except OSError:
+        return
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    dir_fd = os.open(dir_path, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
     """Create a new key pair; write the private key (0600) and return the public key.
 
@@ -76,38 +94,79 @@ def generate_keypair(state_dir: Path) -> Ed25519PublicKey:
         raise KeyFileError(f"key file already exists: {path}", code="KEY_EXISTS") from exc
     except OSError as exc:
         raise KeyFileError(f"cannot create key file: {exc}", code="KEY_UNWRITABLE") from exc
+
     try:
+        created_stat = os.fstat(fd)
+        created_dev = created_stat.st_dev
+        created_ino = created_stat.st_ino
+
         os.fchmod(fd, 0o600)  # independent of umask and of what O_CREAT honoured
-        os.write(fd, pem)
+        offset = 0
+        while offset < len(pem):
+            written = os.write(fd, pem[offset:])
+            if written <= 0:
+                raise OSError("os.write returned 0 bytes")
+            offset += written
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)
-        path.unlink(missing_ok=True)  # never leave a partial key behind
+        _safe_unlink(path, created_dev, created_ino)
         raise KeyFileError(f"cannot write key file: {exc}", code="KEY_UNWRITABLE") from exc
+
     os.close(fd)
+
+    try:
+        _fsync_dir(state_dir)
+    except OSError as exc:
+        _safe_unlink(path, created_dev, created_ino)
+        raise KeyFileError(f"cannot sync directory: {exc}", code="KEY_UNWRITABLE") from exc
+
     return private_key.public_key()
 
 
 def load_private_key(state_dir: Path) -> Ed25519PrivateKey:
     """Load the signing key; reject symlinks, non-regular files and group/other access."""
     path = private_key_path(state_dir)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        st = path.lstat()
+        fd = os.open(path, flags)
     except FileNotFoundError as exc:
+        if os.path.islink(path):
+            raise KeyFileError(
+                f"key file is not a regular file (symlink): {path}", code="KEY_NOT_REGULAR"
+            ) from exc
         raise KeyFileError(f"no signing key at {path}", code="KEY_NOT_FOUND") from exc
     except OSError as exc:
-        raise KeyFileError(f"cannot stat key file: {exc}", code="KEY_UNREADABLE") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise KeyFileError(f"key file is not a regular file: {path}", code="KEY_NOT_REGULAR")
-    if st.st_mode & _LOOSE_BITS:
-        raise KeyFileError(
-            f"key file mode {stat.S_IMODE(st.st_mode):o} is not 0600: {path}",
-            code="KEY_PERMISSIONS",
-        )
+        if exc.errno == errno.ELOOP or os.path.islink(path):
+            raise KeyFileError(
+                f"key file is not a regular file (symlink): {path}", code="KEY_NOT_REGULAR"
+            ) from exc
+        raise KeyFileError(f"cannot open key file: {exc}", code="KEY_UNREADABLE") from exc
+
     try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise KeyFileError(f"cannot read key file: {exc}", code="KEY_UNREADABLE") from exc
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise KeyFileError(f"key file is not a regular file: {path}", code="KEY_NOT_REGULAR")
+        if st.st_mode & _LOOSE_BITS:
+            raise KeyFileError(
+                f"key file mode {stat.S_IMODE(st.st_mode):o} is not 0600: {path}",
+                code="KEY_PERMISSIONS_LOOSE",
+            )
+        if st.st_uid != os.getuid():
+            raise KeyFileError(
+                f"key file owner {st.st_uid} does not match user {os.getuid()}: {path}",
+                code="KEY_WRONG_OWNER",
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+
     try:
         key = serialization.load_pem_private_key(data, password=None)
     except (ValueError, TypeError, UnsupportedAlgorithm) as exc:

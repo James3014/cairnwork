@@ -11,7 +11,7 @@ from cairnwork_attest.dsse import (
     PAYLOAD_TYPE,
     DsseInputError,
     Verification,
-    sign,
+    sign_statement,
     verify,
     verify_envelope,
 )
@@ -68,7 +68,7 @@ __all__ = [
     "load_public_key_pem",
     "public_key_pem",
     "read_record",
-    "sign",
+    "sign_statement",
     "statement_bytes",
     "statement_hash",
     "verify",

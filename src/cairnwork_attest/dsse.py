@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +21,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from cairnwork_attest.keys import keyid
-from cairnwork_attest.record import AttestError
+from cairnwork_attest.record import AttestError, VerifiedRecord
+from cairnwork_attest.statement import Producer, build_statement, statement_bytes
 
 PAYLOAD_TYPE = "application/vnd.in-toto+json"
 ED25519_SIGNATURE_LEN = 64
@@ -40,6 +42,8 @@ KEYID_MISMATCH = "KEYID_MISMATCH"
 BAD_SIGNATURE = "BAD_SIGNATURE"
 PUBLIC_KEY_INVALID = "PUBLIC_KEY_INVALID"
 
+_STRICT_B64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+
 
 class DsseInputError(AttestError):
     code: str = "DSSE_INPUT_ERROR"
@@ -50,6 +54,7 @@ class Verification:
     ok: bool
     reason: str
     payload: bytes | None = None  # set only when ok: the authenticated statement bytes
+    signature_index: int | None = None  # which entry in signatures verified
 
     def __bool__(self) -> bool:
         return self.ok
@@ -61,14 +66,20 @@ def pae(payload_type: str, payload: bytes) -> bytes:
     return b"DSSEv1 %d %b %d %b" % (len(type_bytes), type_bytes, len(payload), payload)
 
 
-def _b64decode(text: str) -> bytes | None:
+def _strict_b64decode(original: str) -> bytes | None:
+    if not isinstance(original, str) or not _STRICT_B64_RE.fullmatch(original):
+        return None
     try:
-        return base64.b64decode(text.encode("ascii"), validate=True)
-    except (binascii.Error, UnicodeEncodeError):
+        raw_ascii = original.encode("ascii")
+        decoded = base64.b64decode(raw_ascii, validate=True)
+        if base64.b64encode(decoded) != raw_ascii:
+            return None
+        return decoded
+    except (binascii.Error, UnicodeEncodeError, ValueError):
         return None
 
 
-def sign(statement_bytes: bytes, private_key: Ed25519PrivateKey) -> dict[str, Any]:
+def _sign_bytes(statement_bytes: bytes, private_key: Ed25519PrivateKey) -> dict[str, Any]:
     """Return a DSSE envelope whose single signature covers PAE(in-toto, statement)."""
     if not isinstance(statement_bytes, bytes):
         raise DsseInputError("statement_bytes must be bytes", code="PAYLOAD_NOT_BYTES")
@@ -85,6 +96,19 @@ def sign(statement_bytes: bytes, private_key: Ed25519PrivateKey) -> dict[str, An
             }
         ],
     }
+
+
+def sign_statement(
+    verified: VerifiedRecord,
+    *,
+    producer: Producer,
+    timestamp: str,
+    private_key: Ed25519PrivateKey,
+) -> dict[str, Any]:
+    """Build a Statement from a verified record and return its signed DSSE envelope."""
+    statement = build_statement(verified, producer=producer, timestamp=timestamp)
+    payload = statement_bytes(statement)
+    return _sign_bytes(payload, private_key)
 
 
 def _fail(reason: str) -> Verification:
@@ -106,7 +130,7 @@ def verify_envelope(envelope: object, public_key: object) -> Verification:
     payload_b64 = envelope.get("payload")
     if not isinstance(payload_b64, str):
         return _fail(PAYLOAD_MISSING)
-    payload = _b64decode(payload_b64)
+    payload = _strict_b64decode(payload_b64)
     if payload is None:
         return _fail(PAYLOAD_NOT_BASE64)
     signatures = envelope.get("signatures")
@@ -117,16 +141,22 @@ def verify_envelope(envelope: object, public_key: object) -> Verification:
 
     expected_keyid = keyid(public_key)
     message = pae(PAYLOAD_TYPE, payload)
-    reason = KEYID_MISMATCH
+
+    # A malformed entry under the TRUSTED keyid must fail closed.
     for entry in signatures:
-        if not isinstance(entry, Mapping):
-            return _fail(SIGNATURE_MALFORMED)
-        entry_keyid, sig_b64 = entry.get("keyid"), entry.get("sig")
-        if not isinstance(entry_keyid, str) or not isinstance(sig_b64, str):
-            return _fail(SIGNATURE_MALFORMED)
-        if entry_keyid != expected_keyid:
+        if isinstance(entry, Mapping) and entry.get("keyid") == expected_keyid:
+            sig_b64 = entry.get("sig")
+            if not isinstance(sig_b64, str):
+                return _fail(SIGNATURE_MALFORMED)
+            if _strict_b64decode(sig_b64) is None:
+                return _fail(SIGNATURE_NOT_BASE64)
+
+    reason = KEYID_MISMATCH
+    for idx, entry in enumerate(signatures):
+        if not isinstance(entry, Mapping) or entry.get("keyid") != expected_keyid:
             continue
-        sig = _b64decode(sig_b64)
+        sig_b64 = entry["sig"]
+        sig = _strict_b64decode(sig_b64)
         if sig is None:
             return _fail(SIGNATURE_NOT_BASE64)
         if len(sig) != ED25519_SIGNATURE_LEN:
@@ -137,7 +167,7 @@ def verify_envelope(envelope: object, public_key: object) -> Verification:
         except InvalidSignature:
             reason = BAD_SIGNATURE
             continue
-        return Verification(ok=True, reason=OK, payload=payload)
+        return Verification(ok=True, reason=OK, payload=payload, signature_index=idx)
     return _fail(reason)
 
 
