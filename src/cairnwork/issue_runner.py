@@ -34,7 +34,14 @@ from typing import Any
 
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
-from cairnwork.issue_publish import TASK_ID, done_text, failure_text, refusal_code, require_bot_gh
+from cairnwork.issue_publish import (
+    TASK_ID,
+    done_text,
+    failure_text,
+    pr_body,
+    refusal_text,
+    require_bot_gh,
+)
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
 from cairnwork.pipeline import TaskRejected
@@ -259,11 +266,7 @@ def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
     """A block Cairnwork cannot take: say why once and take it out of the queue."""
     try:
         github.relabel(number, NEEDS_FIX, QUEUE)
-        github.comment(
-            number,
-            f"Cairnwork 不能接這張：`{refusal_code(exc)}`。修正 `eia-task` 區塊，移除 "
-            f"`{NEEDS_FIX}` 再加上 `{QUEUE}`。測試檔不能列在 allowed_files，要先放在 main。",
-        )
+        github.comment(number, refusal_text(exc, NEEDS_FIX, QUEUE))
     except (RuntimeError, OSError) as gh_error:  # retried on the next pass
         return {"refused": str(exc), "error": f"{type(gh_error).__name__}: {gh_error}"}
     return {"refused": str(exc)}
@@ -318,15 +321,7 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
          "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
-    body = (
-        f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
-        f"- Cairnwork task `{task_id}`，attempt `{attempt}`\n"
-        f"- 候選 commit `{commit}`，Core 判定 VERIFIED（Cairnwork notary）\n"
-        "- 這是 draft：照一般規則審查、檢查全綠後再由審查者合併；Cairnwork 不合併。\n\n"
-        f"<!-- NEXUS_CORE_ISSUE: {number} -->\n<!-- NEXUS_ISSUE_INTENT_V1\n"
-        f'[{{"issue": {number}, "on_merge": "KEEP_OPEN"}}]\nNEXUS_ISSUE_INTENT_V1 -->\n\n'
-        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
-    )
+    body = pr_body(number, task_id, attempt, commit)
     return github.draft_pr(branch, f"Cairnwork: fix for #{number} (Refs #{number})", body)
 
 

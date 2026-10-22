@@ -13,6 +13,7 @@ from test_issue_runner import (
 
 import cairnwork.issue_runner as runner
 from cairnwork.intake import Intake
+from cairnwork.issue_publish import refusal_code
 
 
 def test_a_failure_comment_never_carries_the_detail_or_a_host_path(setup, monkeypatch):
@@ -123,9 +124,9 @@ def test_a_task_id_that_is_not_plain_never_reaches_the_pr_body(setup, monkeypatc
 def test_an_oversized_or_unicode_refusal_code_becomes_refused(code):
     exc = runner.IssueRefused("X", "d")
     exc.code = code
-    assert runner.refusal_code(exc) == "REFUSED"
+    assert refusal_code(exc) == "REFUSED"
     exc.code = "A" * 64
-    assert runner.refusal_code(exc) == "A" * 64
+    assert refusal_code(exc) == "A" * 64
 
 
 def test_the_refusal_comment_has_balanced_backticks():
