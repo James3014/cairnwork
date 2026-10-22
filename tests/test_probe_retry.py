@@ -123,6 +123,21 @@ def test_the_probe_deadline_fails_closed(monkeypatch):
     assert clock["now"] <= va.PROBE_DEADLINE_SECONDS
 
 
+def test_an_expired_deadline_is_not_idle(monkeypatch):
+    """Past the deadline the answer is "unknown" (-1), never 0 (kills a 0-on-expiry mutant)."""
+    ticks = iter(range(0, 10**6, 1000))
+    monkeypatch.setattr(va.time, "monotonic", lambda: float(next(ticks)))
+
+    def never(argv, **kwargs):
+        raise AssertionError("nothing may run after the deadline")
+
+    monkeypatch.setattr(va.subprocess, "run", never)
+    account = va.VerifierAccount(user="nobody")
+    assert account.kill_all() == -1
+    with pytest.raises(va.VerifierAccountError):
+        account.require_idle()
+
+
 def test_mutated_names_are_counted_cut_and_cleaned():
     base: dict[str, Any] = dict(
         ran_sandboxed=True, returncode=0, timed_out=False, survivors=0,
@@ -133,6 +148,27 @@ def test_mutated_names_are_counted_cut_and_cleaned():
     assert reason.startswith("checkout changed (9: ") and "+4 more" in reason
     assert "\n" not in reason and reason.count("f") <= 5 + 2
     assert len(reason) < 5 * 125 + 100
+
+
+def test_a_name_cannot_forge_a_record_or_reorder_the_text():
+    base: dict[str, Any] = dict(
+        ran_sandboxed=True, returncode=0, timed_out=False, survivors=0,
+        log_too_big=False, tests_ran=True,
+    )  # fmt: skip
+    forged = "a] [v9: ok; x:\u202e\u2066\u200f"
+    reason = why_not_passed(**base, mutated=(forged,))
+    assert reason == "checkout changed (1: a? ?v9? ok? x????)"
+    run = _run("v1", False, reason)
+    assert explain([run]).count("[") == 1 and explain([run]).count("]") == 1
+
+
+def test_an_iterator_of_names_is_counted_and_shown():
+    base: dict[str, Any] = dict(
+        ran_sandboxed=True, returncode=0, timed_out=False, survivors=0,
+        log_too_big=False, tests_ran=True,
+    )  # fmt: skip
+    reason = why_not_passed(**base, mutated=(f"f{i}" for i in range(8)))
+    assert reason == "checkout changed (8: f0, f1, f2, f3, f4, +3 more)"
 
 
 def test_every_cause_is_named():

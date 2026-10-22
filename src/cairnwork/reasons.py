@@ -11,15 +11,19 @@ import re
 
 MAX_NAMES = 5
 MAX_NAME_CHARS = 120
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# Control characters, the record delimiters of explain() ("[", "]", ";", ":") and bidi controls.
+_CONTROL = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069\[\];:]"
+)
 
 
 def _names(names) -> str:
     """A count and at most MAX_NAMES names, each cut and stripped of control characters: the
     names are written by the code under test and end up in a recorded reason."""
-    shown = [_CONTROL.sub("?", str(n))[:MAX_NAME_CHARS] for n in list(names)[:MAX_NAMES]]
-    more = len(names) - len(shown)
-    return f"{len(names)}: {', '.join(shown)}" + (f", +{more} more" if more > 0 else "")
+    items = list(names)
+    shown = [_CONTROL.sub("?", str(n))[:MAX_NAME_CHARS] for n in items[:MAX_NAMES]]
+    more = len(items) - len(shown)
+    return f"{len(items)}: {', '.join(shown)}" + (f", +{more} more" if more > 0 else "")
 
 
 def verdict_reason(verified: bool, verdict, recorded) -> str:
