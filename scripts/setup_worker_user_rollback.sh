@@ -29,47 +29,79 @@ for arg in "$@"; do
   esac
 done
 
+die() { echo "ROLLBACK FAILED: $*" >&2; echo "nothing further was changed; fix the cause and run again." >&2; exit 1; }
+
+# Path guard: ROOT's ancestors and ROOT itself must be real directories, and ROOT must be root-owned
+# (setup creates it that way). A symlinked or attacker-owned ROOT could redirect chown/chmod below.
+[[ ! -L /Users/Shared && -d /Users/Shared ]] || die "/Users/Shared is not a real directory"
+if [[ -e "$ROOT" || -L "$ROOT" ]]; then
+  [[ ! -L "$ROOT" && -d "$ROOT" ]] || die "$ROOT is a symlink or not a directory"
+  [[ "$(stat -f %Su "$ROOT")" == root ]] || die "$ROOT is not root-owned; inspect it by hand"
+fi
+
 # 1. sudoers first, so no rule can name a removed account even briefly; also clear any leftover temp.
-[[ -f "$SUDOERS" ]] && rm -f "$SUDOERS" && echo "removed $SUDOERS"
-rm -f "$SUDOERS".tmp.* 2>/dev/null && echo "removed leftover sudoers temp files" || true
+#    (the (N) qualifier makes an unmatched glob expand to nothing instead of aborting zsh.)
+for f in "$SUDOERS" "$SUDOERS".tmp.*(N); do
+  if [[ -e "$f" || -L "$f" ]]; then rm -f "$f" || die "cannot remove $f"; echo "removed $f"; fi
+done
+for f in "$SUDOERS" "$SUDOERS".tmp.*(N); do [[ ! -e "$f" && ! -L "$f" ]] || die "$f still exists"; done
 
 # 2. R2: stop any process still running AS the worker, selected by its uid only (never by name match,
-#    which could kill an unrelated owner process), before the account is deleted.
-if id "$WORKER" >/dev/null 2>&1; then
-  WUID=$(dscl . -read "/Users/$WORKER" UniqueID 2>/dev/null | awk '{print $2}')
-  if [[ -n "${WUID:-}" ]]; then
-    pids=$(ps -U "$WUID" -o pid= 2>/dev/null | tr -s ' ' | tr '\n' ' ')
-    if [[ -n "${pids// /}" ]]; then
-      echo "stopping worker processes (uid $WUID): $pids"
-      kill -TERM ${=pids} 2>/dev/null || true
-      sleep 2
-      kill -KILL $(ps -U "$WUID" -o pid= 2>/dev/null) 2>/dev/null || true
+#    which could kill an unrelated owner process), and verify none is left before the account goes.
+worker_pids() {   # prints pids; pgrep rc 1 = none, anything else is an error
+  local out rc=0
+  out=$(pgrep -U "$1") || rc=$?
+  (( rc <= 1 )) || die "pgrep failed (rc $rc)"
+  print -r -- "$out"
+}
+if dscl . -read "/Users/$WORKER" UniqueID >/dev/null 2>&1; then
+  WUID=$(dscl . -read "/Users/$WORKER" UniqueID | awk '{print $2}')
+  [[ "$WUID" == <-> ]] || die "cannot read the worker uid"
+  (( WUID > 0 )) || die "worker uid is 0"
+  pids=$(worker_pids "$WUID")
+  if [[ -n "$pids" ]]; then
+    echo "stopping worker processes (uid $WUID): ${pids//$'\n'/ }"
+    kill -TERM ${(f)pids} 2>/dev/null || true   # a pid may already have exited; verified below
+    for i in 1 2 3 4 5; do sleep 1; [[ -z "$(worker_pids "$WUID")" ]] && break; done
+    left=$(worker_pids "$WUID")
+    if [[ -n "$left" ]]; then
+      kill -KILL ${(f)left} 2>/dev/null || true
+      sleep 1
     fi
+    [[ -z "$(worker_pids "$WUID")" ]] || die "worker processes still running after KILL: $(worker_pids "$WUID" | tr '\n' ' ')"
   fi
 fi
 
-# 3. R1: hand worker-runs back to the owner's own group and drop group/other access, so a later
-#    account that happens to reuse the deleted RUNGROUP gid inherits nothing from this directory.
-if [[ -d "$RUNS" && ! -L "$RUNS" ]]; then
-  [[ -z "$OWNER" ]] && OWNER=$(stat -f %Su "$RUNS" 2>/dev/null || true)
-  if [[ -n "$OWNER" ]] && id "$OWNER" >/dev/null 2>&1; then
-    chown "$OWNER" "$RUNS" 2>/dev/null || true
-    chgrp "$(id -gn "$OWNER")" "$RUNS" 2>/dev/null || true
-  fi
-  chmod 0700 "$RUNS" 2>/dev/null || true
-  echo "neutralised $RUNS (owner-only, 0700)"
+# 3. R1: hand worker-runs back to the owner's own group and drop group/other access and ACLs, so a later
+#    account that happens to reuse the deleted RUNGROUP gid inherits nothing. Every step must succeed
+#    and is read back; a failure stops the rollback BEFORE the group/account is deleted.
+if [[ -e "$RUNS" || -L "$RUNS" ]]; then
+  [[ ! -L "$RUNS" && -d "$RUNS" ]] || die "$RUNS is a symlink or not a directory"
+  [[ -n "$OWNER" ]] || OWNER=$(stat -f %Su "$RUNS") || die "cannot stat $RUNS"
+  [[ "$OWNER" != root ]] || die "$RUNS is owned by root; pass the owner username explicitly"
+  id "$OWNER" >/dev/null 2>&1 || die "owner '$OWNER' is not an account"
+  OGROUP=$(id -gn "$OWNER") || die "cannot read $OWNER's primary group"
+  chown "$OWNER" "$RUNS" || die "chown $RUNS failed"
+  chgrp "$OGROUP" "$RUNS" || die "chgrp $RUNS failed"
+  chmod 0700 "$RUNS" || die "chmod $RUNS failed"
+  chmod -N "$RUNS" || die "cannot clear ACLs on $RUNS"
+  [[ "$(stat -f '%Su %Sg %Lp' "$RUNS")" == "$OWNER $OGROUP 700" ]] || die "$RUNS is not '$OWNER $OGROUP 700' after neutralising"
+  [[ -z "$(ls -lde "$RUNS" | sed -n '2,$p')" ]] || die "$RUNS still has an ACL"
+  echo "neutralised $RUNS (owner-only, 0700, no ACL)"
 fi
 
 # 4. the worker account
-if id "$WORKER" >/dev/null 2>&1; then
-  dscl . -delete "/Users/$WORKER"
+if dscl . -read "/Users/$WORKER" >/dev/null 2>&1; then
+  dscl . -delete "/Users/$WORKER" || die "cannot delete user $WORKER"
+  dscl . -read "/Users/$WORKER" >/dev/null 2>&1 && die "user $WORKER still exists"
   echo "removed user $WORKER"
 fi
 
 # 5. the two groups
 for g in "$RUNGROUP" "$WGROUP"; do
   if dscl . -read "/Groups/$g" >/dev/null 2>&1; then
-    dscl . -delete "/Groups/$g"
+    dscl . -delete "/Groups/$g" || die "cannot delete group $g"
+    dscl . -read "/Groups/$g" >/dev/null 2>&1 && die "group $g still exists"
     echo "removed group $g"
   fi
 done

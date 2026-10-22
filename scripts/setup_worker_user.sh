@@ -46,14 +46,26 @@ SUDOERS="/etc/sudoers.d/cairnwork-worker"
 [[ "$OWNER" != "root" ]] || { echo "owner must not be root" >&2; exit 1; }
 id "$OWNER" >/dev/null
 
-# S1. refuse to operate on a path an unprivileged agent could have planted as a symlink: a
-#     'worker-runs -> /Users/<owner>' link would otherwise make us chmod the owner's home. Each level
-#     must be either absent or already a real directory, never a symlink.
-require_real_dir_or_absent() {
-  if [[ -L "$1" ]]; then echo "refusing: $1 is a symlink" >&2; exit 1; fi
-  if [[ -e "$1" && ! -d "$1" ]]; then echo "refusing: $1 exists but is not a directory" >&2; exit 1; fi
+die() { echo "refusing: $*" >&2; exit 1; }
+
+# S1. refuse to operate on a path an unprivileged agent could have planted. /Users/Shared is
+#     world-writable (sticky), so ROOT is adopted only if it is absent (we then create it as root) or
+#     already a real directory OWNED BY ROOT: only root can then replace anything beneath it, which
+#     closes the check-to-use window for BIN and RUNS. Children must be absent or real directories
+#     owned by root or the owner, never symlinks.
+require_real_dir_or_absent() {   # $1 path, $2.. allowed owners
+  local p="$1"; shift
+  [[ ! -L "$p" ]] || die "$p is a symlink"
+  [[ ! -e "$p" || -d "$p" ]] || die "$p exists but is not a directory"
+  if [[ -e "$p" ]]; then
+    local o; o=$(stat -f %Su "$p") || die "cannot stat $p"
+    (( ${@[(Ie)$o]} )) || die "$p is owned by '$o' (expected: $*); inspect and remove it by hand"
+  fi
 }
-for p in "$ROOT" "$BIN" "$RUNS"; do require_real_dir_or_absent "$p"; done
+[[ ! -L /Users/Shared && -d /Users/Shared ]] || die "/Users/Shared is not a real directory"
+require_real_dir_or_absent "$ROOT" root
+require_real_dir_or_absent "$BIN" root "$OWNER"
+require_real_dir_or_absent "$RUNS" root "$OWNER"
 
 # a hidden service id below 500 that no user or group uses yet
 free_id() {
@@ -90,6 +102,12 @@ dscl . -create "/Users/$WORKER" Password '*'
 dscl . -create "/Users/$WORKER" PrimaryGroupID "$WGID"
 WUID=$(dscl . -read "/Users/$WORKER" UniqueID | awk '{print $2}')
 (( WUID < 500 )) || { echo "worker uid $WUID is not a service id (<500); refusing" >&2; exit 1; }
+# the worker's uid and gid must belong to no other account/group, or the kernel would treat the worker
+# as that account (e.g. the verifier) for file ownership.
+uid_n=$(dscl . -list /Users UniqueID | awk -v u="$WUID" '$2==u' | wc -l | tr -d ' ')
+[[ "$uid_n" == "1" ]] || die "worker uid $WUID is shared by $uid_n accounts"
+gid_n=$(dscl . -list /Groups PrimaryGroupID | awk -v g="$WGID" '$2==g' | wc -l | tr -d ' ')
+[[ "$gid_n" == "1" ]] || die "worker gid $WGID is shared by $gid_n groups"
 # the worker must not be in staff or admin; confirm its primary group and group memberships
 wprimary=$(dscl . -read "/Users/$WORKER" PrimaryGroupID | awk '{print $2}')
 [[ "$wprimary" == "$WGID" ]] || { echo "worker primary group is $wprimary, not $WGROUP ($WGID)" >&2; exit 1; }
@@ -110,32 +128,56 @@ members=$(dscl . -read "/Groups/$RUNGROUP" GroupMembership 2>/dev/null \
 expected=$(printf '%s\n' "$OWNER" "$WORKER" | sort | tr '\n' ' ')
 [[ "$members" == "$expected" ]] \
   || { echo "run group members are {$members}, expected {$expected}; refusing" >&2; exit 1; }
-nested=$(dscl . -read "/Groups/$RUNGROUP" NestedGroups 2>/dev/null \
-  | sed 's/^NestedGroups://' | tr -d ' ' || true)   # the key is normally absent -> non-zero, that is fine
-[[ -z "$nested" ]] || { echo "run group has nested groups ($nested); refusing" >&2; exit 1; }
-# creating the account may have added it to the file-sharing group; remove it (it grants share access).
-if dseditgroup -o checkmember -m "$WORKER" com.apple.sharepoint.group.1 >/dev/null 2>&1; then
-  dseditgroup -o edit -d "$WORKER" -t user com.apple.sharepoint.group.1 2>/dev/null || true
-  echo "note: removed $WORKER from com.apple.sharepoint.group.1"
+# the NestedGroups key is normally absent (dscl exits non-zero with "No such key"); any other failure
+# or any value is refused.
+if nested=$(dscl . -read "/Groups/$RUNGROUP" NestedGroups 2>&1); then
+  die "run group has nested groups ($nested)"
+else
+  [[ "$nested" == *"No such key"* ]] || die "cannot read NestedGroups of $RUNGROUP: $nested"
 fi
+# creating the account may have added it to the file-sharing group; remove it and READ IT BACK.
+for g in com.apple.sharepoint.group.1; do
+  if dscl . -search /Groups GroupMembership "$WORKER" | awk '/GroupMembership/{print $1}' | grep -qx "$g"; then
+    dseditgroup -o edit -d "$WORKER" -t user "$g" || die "could not remove $WORKER from $g"
+    echo "note: removed $WORKER from $g"
+  fi
+done
+dscacheutil -flushcache 2>/dev/null || true
+# G. the worker's complete group set must be exactly {WGROUP, RUNGROUP}: any other group (cairnwork,
+#    which owns the verifier's logs, sharepoint, a custom group) could grant read access to protected
+#    data. Check both the directory's direct memberships and the effective set from id(1).
+direct=$(dscl . -search /Groups GroupMembership "$WORKER" | awk '/GroupMembership/{print $1}' | sort | tr '\n' ' ')
+[[ "$direct" == "$RUNGROUP " ]] || die "worker is a direct member of {$direct}, expected only {$RUNGROUP}"
+effective=$(id -Gn "$WORKER" | tr ' ' '\n' | sort | tr '\n' ' ')
+want=$(printf '%s\n' "$WGROUP" "$RUNGROUP" | sort | tr '\n' ' ')
+[[ "$effective" == "$want" ]] || die "worker effective groups are {$effective}, expected {$want}"
 
 # 4. directories, all under the worker's own root (nothing touches the verifier's /Users/Shared/cairnwork).
-mkdir -p "$RUNS" "$BIN"
-for p in "$ROOT" "$BIN" "$RUNS"; do
-  [[ -d "$p" && ! -L "$p" ]] || { echo "refusing: $p is not a real directory after mkdir" >&2; exit 1; }
-done
-#    ROOT: root-owned, world-readable+traversable, no world write (root:wheel 0755).
-chown root:wheel "$ROOT"
-chmod 0755 "$ROOT"
+umask 022
+[[ -d "$ROOT" ]] || mkdir "$ROOT"            # created by root, so root-owned from the first instant
+chown root:wheel "$ROOT"; chmod 0755 "$ROOT"; chmod -N "$ROOT"
+[[ "$(stat -f %Su "$ROOT")" == root && ! -L "$ROOT" ]] || die "$ROOT is not a root-owned real directory"
+for p in "$BIN" "$RUNS"; do [[ -d "$p" ]] || mkdir "$p"; done
+for p in "$BIN" "$RUNS"; do [[ -d "$p" && ! -L "$p" ]] || die "$p is not a real directory after mkdir"; done
 #    bin: owner-owned 0755 (the dispatcher installs the wrapper there; the worker cannot modify it).
-chown "$OWNER" "$BIN"
-chmod 0755 "$BIN"
+chown "$OWNER" "$BIN"; chmod 0755 "$BIN"
 #    worker-runs: owner-owned, group RUNGROUP, setgid + 2710 — the owner (dispatcher) creates/renames
 #    per-run dirs; the worker's group may only TRAVERSE into a run dir it is handed, not write the
 #    parent, so it cannot list, rename or replace a sibling run's directory.
-chown "$OWNER" "$RUNS"
-chgrp "$RUNGROUP" "$RUNS"
-chmod 2710 "$RUNS"
+chown "$OWNER" "$RUNS"; chgrp "$RUNGROUP" "$RUNS"; chmod 2710 "$RUNS"
+#    ACLs survive chmod and can grant the worker write access: strip them, then verify every directory
+#    (owner, group, mode, no ACL, no symlink) before the sudoers rule exists.
+for p in "$BIN" "$RUNS"; do chmod -N "$p"; done
+verify_dir() {   # $1 path  $2 owner  $3 group  $4 mode
+  local st; st=$(stat -f '%Su %Sg %Lp' "$1") || die "cannot stat $1"
+  [[ "$st" == "$2 $3 $4" ]] || die "$1 is '$st', expected '$2 $3 $4'"
+  [[ ! -L "$1" ]] || die "$1 is a symlink"
+  [[ -z "$(ls -lde "$1" | sed -n '2,$p')" && "$(ls -ld "$1" | cut -c11)" != "+" ]] || die "$1 still has an ACL"
+}
+verify_dir "$ROOT" root wheel 755
+verify_dir "$BIN" "$OWNER" "$(stat -f %Sg "$BIN")" 755
+[[ "$(stat -f %Sg "$BIN")" != "$RUNGROUP" && "$(stat -f %Sg "$BIN")" != "$WGROUP" ]] || die "$BIN is group-owned by a worker group"
+verify_dir "$RUNS" "$OWNER" "$RUNGROUP" 2710
 
 # 5. the owner may run, as the worker account, ONLY the wrapper (never ALL). The wrapper validates
 #    that every path it is given is inside worker-runs, then execs sandbox-exec on agy.
