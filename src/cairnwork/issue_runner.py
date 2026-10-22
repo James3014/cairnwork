@@ -378,7 +378,6 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))
         return 3
     intake.prepare()
-    intake.remember_gh(args.gh)
     fd = os.open(intake.state / "issues.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         try:
@@ -386,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         except BlockingIOError:
             print(json.dumps({"error": "BUSY", "detail": "another run-once is working"}))
             return 2
+        intake.remember_gh(args.gh)
         result = {"take": take(intake, github, clone), "settle": settle(intake, github, clone)}
     finally:
         os.close(fd)

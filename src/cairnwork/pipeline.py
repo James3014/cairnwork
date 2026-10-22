@@ -5,12 +5,9 @@ step that fails leaves the task FAILED (or not COMPLETED) with a reason, and onl
 that is verified for the exact candidate commit makes it COMPLETED.
 
 Any exception after binding is recorded as FAILED with an ``INFRA_ERROR`` reason; a crash of this
-process itself leaves the task DISPATCHED until restart recovery (preserved behavior #21) exists.
-A FAILED task keeps its card: to try again, move it to SUPERSEDED (``OwnershipLedger.set_status``)
-and submit with a new idempotency key.
-
-Workers are pluggable (``Worker``): one edits files in its clone and must have exited when ``run``
-returns; Cairnwork snapshots the allowed files into a commit itself (see snapshot.py).
+process leaves the task DISPATCHED until restart recovery. A FAILED task keeps its card: to retry,
+SUPERSEDE it (``OwnershipLedger.set_status``), then submit anew. A ``Worker``
+edits its clone and must have exited when ``run`` returns.
 """
 
 from __future__ import annotations
@@ -348,7 +345,10 @@ def judge_candidate(
 
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
     """verifying = (verifier account or None, verifier Python or None)."""
-    if task.before_attempt and (refusal := task.before_attempt()):  # trust re-check, every attempt
+    gate = task.before_attempt or (  # trust re-check per attempt; a gh: card with no gate refuses
+        lambda: "TRUST_CHANGED_BEFORE_DISPATCH" * task.card_hash.startswith("gh:")
+    )
+    if refusal := gate():
         result.reason = refusal
         return
     if task.test_commit:

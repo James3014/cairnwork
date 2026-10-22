@@ -86,13 +86,19 @@ def test_identity_changed_between_attempt_one_and_two_refuses_attempt_two(
     assert reasons[1] == runner.TRUST_CHANGED and CountingWorker.runs == 1
 
 
-@pytest.mark.parametrize("body_sha, trust", [("cd" * 32, ""), (SHA, "AUTHOR_UNTRUSTED")])
-def test_the_gate_refuses_a_changed_block_or_distrust(monkeypatch, body_sha, trust):
+@pytest.mark.parametrize(
+    "body_sha, trust, asked_trust",
+    [("cd" * 32, "", False), (SHA, "AUTHOR_UNTRUSTED", True)],
+    ids=["hash-mismatch", "distrust"],
+)
+def test_the_gate_refuses_a_changed_block_or_distrust(monkeypatch, body_sha, trust, asked_trust):
     monkeypatch.setattr(
-        runner, "parse_task_block", lambda b, r: SimpleNamespace(block_sha256=body_sha)
+        gate_module, "parse_task_block", lambda b, r: SimpleNamespace(block_sha256=body_sha)
     )
-    github = fake(current=lambda n: {"body": "x"}, trust=lambda n, label: trust)
+    asked = []
+    github = fake(current=lambda n: {"body": "x"}, trust=lambda n, label: asked.append(1) or trust)
     assert gate_module.attempt_gate(github, 7, SHA, ("tests",))() == runner.TRUST_CHANGED
+    assert bool(asked) is asked_trust  # a mismatch refuses before trust is asked; distrust asks
 
 
 def test_the_gate_passes_an_unchanged_trusted_issue(monkeypatch):
@@ -169,5 +175,80 @@ def test_the_issue_runner_records_its_gh_in_the_state_config(tmp_path):
     intake = Intake(tmp_path / "state")
     intake.prepare()
     (intake.state / "config.json").write_text('{"model": "m"}')
-    intake.remember_gh("/opt/bot/gh")
-    assert intake.config()["gh"] == "/opt/bot/gh" and intake.config()["model"] == "m"
+    intake.remember_gh("/bin/sh")
+    assert intake.config()["gh"] == "/bin/sh" and intake.config()["model"] == "m"
+
+
+def test_a_config_without_test_roots_ends_the_task_refusing_not_stranded(monkeypatch, project):
+    import cairnwork.route as route
+
+    seen = {}
+    monkeypatch.setattr(
+        route, "run_bound_task", lambda *a, **k: seen.update(task=a[0]) or TaskResult("t", "a", "F")
+    )
+    monkeypatch.setattr(route, "agy_dispatch", lambda config: None)
+    config = {"model": "m", "agy": "agy", "verifier_python": None, "gh": None}  # no test_roots
+    intake = fake(
+        config=lambda: config,
+        load_request=lambda tid: replace(task(project), card_hash="gh:James3014/demo#7:" + SHA),
+        verifier_account=lambda: None,
+        ledger=None,
+        notary=None,
+        journal=None,
+        run_root=None,
+    )
+    route._run(intake, "t1")
+    assert callable(seen["task"].before_attempt)
+
+
+def test_run_bound_task_gates_an_issue_task_that_arrives_without_a_gate(project, stores, tmp_path):
+    seen = []
+
+    class Spy:
+        def run(self, workdir, task):
+            seen.append(workdir)
+
+    ledger, notary, journal = stores
+    spec = replace(task(project), card_hash="gh:James3014/demo#7:" + SHA, before_attempt=None)
+    bound = ledger.bind(spec.idempotency_key, spec.request(), "cairnwork", spec.card_hash)
+    result = run_bound_task(
+        spec, bound.record.task_id, ledger=ledger, notary=notary, journal=journal,
+        worker=Spy(), run_root=tmp_path / "runs",
+    )  # fmt: skip
+    assert result.status == "FAILED" and result.reason == runner.TRUST_CHANGED and seen == []
+
+
+def test_main_records_the_gh_it_ran_with(tmp_path, monkeypatch):
+    import cairnwork.issue_runner as ir
+    from cairnwork.intake import Intake
+
+    recorded = []
+    monkeypatch.setattr(Intake, "remember_gh", lambda self, gh: recorded.append(gh))
+    monkeypatch.setattr(ir, "require_bot_gh", lambda gh: None)
+    monkeypatch.setattr(ir, "_verify_origin", lambda clone, repo: None)
+    monkeypatch.setattr(ir, "take", lambda *a: [])
+    monkeypatch.setattr(ir, "settle", lambda *a: [])
+    ir.main(["--state", str(tmp_path / "s"), "--gh", "/opt/bot/gh", "--repo", "a/b",
+             "--clone", str(tmp_path), "run-once"])  # fmt: skip
+    assert recorded == ["/opt/bot/gh"]
+
+
+def test_a_relative_gh_in_the_state_config_is_bad_config(tmp_path):
+    from cairnwork.intake import Intake, IntakeRefused
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    (intake.state / "config.json").write_text('{"gh": "gh"}')
+    with pytest.raises(IntakeRefused) as caught:
+        intake.config()
+    assert caught.value.code == "BAD_CONFIG"
+
+
+def test_remember_gh_skips_what_it_cannot_name_absolutely(tmp_path):
+    from cairnwork.intake import Intake
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    (intake.state / "config.json").write_text('{"model": "m"}')
+    intake.remember_gh("no-such-gh-binary-xyz")
+    assert "gh" not in intake.config() or intake.config()["gh"] is None

@@ -26,6 +26,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -175,12 +176,16 @@ class Intake:
         return {**DEFAULT_CONFIG, **loaded}
 
     def remember_gh(self, gh: str) -> None:
-        """Record the gh the Issue runner uses, for the runner that submit starts."""
+        """Record the (absolute) gh the Issue runner uses, for the runner that submit starts.
+        Call it under issues.lock: the config.json write is not otherwise serialised."""
+        resolved = shutil.which(gh)
+        if resolved is None or not os.path.isabs(resolved):
+            return  # a gh we cannot name absolutely is not recorded (it would be BAD_CONFIG)
         path = self.state / "config.json"
         loaded = json.loads(path.read_text()) if path.exists() else {}
-        if isinstance(loaded, dict) and loaded.get("gh") != gh:
+        if isinstance(loaded, dict) and loaded.get("gh") != resolved:
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({**loaded, "gh": gh}, sort_keys=True))
+            tmp.write_text(json.dumps({**loaded, "gh": resolved}, sort_keys=True))
             tmp.chmod(0o600)
             tmp.replace(path)
 

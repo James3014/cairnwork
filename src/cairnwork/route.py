@@ -129,17 +129,14 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     gate = None
     if task.card_hash.startswith("gh:"):  # an Issue task: re-check its trust before the attempt
         found = re.fullmatch(r"gh:(.+)#(\d+):(\w+)", task.card_hash)
-        if found is None:
-            gate = lambda: TRUST_CHANGED  # noqa: E731 - unreadable link: refuse
-        else:
+        try:
+            if found is None:
+                raise ValueError("unreadable link")
             repo, number, block = found.groups()
-            roots = tuple(config["test_roots"])
-            try:
-                github = GitHub(config["gh"] or DEFAULT_GH, repo)
-            except ValueError:  # a repo this card cannot name: refuse, the task ends FAILED
-                gate = lambda: TRUST_CHANGED  # noqa: E731
-            else:
-                gate = attempt_gate(github, int(number), block, roots)
+            roots = tuple(config.get("test_roots", ()))
+            gate = attempt_gate(GitHub(config["gh"] or DEFAULT_GH, repo), int(number), block, roots)
+        except Exception:  # noqa: BLE001 - any failure: refuse, the task ends FAILED
+            gate = lambda: TRUST_CHANGED  # noqa: E731
     result = run_bound_task(
         replace(task, before_attempt=gate),
         task_id,
