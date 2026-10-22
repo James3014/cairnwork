@@ -40,7 +40,7 @@ def test_process_environments_stay_unknown_after_a_timeout(monkeypatch):
 
 
 def test_account_count_is_read_after_a_timeout(monkeypatch):
-    ok = SimpleNamespace(returncode=0, stdout="11\n12\n", stderr="")
+    ok = SimpleNamespace(returncode=0, stdout="11 1\n12 1\n", stderr="")  # ps -o pid=,ppid=
     calls = _flaky(monkeypatch, va, 2, ok)
     assert va.VerifierAccount(user="nobody").count() == 2
     assert len(calls) == 3
@@ -89,8 +89,9 @@ def _fake_account(ps_before, ps_after):
 
 def test_an_escaped_process_that_exits_during_the_retry_window_still_counts(monkeypatch):
     """ps saw a process before the kill; after the kill it is gone. It still counts (kills a
-    'reap ignores what was seen before' mutant)."""
-    fake, _ = _fake_account("777\n", [""])
+    'reap ignores what was seen before' mutant). ppid 500 is a normal escape (not launchd), so no
+    proc_pidpath exemption probe fires."""
+    fake, _ = _fake_account("777 500\n", [""])  # ps -o pid=,ppid=
     monkeypatch.setattr(va.subprocess, "run", fake)
     assert va.VerifierAccount(user="nobody").reap() == 1
 

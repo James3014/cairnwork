@@ -292,10 +292,11 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     """The account does not own the checkout; git in it must still work (Nexus-new #2760
     pilot: 'detected dubious ownership'), and only that checkout is trusted.
 
-    Checked through the test outcome and the untouched checkout, not the whole
-    observation: with a full Xcode (macOS CI) /usr/bin/git goes through xcodebuild, and
-    launchd starts the account's /usr/sbin/distnoted, which the run counts as a process
-    left behind (cairnwork#37). Hosts with only the Command Line Tools do not start it.
+    The whole observation must pass, including on a full-Xcode host (macOS CI): there
+    /usr/bin/git goes through xcodebuild and launchd starts the account's
+    /usr/sbin/distnoted, which cairnwork#37 now exempts from the escaped-process count (by
+    its real path + ppid 1 + Apple signature), so a harmless launchd daemon no longer fails
+    the run. Hosts with only the Command Line Tools never start it.
     """
     code = (
         "import os, subprocess\n"
@@ -315,6 +316,7 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     log = result.log_path.read_text()
     assert result.outcomes == {"tests/test_git.py::test_git": "passed"}, log
     assert result.returncode == 0 and not result.timed_out and result.mutated == (), log
+    assert result.observation.passed, log  # cairnwork#37: launchd's distnoted is not an escape
 
 
 def test_account_may_write_next_to_the_repo_but_not_move_the_checkout(project):

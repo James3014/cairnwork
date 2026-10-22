@@ -13,7 +13,7 @@ from test_issue_runner import (
 
 import cairnwork.issue_runner as runner
 from cairnwork.intake import Intake
-from cairnwork.issue_publish import refusal_code
+from cairnwork.issue_publish import refusal_code, require_bot_gh
 
 
 def test_a_failure_comment_never_carries_the_detail_or_a_host_path(setup, monkeypatch):
@@ -59,11 +59,60 @@ def test_a_refusal_comment_carries_only_the_code(setup):
     assert "@someone" not in github.comments[-1][1] and "`REFUSED`" in github.comments[-1][1]
 
 
-def test_a_gh_that_is_not_the_bot_wrapper_is_refused(setup, capsys):
+def _wrapper(tmp_path, body, name="nexus-agent-gh"):
+    path = tmp_path / name
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def _main(setup, gh):
     argv = ["--state", str(setup["intake"].state), "--repo", "James3014/demo"]
-    code = runner.main([*argv, "--clone", str(setup["clone"]), "--gh", "/usr/bin/gh", "run-once"])
-    assert code == 3 and "GH_IDENTITY_NOT_BOT" in capsys.readouterr().out
-    assert runner.DEFAULT_GH.endswith("/nexus-agent-gh")  # the default passes the check
+    return runner.main([*argv, "--clone", str(setup["clone"]), "--gh", gh, "run-once"])
+
+
+def test_a_gh_that_is_not_the_bot_wrapper_is_refused(setup, capsys, monkeypatch):
+    monkeypatch.setattr(runner, "require_bot_gh", require_bot_gh)  # the fixture stubs it out
+    assert _main(setup, "/usr/bin/gh") == 3
+    assert "GH_IDENTITY_NOT_BOT" in capsys.readouterr().out
+    assert runner.DEFAULT_GH.endswith("/nexus-agent-gh")  # the default passes the name check
+
+
+def test_a_wrapper_that_resolves_to_a_personal_user_is_refused(
+    setup, tmp_path, capsys, monkeypatch
+):
+    # Right name, wrong identity: a personal token gets 403 on /installation/repositories.
+    monkeypatch.setattr(runner, "require_bot_gh", require_bot_gh)
+    gh = _wrapper(
+        tmp_path, 'echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1'
+    )
+    assert _main(setup, gh) == 3
+    assert "GH_IDENTITY_NOT_BOT" in capsys.readouterr().out
+    assert not (setup["intake"].state / "issues.lock").exists()  # refused before any state
+
+
+@pytest.mark.parametrize("out", ["", "James3014/other\n", "notJames3014/demo\n"])
+def test_a_probe_that_does_not_list_the_repo_is_refused(setup, tmp_path, out):
+    gh = _wrapper(tmp_path, f"printf '{out}'")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_a_wrapper_that_cannot_run_is_refused(setup, tmp_path):
+    gh = str(tmp_path / "nexus-agent-gh")  # does not exist
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_the_installation_token_that_lists_the_repo_passes(setup, tmp_path):
+    gh = _wrapper(tmp_path, 'echo "James3014/other"; echo "James3014/demo"')
+    require_bot_gh(gh, "James3014/demo", setup["clone"])
+    args = _wrapper(
+        tmp_path,
+        '[ "$1 $2" = "api /installation/repositories" ] && echo James3014/demo',
+        "nexus-agent-gh",
+    )
+    require_bot_gh(args, "James3014/demo", setup["clone"])  # it asks the installation endpoint
 
 
 def test_a_draft_pr_body_has_only_validated_fields(setup, monkeypatch):
@@ -134,3 +183,28 @@ def test_the_refusal_comment_has_balanced_backticks():
     runner._needs_fix(github, 7, runner.IssueRefused("TASK_BAD", "d"))
     text = github.comments[-1][1]
     assert text.count("`") % 2 == 0 and "```" not in text
+
+
+def test_a_probe_that_lists_the_repo_but_exits_nonzero_is_refused(setup, tmp_path):
+    gh = _wrapper(tmp_path, "echo James3014/demo; exit 1")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_repo_names_compare_case_insensitively_but_as_whole_lines(setup, tmp_path):
+    require_bot_gh(_wrapper(tmp_path, "echo james3014/DEMO"), "James3014/demo", setup["clone"])
+    gh = _wrapper(tmp_path, "echo James3014/demo-extra")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_the_probe_pages_through_every_installation_repo(setup, tmp_path):
+    body = 'case " $* " in *" --paginate "*) echo James3014/demo;; esac'
+    require_bot_gh(_wrapper(tmp_path, body), "James3014/demo", setup["clone"])
+
+
+def test_a_probe_that_hangs_is_refused(setup, tmp_path, monkeypatch):
+    monkeypatch.setattr("cairnwork.issue_publish.PROBE_TIMEOUT", 0.5)
+    gh = _wrapper(tmp_path, "sleep 5; echo James3014/demo")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])

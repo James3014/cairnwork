@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 from conftest import commit_change, git
+from issue_helpers import _completed
 
 import cairnwork.intake as intake_module
 import cairnwork.issue_runner as runner
@@ -85,6 +86,7 @@ def setup(repo, tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner, "_verify_origin", lambda clone, repo: f"https://github.com/{repo}.git"
     )
+    monkeypatch.setattr(runner, "require_bot_gh", lambda gh, repo, cwd: None)  # no network here
     monkeypatch.setattr(intake_module, "_spawn", lambda argv, **kw: started.append(argv))
     intake = Intake(tmp_path / "state")
     intake.set_accepting(True)
@@ -218,17 +220,6 @@ def test_completed_without_core_verification_opens_no_pr(setup, monkeypatch):
     )
     runner.settle(setup["intake"], github, setup["clone"])
     assert github.prs == [] and github.labels[7] == {runner.FAILED_LABEL}
-
-
-def _completed(setup, taken, commit):
-    return lambda self, **kw: {
-        "task_id": taken["task_id"],
-        "status": "COMPLETED",
-        "core_verified": True,
-        "attempt_id": "a" + "1" * 16,
-        "candidate_commit": commit,
-        "detail": "",
-    }
 
 
 def test_a_candidate_outside_the_allowed_files_is_not_pushed(setup, monkeypatch):

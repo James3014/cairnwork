@@ -39,6 +39,14 @@ class AcceptanceSpec:
     allow_deletions: bool = False
 
 
+def change_manifest(change: GitChangeSet) -> dict[str, Any]:
+    return {
+        "source_tree": f"git-tree:{change.base_tree}",
+        "target_tree": f"git-tree:{change.candidate_tree}",
+        "entries": [entry.to_core() for entry in change.entries],
+    }
+
+
 def build_core_request(
     spec: AcceptanceSpec,
     change: GitChangeSet,
@@ -46,11 +54,7 @@ def build_core_request(
     *,
     attempt_id: str,
 ) -> dict[str, Any]:
-    manifest = {
-        "source_tree": f"git-tree:{change.base_tree}",
-        "target_tree": f"git-tree:{change.candidate_tree}",
-        "entries": [entry.to_core() for entry in change.entries],
-    }
+    manifest = change_manifest(change)
     contract = {
         "contract_id": spec.contract_id,
         "requirements_hash": spec.requirements_hash,
