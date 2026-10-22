@@ -229,7 +229,7 @@ def test_a_mirror_keeps_every_write_out_of_the_callers_repository(state, project
     assert code == 0 and again["duplicate"] is True and again["task_id"] == out["task_id"]
     bad = {**request(project, key="gw-2"), "base_commit": "d" * 40}
     code, refused = route(state, "submit", stdin=bad)
-    assert code == 2 and refused["error"] == "BAD_REQUEST"
+    assert code == 2 and refused["error"] == "TASK_PATH_UNREADABLE"  # refused before the fetch
 
 
 def test_a_missing_mirror_is_a_config_error(state, project, tmp_path):

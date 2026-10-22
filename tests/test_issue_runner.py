@@ -63,7 +63,12 @@ class FakeGitHub(runner.GitHub):
 @pytest.fixture
 def setup(repo, tmp_path, monkeypatch):
     commit_change(
-        repo, {"src/calc.py": "x = 1\n", "tests/test_calc.py": "def test_x():\n    pass\n"}
+        repo,
+        {
+            "src/calc.py": "x = 1\n",
+            "tests/test_calc.py": "def test_x():\n    pass\n",
+            "pkg/tests/test_calc.py": "def test_x():\n    pass\n",
+        },
     )
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)

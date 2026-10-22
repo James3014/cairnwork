@@ -38,6 +38,7 @@ from cairnwork.ownership import (
 from cairnwork.pipeline import TaskRejected, check_task, run_bound_task
 from cairnwork.recovery import recover
 from cairnwork.runlock import RunLockBusy
+from cairnwork.taskpaths import check_submitted_paths
 from cairnwork.workers.agy import AgyWorker
 from cairnwork.workers.agy_dispatch import Dispatch
 
@@ -80,10 +81,9 @@ def _dispatch(intake: Intake, args) -> Any:
         if args.command == "check":  # no binding, no files, no runner
             config = intake.config()
             account = intake.verifier_account()
-            check_task(
-                task_from_payload(payload, tuple(config["test_roots"])),
-                verifier_python=config["verifier_python"] or getattr(account, "python", None),
-            )
+            task = task_from_payload(payload, tuple(config["test_roots"]))
+            python = config["verifier_python"] or getattr(account, "python", None)
+            check_submitted_paths(task, check_task(task, verifier_python=python))
             return {"would_accept": intake.accepting()}
         return intake.submit(payload)
     if args.command == "status":
