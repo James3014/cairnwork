@@ -21,38 +21,73 @@ from cairnwork.intake import Intake
 from cairnwork.workers import agy as agy_module
 from cairnwork.workers.agy import AgyWorker
 
-SRC = Path(__file__).resolve().parent.parent / "src"
-# A quoted gh/git word that merges, approves, reviews or enables auto-merge, or an API path for one.
+ROOT = Path(__file__).resolve().parent.parent
+# Everything that ships or runs outside tests: the core, the operator scripts, the experimental
+# capabilities. tests/ is not scanned (its fixtures name these words on purpose).
+SHIPPED = [ROOT / "src", ROOT / "scripts", ROOT / "experimental"]
+# A quoted gh/git word that merges, approves, reviews or enables auto-merge, or an API path for one;
+# plus the "--auto-merge" family.
 FORBIDDEN = re.compile(
-    r"""["'](merge|approve|review|ready|--auto|--admin|--merge|--squash|--rebase)["']"""
-    r"""|\bpr\s+(merge|review|ready)\b|/merge\b|/reviews\b|auto_merge|autoMerge""",
+    r"""["'](merge|approve|review|ready|--admin|--merge|--squash|--rebase)["']"""
+    r"""|--auto\b|\bpr\s+(merge|review|ready)\b|/merge\b|/reviews\b|auto_merge|autoMerge""",
     re.IGNORECASE,
 )
+# A second way to push main: a quoted refs/heads/main or a quoted HEAD:main / <sha>:main /
+# <src>:refs/heads/main refspec. Only counts within PUSH_WINDOW lines after a quoted "push", so the
+# fetch-refspec checks that legitimately name refs/heads/main are not flagged.
+PUSH_MAIN = re.compile(r"""["']refs/heads/main["']|["'][^"'\s]*:(refs/heads/)?main["']""")
+PUSH_WORD = re.compile(r"""["']push["']""")
+PUSH_WINDOW = 6
 REFSPEC = re.compile(r"[0-9a-f]{40}:refs/heads/cairnwork/\d+-[A-Za-z0-9_-]+")
 
 
-def forbidden_uses(root: Path) -> list[str]:
-    return [
-        f"{path.relative_to(root)}:{n}: {line.strip()}"
-        for path in sorted(root.rglob("*.py"))
-        for n, line in enumerate(path.read_text().splitlines(), 1)
-        if FORBIDDEN.search(line)
-    ]
+def forbidden_uses(*roots: Path) -> list[str]:
+    """Lines under the roots that name a merge/approve/auto-merge/push-main spelling.
+
+    Scans src/, scripts/ and experimental/ (experimental capabilities ship too); only tests/ is left
+    out, because its fixtures name these words on purpose.
+
+    This guards accidental regressions only. Deliberate evasion (splitting a word across string
+    pieces, building it at runtime) is out of scope; the runtime tests below are the main guard.
+    """
+    found = []
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            lines = path.read_text().splitlines()
+            for n, line in enumerate(lines):
+                near = lines[max(0, n - PUSH_WINDOW) : n + 1]
+                pushes_main = PUSH_MAIN.search(line) and any(PUSH_WORD.search(x) for x in near)
+                if FORBIDDEN.search(line) or pushes_main:
+                    found.append(f"{path.name}:{n + 1}: {line.strip()}")
+    return found
 
 
 def test_no_source_file_can_merge_approve_or_enable_auto_merge():
-    assert list(SRC.glob("cairnwork*")), "scan root moved; the guard would pass on nothing"
-    assert forbidden_uses(SRC) == []
+    assert [r.name for r in SHIPPED] == ["src", "scripts", "experimental"]
+    for root in SHIPPED:
+        assert list(root.rglob("*.py")), f"{root} moved; the guard would pass on nothing"
+    assert forbidden_uses(*SHIPPED) == []
 
 
 def test_the_scan_catches_a_merge_call(tmp_path):
     for bad in ('gh("pr", "merge", "7")', 'argv = ["gh", "pr", "merge"]', "# gh pr merge 7",
                 'run("--auto")', 'run("approve")', 'api("repos/x/pulls/1/reviews")',
-                'api("repos/x/pulls/1/merge")'):  # fmt: skip
+                'api("repos/x/pulls/1/merge")', 'run("--auto-merge")', "run(['--auto'])",
+                'git("push", "origin", "refs/heads/main")', 'git("push", "origin", "HEAD:main")',
+                "git('push', 'origin', 'HEAD:refs/heads/main')", 'git("push", "o", f"{sha}:main")',
+                'git("push", "o", "+x:main")'):  # fmt: skip
         (tmp_path / "m.py").write_text(bad + "\n")
         assert forbidden_uses(tmp_path), bad
-    (tmp_path / "m.py").write_text('git("merge-base", "--is-ancestor", a, b)\n')
-    assert forbidden_uses(tmp_path) == []  # merge-base is read-only and used on purpose
+    fine_lines = (
+        'git("merge-base", "--is-ancestor", a, b)',
+        'gh("pr", "create", "--base", "main")',
+        'git("push", "origin", f"{sha}:refs/heads/cairnwork/7-a1")',
+        'if spec.split(":")[0] != "refs/heads/main":',  # a fetch-refspec check, not a push
+        'gh("pr", "create", "--automatic-x")',
+    )
+    for fine in fine_lines:
+        (tmp_path / "m.py").write_text(fine + "\n")
+        assert forbidden_uses(tmp_path) == [], fine  # read-only or an issue branch, on purpose
 
 
 @pytest.fixture
