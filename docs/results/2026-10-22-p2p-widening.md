@@ -29,13 +29,15 @@ is selected. On a flat layout `tests/test_base.py` therefore brings in `tests/te
 | `module-dir` (or the degraded run) cannot be probed either | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` |
 | degraded to `module-dir` and it selects no test file, or none of them passes on the base | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` (a failed probe is never "nothing to run") |
 | candidate P2P run exceeds the budget | the observation is not a pass, Core says not verified (no re-run) |
-| a P2P run fails on the candidate only because a test failed | re-run once; a pass on the re-run is what Core sees and the first run is recorded (`rerun`: failed tests, returncode, timed_out, mutated, survivors, ran; bound into the re-run's artifact hash); a second failure blocks |
+| a P2P run fails on the candidate only because a test failed | re-run once; a pass on the re-run is what Core sees (same verdict as a clean pass) and the first run is recorded (`rerun`: failed tests (sanitised), returncode, timed_out, mutated, survivors, ran; bound into the re-run's artifact hash); the task result's `p2p` also carries `p2p_rerun_passed` (true: passed after re-run; false: failed again; absent: clean pass or no re-run), so reports can separate the cases; a second failure blocks |
 | a P2P run fails for any other reason (checkout mutated, surviving process, oversized log, no usable guard report) | blocks as it is, no re-run |
 | no base-passing test selected (no degradation) | only the author's verifiers run; recorded (`targets: 0`) |
 | author verifier id equals `p2p-<mode>` | REFUSED, `P2P_VERIFIER_ID_CLASH` |
 
 `p2p_time_budget_seconds` (default 300) bounds each probe or run, so the worst case adds three
 budgets (probe, degraded probe, candidate run), four when a failing candidate run is re-run. Tasks without a `test_commit` are unchanged.
+
+**Default per entry path (#174).** Intake (`cairnwork-route`, the issue runner) defaults `p2p_selection` to `whole-suite`, budget 300 s. A `TaskSpec` built directly (`pipeline.run_task`, `scripts/drill_*.py`) is a library/drill path and defaults to `off`: it has no P2P unless the caller sets `p2p_mode`. The constants live in `p2p_selection.py` (`DEFAULT_MODE`, `DIRECT_MODE`, `DEFAULT_BUDGET_SECONDS`).
 
 ## Where the rule is recorded
 

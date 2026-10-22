@@ -252,6 +252,16 @@ def test_bad_agy_dispatch_settings_are_refused(intake, config):
         intake.config()
 
 
+def test_entry_path_p2p_defaults_are_pinned(intake, tmp_path):
+    """#174: Intake runs the whole suite; a direct TaskSpec (run_task, drills) has no P2P."""
+    from cairnwork.pipeline import TaskSpec
+
+    direct = TaskSpec("k", "h", "t", "i", tmp_path, "0" * 40, (), ())
+    assert direct.p2p_mode == "off" and direct.p2p_budget == 300
+    assert intake.config()["p2p_selection"] == "whole-suite"
+    assert intake.config()["p2p_time_budget_seconds"] == direct.p2p_budget
+
+
 def test_p2p_defaults_and_valid_overrides(intake):
     assert intake.config()["p2p_selection"] == "whole-suite"
     assert intake.config()["p2p_time_budget_seconds"] == 300

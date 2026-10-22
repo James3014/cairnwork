@@ -26,7 +26,9 @@ from __future__ import annotations
 from posixpath import basename, dirname, splitext
 
 MODES = ("off", "whole-suite", "module-dir")
-DEFAULT_MODE = "whole-suite"
+DEFAULT_MODE = "whole-suite"  # Intake (cairnwork-route, issue runner)
+DIRECT_MODE = "off"  # TaskSpec built directly (pipeline.run_task, drills): no P2P unless set
+DEFAULT_BUDGET_SECONDS = 300  # seconds per P2P run (probe, candidate run, re-run)
 
 
 def _under_root(path: str, roots: tuple[str, ...]) -> bool:

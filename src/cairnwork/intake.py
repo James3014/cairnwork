@@ -50,7 +50,7 @@ from cairnwork.ownership import (
     OwnershipLedger,
     OwnershipUnknown,
 )
-from cairnwork.p2p_selection import check_p2p_config
+from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, DEFAULT_MODE, check_p2p_config
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.taskpaths import check_submitted_paths
 from cairnwork.verifier_account import VerifierAccount
@@ -94,8 +94,8 @@ DEFAULT_CONFIG = {
     # run on the route path.
     "require_base_on_main": True,
     # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
-    "p2p_selection": "whole-suite",
-    "p2p_time_budget_seconds": 300,
+    "p2p_selection": DEFAULT_MODE,
+    "p2p_time_budget_seconds": DEFAULT_BUDGET_SECONDS,
 }
 
 
