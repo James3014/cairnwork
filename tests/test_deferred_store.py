@@ -3,6 +3,7 @@
 
 import os
 import subprocess
+from typing import Any, cast
 
 import pytest
 from conftest import commit_change, git
@@ -220,7 +221,7 @@ def test_a_strict_issue_never_asks_github_for_an_unimported_commit(tmp_path):
     intake.prepare()
     store = intake.test_store()
     with pytest.raises(IssueRefused, match="TASK_TEST_COMMIT_NOT_IMPORTED"):
-        _test_base(NoGithub(), tmp_path, "a" * 40, "b" * 40, store)
+        _test_base(cast(Any, NoGithub()), tmp_path, "a" * 40, "b" * 40, store)
 
 
 def test_a_submitted_task_carries_the_strict_store(project, tmp_path):  # noqa: F811
@@ -232,4 +233,5 @@ def test_a_submitted_task_carries_the_strict_store(project, tmp_path):  # noqa: 
         "repo": str(project), "base_commit": "a" * 40, "allowed_files": ["src/calc.py"],
         "verifiers": [["v", ["python3", "-m", "pytest"]]],
     }  # fmt: skip
-    assert task_from_payload(payload, ("tests",), store).test_store.required is True
+    test_store = task_from_payload(payload, ("tests",), store).test_store
+    assert test_store is not None and test_store.required is True
