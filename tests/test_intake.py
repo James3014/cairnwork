@@ -331,8 +331,9 @@ def test_a_base_not_on_origin_main_is_refused_at_submit_and_nothing_is_bound(
 
 def test_a_repository_without_origin_is_refused_when_the_check_is_on(intake, repo):
     _require(intake)
-    with pytest.raises(IntakeRefused, match="BASE_NOT_ON_MAIN"):
+    with pytest.raises(IntakeRefused, match="ORIGIN_FETCH_FAILED") as err:
         intake.submit(payload(repo))  # fails closed: origin main cannot be fetched
+    assert "require_base_on_main false" in str(err.value)
 
 
 def test_the_lineage_check_can_be_switched_off_and_must_be_a_boolean(intake, repo):
@@ -350,3 +351,10 @@ def test_a_resend_of_a_bound_task_does_not_re_check_lineage(intake, repo, tmp_pa
     git(repo, "remote", "remove", "origin")
     again = intake.submit(payload(repo))
     assert again["duplicate"] and again["task_id"] == first["task_id"]
+
+
+@pytest.mark.no_origin_patch
+def test_the_lineage_check_is_on_by_default():
+    from cairnwork import intake as intake_module
+
+    assert intake_module.DEFAULT_CONFIG["require_base_on_main"] is True

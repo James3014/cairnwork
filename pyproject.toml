@@ -45,6 +45,7 @@ pythonpath = ["src", "."]
 markers = [
     "sandbox: needs real macOS sandbox-exec (skipped elsewhere unless required)",
     "verifier_account: needs the dedicated verifier account (scripts/setup_verifier_user.sh)",
+    "no_origin_patch: sees the real DEFAULT_CONFIG require_base_on_main (no autouse override)",
 ]
 
 [tool.ruff]

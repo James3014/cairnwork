@@ -85,7 +85,9 @@ DEFAULT_CONFIG = {
     "test_roots": ["tests"],
     "test_source": "auto",
     # A new task's base must be in origin/main's history (lineage.require_on_main, the #76
-    # class) before it is bound; False only for a repository that has no origin.
+    # class) before it is bound; False only for a repository that has no origin. This
+    # submit-time check guards against mistakes, not a hostile caller: verify_origin is not
+    # run on the route path.
     "require_base_on_main": True,
     # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
     "p2p_selection": "whole-suite",
@@ -237,6 +239,12 @@ class Intake:
             try:  # fetches origin/main of the repository the task is bound to
                 require_on_main(task.repo, task.base_commit)
             except RuntimeError as exc:
+                if str(exc).startswith("LINEAGE_FETCH_FAILED"):
+                    raise IntakeRefused(
+                        "ORIGIN_FETCH_FAILED",
+                        f"{exc}; set require_base_on_main false in config.json "
+                        "if the repository has no origin",
+                    ) from exc
                 raise IntakeRefused("BASE_NOT_ON_MAIN", str(exc)) from exc
         fd = runlock.shared_fd(ledger.path)
         try:

@@ -68,8 +68,11 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
-def _no_origin_in_test_repos(monkeypatch):
-    """Test repositories have no origin; tests of the lineage check set the key to true."""
+def _no_origin_in_test_repos(request, monkeypatch):
+    """Test repositories have no origin; tests of the lineage check set the key to true.
+    A test marked no_origin_patch sees the real default."""
+    if request.node.get_closest_marker("no_origin_patch"):
+        return
     from cairnwork import intake
 
     monkeypatch.setitem(intake.DEFAULT_CONFIG, "require_base_on_main", False)
