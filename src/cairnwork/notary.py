@@ -26,7 +26,6 @@ could hide an earlier FAILED_VERIFICATION (Nexus-new#2776).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -39,27 +38,24 @@ from typing import Any
 from cairnwork.changeset import GitChangeSet, read_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
 from cairnwork.notary_schema import SCHEMA, SCHEMA_VERSION
+from cairnwork.notary_verify import (  # readback helpers, split out for the 400-line cap
+    CORE_ERROR,
+    _columns_match,
+    _digest,
+    _dumps,
+    _frozen,
+    _is_verified,
+    _status_and_integrity,
+)
 from cairnwork.receipt_binding import request_matches
 from cairnwork_protocol import (
     IDENTITY_MISMATCH,
-    acceptance_contract_hash,
     canonical_json,
-    change_set_hash,
-    evidence_bundle_hash,
     response_binding_problem,
-    verification_plan_hash,
 )
 
 CoreVerify = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
-CORE_ERROR = "CORE_ERROR"
 _OID = re.compile(r"^[0-9a-f]{40}$")
-
-_HASH_KEYS = (
-    "acceptance_contract_hash",
-    "change_set_hash",
-    "verification_plan_hash",
-    "evidence_bundle_hash",
-)
 
 
 class NotaryError(Exception):
@@ -329,70 +325,3 @@ class Notary:
             return http_status, _frozen(response)
         except (TypeError, ValueError):
             return 0, {"error": {"code": CORE_ERROR, "type": "UNSERIALISABLE_CORE_RESPONSE"}}
-
-
-def _status_and_integrity(response: dict[str, Any]) -> tuple[str, str]:
-    verification = response.get("verification")
-    if isinstance(verification, dict):
-        return str(verification.get("status")), str(verification.get("integrity"))
-    error = response.get("error")
-    code = error.get("code") if isinstance(error, dict) else None
-    return str(code or CORE_ERROR), "UNKNOWN"
-
-
-def _is_verified(
-    http_status: int,
-    status: str,
-    integrity: str,
-    response: dict[str, Any],
-    request: dict[str, Any],
-    request_hash: str,
-) -> bool:
-    if http_status != 200 or status != "VERIFIED" or integrity != "VALID":
-        return False
-    if _digest(request) != request_hash:
-        return False
-    echoed = response.get("hashes")
-    expected = _request_hashes(request)
-    if not isinstance(echoed, dict):
-        return False
-    return all(expected[key] is not None and echoed.get(key) == expected[key] for key in _HASH_KEYS)
-
-
-def _columns_match(
-    request: dict[str, Any], task_id: str, attempt_id: str, base: str, candidate: str
-) -> bool:
-    """A row's key and commit columns must be the ones its stored request was built for."""
-    change_set, contract = request.get("change_set"), request.get("acceptance_contract")
-    if not isinstance(change_set, dict) or not isinstance(contract, dict):
-        return False
-    return (
-        contract.get("contract_id") == task_id
-        and change_set.get("change_set_id") == f"{task_id}/{attempt_id}"
-        and change_set.get("source_revision") == f"git-commit:{base}"
-        and change_set.get("target_revision") == f"git-commit:{candidate}"
-    )
-
-
-def _request_hashes(request: dict[str, Any]) -> dict[str, str | None]:
-    try:
-        return {
-            "acceptance_contract_hash": acceptance_contract_hash(request["acceptance_contract"]),
-            "change_set_hash": change_set_hash(request["change_set"]),
-            "verification_plan_hash": verification_plan_hash(request["verification_plan"]),
-            "evidence_bundle_hash": evidence_bundle_hash(request["evidence_bundle"]),
-        }
-    except (KeyError, TypeError, ValueError):
-        return dict.fromkeys(_HASH_KEYS)
-
-
-def _dumps(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def _frozen(value: dict[str, Any]) -> dict[str, Any]:
-    return json.loads(_dumps(value))
-
-
-def _digest(value: dict[str, Any]) -> str:
-    return "sha256:" + hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()
