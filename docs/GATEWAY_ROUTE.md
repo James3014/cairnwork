@@ -14,7 +14,7 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 | `submit` < request.json | 綁定並開始執行；同一個冪等鍵重送時，回傳同一筆任務，不會重跑 | `{"task_id", "status", "duplicate"}` |
 | `status --task-id ID` 或 `--key 冪等鍵` | 查詢 | `{"task_id", "idempotency_key", "owner", "status", "attempt_id", "phase", "detail", "candidate_commit", "core_verified"}` |
 | `cancel --task-id ID` | 只能取消還沒開始的任務；已經在跑的會跑完 | `{"task_id", "status": "CANCELLED"}` |
-| `in-flight` | 給部署器的靜止閘門用；任何非 0 的 exit code（例如 state 目錄不存在）都要當作「有在途任務」 | `{"accepting", "count", "task_ids"}` |
+| `in-flight` | 給部署器的靜止閘門用；任何非 0 的 exit code（例如 state 目錄不存在）都要當作「有在途任務」 | `{"accepting", "count", "task_ids", "foreign_task_ids"}`。`count` 和 `task_ids` 只算所屬系統是 `cairnwork` 的在途任務；其他系統持有的在途任務另外列在 `foreign_task_ids`，不計入 `count` |
 | `accept`／`drain` | 打開／關閉接新任務（**預設是關閉**） | `{"accepting": bool}` |
 | `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1 | `{"decisions": [...]}` |
 

@@ -323,11 +323,14 @@ class Intake:
         """A missing state directory is an error, not "nothing in flight" (fail closed)."""
         if not self.state.is_dir():
             raise IntakeRefused("BAD_STATE", f"{self.state} does not exist")
-        records = self.ledger.in_flight() if (self.state / "ownership.sqlite").exists() else []
+        has_ledger = (self.state / "ownership.sqlite").exists()
+        records = self.ledger.in_flight() if has_ledger else []
+        foreign = self.ledger.foreign_in_flight() if has_ledger else []
         return {
             "accepting": self.accepting(),
             "count": len(records),
             "task_ids": [r.task_id for r in records],
+            "foreign_task_ids": [r.task_id for r in foreign],  # reported, never counted
         }
 
 
