@@ -189,3 +189,22 @@ def test_a_probe_that_lists_the_repo_but_exits_nonzero_is_refused(setup, tmp_pat
     gh = _wrapper(tmp_path, "echo James3014/demo; exit 1")
     with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
         require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_repo_names_compare_case_insensitively_but_as_whole_lines(setup, tmp_path):
+    require_bot_gh(_wrapper(tmp_path, "echo james3014/DEMO"), "James3014/demo", setup["clone"])
+    gh = _wrapper(tmp_path, "echo James3014/demo-extra")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])
+
+
+def test_the_probe_pages_through_every_installation_repo(setup, tmp_path):
+    body = 'case " $* " in *" --paginate "*) echo James3014/demo;; esac'
+    require_bot_gh(_wrapper(tmp_path, body), "James3014/demo", setup["clone"])
+
+
+def test_a_probe_that_hangs_is_refused(setup, tmp_path, monkeypatch):
+    monkeypatch.setattr("cairnwork.issue_publish.PROBE_TIMEOUT", 0.5)
+    gh = _wrapper(tmp_path, "sleep 5; echo James3014/demo")
+    with pytest.raises(RuntimeError, match="GH_IDENTITY_NOT_BOT"):
+        require_bot_gh(gh, "James3014/demo", setup["clone"])

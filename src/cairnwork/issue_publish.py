@@ -15,6 +15,7 @@ from cairnwork.journal import PHASES
 STATUSES = frozenset({"FAILED", "CANCELLED", "SUPERSEDED", "COMPLETED"})
 BOT_GH = "nexus-agent-gh"
 PROBE = "/installation/repositories"
+PROBE_TIMEOUT = 60
 REFUSAL_CODE = re.compile(r"[A-Z0-9_]{1,64}")
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")  # plain text: no markdown, @, #, spaces
 PR_URL = r"https://github\.com/{repo}/pull/[0-9]+"
@@ -54,11 +55,11 @@ def require_bot_gh(gh: str, repo: str, cwd: Path) -> None:
     try:
         done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
             [gh, "api", PROBE, "--paginate", "--jq", ".repositories[].full_name"],
-            capture_output=True, text=True, timeout=60, check=False, cwd=cwd,
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT, check=False, cwd=cwd,
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         done = None
-    if done is None or done.returncode != 0 or repo not in done.stdout.split():
+    if done is None or done.returncode != 0 or repo.lower() not in done.stdout.lower().split():
         raise RuntimeError(f"GH_IDENTITY_NOT_BOT: {BOT_GH} has no installation token for {repo}")
 
 
