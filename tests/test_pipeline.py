@@ -132,6 +132,8 @@ def test_failures_never_complete(project, stores, tmp_path, worker, reason):
     result = go(project, stores, tmp_path, worker)
     assert result.status == "FAILED" and not result.verified
     assert reason in result.reason
+    if reason == "CORE_FAILED_VERIFICATION":  # Issue #114: which verifier, and why
+        assert "pytest exit code 1" in result.reason and "pytest" in result.reason.split("[")[1]
     assert stores[0].get(task_id=result.task_id).status == "FAILED"
 
 

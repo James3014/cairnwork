@@ -36,6 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from cairnwork import confined
 from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
@@ -132,22 +133,23 @@ class VerifierAccount:
 
     def count(self) -> int:
         """How many processes the account is running (-1: cannot tell)."""
-        try:
-            # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
-            # procps selects all of a user's processes with -U alone and rejects -x.
-            tty_flag = ["-x"] if sys.platform == "darwin" else []
-            done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return -1
-        if done.returncode not in (0, 1) or done.stderr.strip():  # 1: nothing matched
-            return -1  # e.g. an unknown user, which ps also reports with exit 1
-        return len(done.stdout.split())
+        # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
+        # procps selects all of a user's processes with -U alone and rejects -x.
+        tty_flag = ["-x"] if sys.platform == "darwin" else []
+        for _ in range(confined.PS_ATTEMPTS):  # slow under load is not "cannot tell" (Issue #114)
+            try:
+                done = subprocess.run(  # noqa: S603 - fixed argv
+                    ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
+                    capture_output=True,
+                    text=True,
+                    timeout=confined.PS_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if done.returncode in (0, 1) and not done.stderr.strip():  # 1: nothing matched
+                return len(done.stdout.split())
+        return -1  # e.g. an unknown user, which ps also reports with exit 1
 
     def reap(self) -> int:
         """Kill everything the account runs; return how many were running.
@@ -170,12 +172,15 @@ class VerifierAccount:
         """
         left = -1
         for _ in range(attempts):
-            subprocess.run(  # noqa: S603 - fixed argv
-                [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
-                capture_output=True,
-                timeout=20,
-                check=False,
-            )
+            try:
+                subprocess.run(  # noqa: S603 - fixed argv
+                    [SUDO, "-n", "-u", self.user, "--", "/bin/kill", "-9", "-1"],
+                    capture_output=True,
+                    timeout=confined.PS_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                continue  # a loaded host: count() below says what is left, and we try again
             left = self.count()
             if left == 0:
                 break
