@@ -40,6 +40,7 @@ from cairnwork.deferred_tests import (
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.ownership import request_digest
+from cairnwork.p2p import p2p_for
 from cairnwork.pipeline import (
     TaskRejected,
     TaskResult,
@@ -77,6 +78,8 @@ def verify_candidate(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
         test_roots=tuple(intake.config()["test_roots"]),
+        p2p_mode=intake.config()["p2p_selection"],
+        p2p_budget=intake.config()["p2p_time_budget_seconds"],
     )  # fmt: skip
     specs = check_task(task)  # the same scope, protected-file and verifier rules
     if not OID.fullmatch(candidate):
@@ -107,6 +110,7 @@ def verify_candidate(
         "judged_commit": judged,
         "attempt_id": result.attempt_id,
         "logs": result.logs,
+        "p2p": result.p2p,
     }
 
 
@@ -218,10 +222,20 @@ def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifyin
             judged = lay_tests_over(
                 task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
             )
+        plan = p2p_for(task, specs, test_files, run_root, result, verifying)
         result.candidate_commit = judged
         digest = request_digest(task.request() | {"candidate": candidate})
         judge_candidate(
-            task, specs, digest, notary, run_root, result, test_files, verifying, lambda _: None
+            task,
+            specs,
+            digest,
+            notary,
+            run_root,
+            result,
+            test_files,
+            verifying,
+            lambda _: None,
+            plan,
         )
     finally:
         try:

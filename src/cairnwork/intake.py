@@ -31,7 +31,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,7 @@ from cairnwork.ownership import (
     OwnershipLedger,
     OwnershipUnknown,
 )
+from cairnwork.p2p_selection import check_p2p_config
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
@@ -90,6 +91,9 @@ DEFAULT_CONFIG = {
     "core_token_file": None,
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
+    # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
+    "p2p_selection": "whole-suite",
+    "p2p_time_budget_seconds": 300,
 }
 
 
@@ -212,6 +216,10 @@ class Intake:
             check_test_roots(loaded.get("test_roots", ["tests"]))
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
+        try:
+            check_p2p_config(loaded)
+        except ValueError as exc:
+            raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
         return {**DEFAULT_CONFIG, **loaded}
 
     def verifier_account(self) -> VerifierAccount | None:
@@ -297,7 +305,10 @@ class Intake:
 
     def load_request(self, task_id: str) -> TaskSpec:
         path = self.state / "requests" / f"{task_id}.json"
-        return task_from_payload(json.loads(path.read_text()), tuple(self.config()["test_roots"]))
+        config = self.config()
+        task = task_from_payload(json.loads(path.read_text()), tuple(config["test_roots"]))
+        p2p = {"p2p_mode": config["p2p_selection"], "p2p_budget": config["p2p_time_budget_seconds"]}
+        return replace(task, **p2p)
 
     def _start_runner(self, task_id: str, lock_fd: int) -> None:
         log = self.run_root / f"{task_id}.runner.log"
