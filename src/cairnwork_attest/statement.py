@@ -7,9 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from cairnwork.notary import Verdict
 from cairnwork_attest.assurance import Assurance
-from cairnwork_attest.record import AttestError, RecordNotVerified, VerdictRecord
+from cairnwork_attest.record import AttestError, RecordNotVerified, VerifiedRecord
 from cairnwork_protocol import canonical_hash, canonical_json
 
 PREDICATE_TYPE = "https://cairnwork.github.io/attestation/verified-change/v0.1"
@@ -29,13 +28,19 @@ class Producer:
 
 
 def build_statement(
-    record: VerdictRecord,
+    verified: VerifiedRecord,
     *,
-    verdict: Verdict,
     producer: Producer,
     assurance: Assurance,
     timestamp: str,
 ) -> dict[str, Any]:
+    if not isinstance(verified, VerifiedRecord):
+        raise StatementInputError(
+            f"build_statement requires VerifiedRecord, got {type(verified).__name__}"
+        )
+    record = verified.record
+    verdict = verified.verdict
+
     if not isinstance(record.candidate_commit, str) or not _OID.fullmatch(record.candidate_commit):
         raise StatementInputError(
             f"candidate_commit must be a 40-hex commit hash, got {record.candidate_commit!r}"

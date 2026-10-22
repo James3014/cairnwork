@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from cairnwork.notary import Notary, NotaryInputError, NotarySchemaMismatch, Verdict
+
+_OID = re.compile(r"^[0-9a-f]{40}$")
+_VERIFIED_TOKEN = object()
 
 
 class AttestError(Exception):
@@ -102,6 +106,28 @@ class VerdictRecord:
             parsed_resp = _parse_json_dict(self.response_json, "response")
             if not self.response:
                 object.__setattr__(self, "response", parsed_resp)
+
+
+@dataclass(frozen=True)
+class VerifiedRecord:
+    record: VerdictRecord
+    verdict: Verdict
+    _token: object = field(default=None, repr=False, compare=False, kw_only=True)
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> VerifiedRecord:
+        if kwargs.get("_token") is not _VERIFIED_TOKEN:
+            raise AttestError(
+                "VerifiedRecord cannot be constructed directly",
+                code="VERIFIED_RECORD_FORGED",
+            )
+        return super().__new__(cls)
+
+    def __post_init__(self) -> None:
+        if self._token is not _VERIFIED_TOKEN:
+            raise AttestError(
+                "VerifiedRecord cannot be constructed directly",
+                code="VERIFIED_RECORD_FORGED",
+            )
 
 
 def _fetch_row(uri: str, task_id: str, attempt_id: str) -> tuple[Any, ...]:
@@ -206,14 +232,25 @@ def verify_record(
     task_id: str,
     attempt_id: str,
     *,
+    expected_candidate: str,
     core_identity: dict[str, Any] | None = None,
-) -> tuple[VerdictRecord, Verdict]:
+) -> VerifiedRecord:
+    if not isinstance(expected_candidate, str) or not _OID.fullmatch(expected_candidate):
+        raise RecordMalformed(
+            "expected_candidate must be a 40-hex commit id", code="RECORD_MALFORMED"
+        )
     record = read_record(notary_sqlite, task_id, attempt_id)
+    if record.candidate_commit != expected_candidate:
+        raise RecordNotVerified(
+            f"candidate_commit {record.candidate_commit!r}"
+            f" != expected_candidate {expected_candidate!r}",
+            code="CANDIDATE_MISMATCH",
+        )
     _check_record_bindings(record)
 
     try:
         notary = Notary(notary_sqlite, core_verify=_never_call_core, core_identity=core_identity)
-        verdict = notary.verdict(task_id, attempt_id, expected_candidate=record.candidate_commit)
+        verdict = notary.verdict(task_id, attempt_id, expected_candidate=expected_candidate)
     except (NotaryInputError, NotarySchemaMismatch) as exc:
         raise RecordMalformed(str(exc), code="RECORD_MALFORMED") from exc
 
@@ -229,4 +266,4 @@ def verify_record(
         )
         raise RecordNotVerified(reason, code="RECORD_NOT_VERIFIED")
 
-    return record, verdict
+    return VerifiedRecord(record=record, verdict=verdict, _token=_VERIFIED_TOKEN)

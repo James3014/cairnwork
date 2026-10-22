@@ -13,10 +13,12 @@ from conftest import commit_change, git
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
 from cairnwork.notary import Notary, default_core_identity
 from cairnwork_attest.record import (
+    AttestError,
     RecordMalformed,
     RecordNotFound,
     RecordNotVerified,
     VerdictRecord,
+    VerifiedRecord,
     read_record,
     verify_record,
 )
@@ -94,21 +96,17 @@ def test_read_record_success(tmp_path: Path, repo: Path) -> None:
     assert record.recorded_at
 
 
-def test_read_record_missing_task_raises_record_not_found(tmp_path: Path, repo: Path) -> None:
+@pytest.mark.parametrize(
+    ("task_id", "attempt_id"),
+    [("task-nonexistent", "a1"), ("task-1", "attempt-nonexistent")],
+)
+def test_read_record_missing_task_or_attempt_raises_record_not_found(
+    tmp_path: Path, repo: Path, task_id: str, attempt_id: str
+) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-
     with pytest.raises(RecordNotFound) as exc_info:
-        read_record(db_path, "task-nonexistent", "a1")
-    assert exc_info.value.code == "RECORD_NOT_FOUND"
-
-
-def test_read_record_missing_attempt_raises_record_not_found(tmp_path: Path, repo: Path) -> None:
-    db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
-
-    with pytest.raises(RecordNotFound) as exc_info:
-        read_record(db_path, "task-1", "attempt-nonexistent")
+        read_record(db_path, task_id, attempt_id)
     assert exc_info.value.code == "RECORD_NOT_FOUND"
 
 
@@ -131,38 +129,24 @@ def test_read_record_missing_table_raises_record_not_found(tmp_path: Path) -> No
     assert exc_info.value.code == "RECORD_NOT_FOUND"
 
 
-def test_read_record_malformed_request_json_raises_record_malformed(
-    tmp_path: Path, repo: Path
+@pytest.mark.parametrize(
+    ("sql", "expected_code"),
+    [
+        ("UPDATE core_verifications SET request_json = 'not-valid-json{'", "INVALID_REQUEST_JSON"),
+        ("UPDATE core_verifications SET response_json = 'invalid-json{'", "INVALID_RESPONSE_JSON"),
+        ("UPDATE core_verifications SET request_json = '[1, 2, 3]'", "INVALID_REQUEST_STRUCTURE"),
+    ],
+)
+def test_read_record_malformed_json_raises_record_malformed(
+    tmp_path: Path, repo: Path, sql: str, expected_code: str
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
     setup_sample_notary(db_path, repo, "task-1", "a1")
-    _tamper_db(db_path, "UPDATE core_verifications SET request_json = 'not-valid-json{'")
+    _tamper_db(db_path, sql)
 
     with pytest.raises(RecordMalformed) as exc_info:
         read_record(db_path, "task-1", "a1")
-    assert exc_info.value.code == "INVALID_REQUEST_JSON"
-
-
-def test_read_record_malformed_response_json_raises_record_malformed(
-    tmp_path: Path, repo: Path
-) -> None:
-    db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
-    _tamper_db(db_path, "UPDATE core_verifications SET response_json = 'invalid-json{'")
-
-    with pytest.raises(RecordMalformed) as exc_info:
-        read_record(db_path, "task-1", "a1")
-    assert exc_info.value.code == "INVALID_RESPONSE_JSON"
-
-
-def test_read_record_non_object_json_raises_record_malformed(tmp_path: Path, repo: Path) -> None:
-    db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
-    _tamper_db(db_path, "UPDATE core_verifications SET request_json = '[1, 2, 3]'")
-
-    with pytest.raises(RecordMalformed) as exc_info:
-        read_record(db_path, "task-1", "a1")
-    assert exc_info.value.code == "INVALID_REQUEST_STRUCTURE"
+    assert exc_info.value.code == expected_code
 
 
 def test_verdict_record_post_init_parses_json() -> None:
@@ -183,7 +167,16 @@ def test_verdict_record_post_init_parses_json() -> None:
     assert vr.response == {"resp": 2}
 
 
-def test_verdict_record_post_init_malformed_json_raises() -> None:
+@pytest.mark.parametrize(
+    ("req_json", "resp_json", "expected_code"),
+    [
+        ("invalid-json{", "{}", "INVALID_REQUEST_JSON"),
+        ("{}", "[1, 2, 3]", "INVALID_RESPONSE_STRUCTURE"),
+    ],
+)
+def test_verdict_record_post_init_malformed_json_raises(
+    req_json: str, resp_json: str, expected_code: str
+) -> None:
     with pytest.raises(RecordMalformed) as exc_info:
         VerdictRecord(
             task_id="t1",
@@ -191,32 +184,14 @@ def test_verdict_record_post_init_malformed_json_raises() -> None:
             base_commit="0" * 40,
             candidate_commit="1" * 40,
             request_hash="sha256:" + "a" * 64,
-            request_json="invalid-json{",
+            request_json=req_json,
             http_status=200,
             status="VERIFIED",
             integrity="VALID",
-            response_json="{}",
+            response_json=resp_json,
             recorded_at="2026-10-22T09:00:00Z",
         )
-    assert exc_info.value.code == "INVALID_REQUEST_JSON"
-
-
-def test_verdict_record_post_init_non_object_json_raises() -> None:
-    with pytest.raises(RecordMalformed) as exc_info:
-        VerdictRecord(
-            task_id="t1",
-            attempt_id="a1",
-            base_commit="0" * 40,
-            candidate_commit="1" * 40,
-            request_hash="sha256:" + "a" * 64,
-            request_json="{}",
-            http_status=200,
-            status="VERIFIED",
-            integrity="VALID",
-            response_json="[1, 2, 3]",
-            recorded_at="2026-10-22T09:00:00Z",
-        )
-    assert exc_info.value.code == "INVALID_RESPONSE_STRUCTURE"
+    assert exc_info.value.code == expected_code
 
 
 def test_json_strictness_duplicate_key_raises_record_malformed() -> None:
@@ -276,48 +251,95 @@ def test_verify_record_success(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
     _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
 
-    record, verified_verdict = verify_record(db_path, "task-1", "a1")
-    assert verified_verdict.verified is True
-    assert record.candidate_commit == verdict.candidate_commit
-    assert record.task_id == "task-1"
-    assert record.attempt_id == "a1"
+    verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
+    assert isinstance(verified, VerifiedRecord)
+    assert verified.verdict.verified is True
+    assert verified.record.candidate_commit == verdict.candidate_commit
+    assert verified.record.task_id == "task-1"
+    assert verified.record.attempt_id == "a1"
+
+
+def test_verify_record_wrong_expected_candidate_raises_candidate_mismatch(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    wrong_candidate = "0" * 40
+    assert wrong_candidate != verdict.candidate_commit
+
+    with pytest.raises(RecordNotVerified) as exc_info:
+        verify_record(db_path, "task-1", "a1", expected_candidate=wrong_candidate)
+    assert exc_info.value.code == "CANDIDATE_MISMATCH"
+
+
+@pytest.mark.parametrize("bad_cand", ["not-hex", "0" * 39, "0" * 41, "g" * 40, ""])
+def test_verify_record_invalid_expected_candidate_raises_record_malformed(
+    tmp_path: Path, repo: Path, bad_cand: str
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    setup_sample_notary(db_path, repo, "task-1", "a1")
+    with pytest.raises(RecordMalformed):
+        verify_record(db_path, "task-1", "a1", expected_candidate=bad_cand)
+
+
+def test_verified_record_forged_construction_raises_attest_error(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    record = read_record(db_path, "task-1", "a1")
+
+    ctor: Any = VerifiedRecord
+    for args, kwargs in [
+        ((record, verdict), {}),
+        ((), {"record": record, "verdict": verdict}),
+        ((record, verdict), {"_token": "forged"}),
+        ((), {}),
+        (("anything",), {}),
+    ]:
+        with pytest.raises(AttestError) as exc_info:
+            ctor(*args, **kwargs)
+        assert exc_info.value.code == "VERIFIED_RECORD_FORGED"
 
 
 def test_verify_record_forged_request_hash_raises_record_malformed(
     tmp_path: Path, repo: Path
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     _tamper_db(
         db_path,
         "UPDATE core_verifications SET request_hash = 'sha256:' || hex(zeroblob(32))",
     )
 
     with pytest.raises(RecordMalformed) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_MALFORMED"
 
 
-def test_verify_record_candidate_mismatch_raises_record_malformed(
+def test_verify_record_tampered_candidate_commit_raises_candidate_mismatch(
     tmp_path: Path, repo: Path
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
-    sql = "UPDATE core_verifications SET candidate_commit = '1' || substr(candidate_commit, 2)"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    sql = "UPDATE core_verifications SET candidate_commit = '" + "e" * 39 + "1'"
     _tamper_db(db_path, sql)
 
-    with pytest.raises(RecordMalformed) as exc_info:
-        verify_record(db_path, "task-1", "a1")
-    assert exc_info.value.code == "RECORD_MALFORMED"
+    with pytest.raises(RecordNotVerified) as exc_info:
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
+    assert exc_info.value.code == "CANDIDATE_MISMATCH"
 
 
 def test_verify_record_base_mismatch_raises_record_malformed(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
-    _tamper_db(db_path, "UPDATE core_verifications SET base_commit = '2' || substr(base_commit, 2)")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    _tamper_db(
+        db_path,
+        "UPDATE core_verifications SET base_commit = '" + "f" * 39 + "0'",
+    )
 
     with pytest.raises(RecordMalformed) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_MALFORMED"
 
 
@@ -325,21 +347,21 @@ def test_verify_record_failed_verification_raises_record_not_verified(
     tmp_path: Path, repo: Path
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     _tamper_db(db_path, "UPDATE core_verifications SET status = 'FAILED_VERIFICATION'")
 
     with pytest.raises(RecordNotVerified) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_NOT_VERIFIED"
 
 
 def test_verify_record_non_200_raises_record_not_verified(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     _tamper_db(db_path, "UPDATE core_verifications SET http_status = 500")
 
     with pytest.raises(RecordNotVerified) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_NOT_VERIFIED"
 
 
@@ -347,11 +369,11 @@ def test_verify_record_invalid_integrity_raises_record_not_verified(
     tmp_path: Path, repo: Path
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     _tamper_db(db_path, "UPDATE core_verifications SET integrity = 'INVALID'")
 
     with pytest.raises(RecordNotVerified) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_NOT_VERIFIED"
 
 
@@ -359,7 +381,7 @@ def test_verify_record_unbound_response_hashes_raises_record_not_verified(
     tmp_path: Path, repo: Path
 ) -> None:
     db_path = tmp_path / "notary.sqlite"
-    setup_sample_notary(db_path, repo, "task-1", "a1")
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
 
     conn = sqlite3.connect(db_path)
     raw_resp = conn.execute("SELECT response_json FROM core_verifications").fetchone()[0]
@@ -370,5 +392,5 @@ def test_verify_record_unbound_response_hashes_raises_record_not_verified(
     _tamper_db(db_path, "UPDATE core_verifications SET response_json = ?", (json.dumps(resp_dict),))
 
     with pytest.raises(RecordNotVerified) as exc_info:
-        verify_record(db_path, "task-1", "a1")
+        verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     assert exc_info.value.code == "RECORD_NOT_VERIFIED"

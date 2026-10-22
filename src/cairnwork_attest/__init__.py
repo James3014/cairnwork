@@ -6,7 +6,6 @@ from cairnwork_attest.assurance import (
     Assurance,
     AssuranceConfigError,
     assurance_from_record,
-    assurance_from_state,
 )
 from cairnwork_attest.record import (
     AttestError,
@@ -14,6 +13,7 @@ from cairnwork_attest.record import (
     RecordNotFound,
     RecordNotVerified,
     VerdictRecord,
+    VerifiedRecord,
     read_record,
     verify_record,
 )
@@ -37,8 +37,8 @@ __all__ = [
     "RecordNotVerified",
     "StatementInputError",
     "VerdictRecord",
+    "VerifiedRecord",
     "assurance_from_record",
-    "assurance_from_state",
     "build_statement",
     "read_record",
     "statement_bytes",
