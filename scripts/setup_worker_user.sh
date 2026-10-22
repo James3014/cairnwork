@@ -101,17 +101,19 @@ require_real_dir_or_absent "$RUNS" root "$OWNER"
 # (PrimaryGroupID), so the uid and gid spaces never overlap with an existing account or group. (max+1
 # would land next to Apple's own service ids, which new macOS releases keep adding.)
 # The NestedGroups key is normally absent. dscl then prints "No such key: NestedGroups"; its exit
-# status is not reliable for this (macOS 27 exits 0), so judge by the output: the absent-key message
-# passes, a "NestedGroups:" value is refused, and anything else (an unreadable group) is refused.
+# status is not reliable for this (macOS 27 exits 0), so judge by the output, in the C locale: only
+# an output that is exactly the absent-key message (surrounding whitespace aside) passes; a
+# "NestedGroups:" value or anything else (an unreadable group, extra lines) is refused.
 check_no_nested_groups() {
   local out
-  out=$(dscl . -read "/Groups/$1" NestedGroups 2>&1)
-  if [[ "$out" == *"No such key: NestedGroups"* ]]; then
+  out=$(LC_ALL=C dscl . -read "/Groups/$1" NestedGroups 2>&1)
+  # ERE without REG_NEWLINE: ^ and $ anchor the whole output, so extra lines never match.
+  if [[ "$out" =~ '^[[:space:]]*No such key: NestedGroups[[:space:]]*$' ]]; then
     return 0
-  elif [[ "$out" == NestedGroups:* ]]; then
-    die "run group has nested groups (${out#NestedGroups:})"
+  elif [[ "$out" == *NestedGroups:* ]]; then
+    die "run group has nested groups (${out//$'\n'/ })"
   else
-    die "cannot read NestedGroups of $1: $out"
+    die "cannot read NestedGroups of $1: ${out//$'\n'/ }"
   fi
 }
 

@@ -113,37 +113,53 @@ NESTED_CHECK = "check_no_nested_groups g && echo PASS"
 
 
 def _stub_dscl(tmp_path, output, rc):
+    """A dscl that prints `output` verbatim (read from a file, so quotes are safe), exits rc."""
     stub = tmp_path / "bin"
     stub.mkdir()
-    (stub / "dscl").write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\nexit {rc}\n")
+    (tmp_path / "out.txt").write_text(output)
+    (stub / "dscl").write_text(f"#!/bin/sh\ncat '{tmp_path / 'out.txt'}'\nexit {rc}\n")
     (stub / "dscl").chmod(0o755)
     return dict(os.environ, PATH=f"{stub}:/usr/bin:/bin")
 
 
+def _nested_check(tmp_path, output, rc):
+    env = _stub_dscl(tmp_path, output, rc)
+    return run_zsh(f"{extract_function('check_no_nested_groups')}\n{NESTED_CHECK}", env=env)
+
+
 @needs_zsh
 @pytest.mark.parametrize("rc", [0, 56])
-def test_absent_nested_groups_key_passes_whatever_the_exit_status(tmp_path, rc):
+@pytest.mark.parametrize(
+    "output", ["No such key: NestedGroups\n", "  No such key: NestedGroups  \n\n"]
+)
+def test_absent_nested_groups_key_passes_whatever_the_exit_status(tmp_path, rc, output):
     # macOS 27 dscl prints "No such key" and exits 0 (the setup refused every host before this fix)
-    env = _stub_dscl(tmp_path, "No such key: NestedGroups", rc)
-    r = run_zsh(f"{extract_function('check_no_nested_groups')}\n{NESTED_CHECK}", env=env)
-    assert r.stdout.strip() == "PASS", r.stdout + r.stderr
+    r = _nested_check(tmp_path, output, rc)
+    assert r.returncode == 0 and r.stdout.strip() == "PASS", r.stdout + r.stderr
 
 
 @needs_zsh
 @pytest.mark.parametrize(
     ("output", "rc", "expected"),
     [
-        ("NestedGroups: ABCDEF01-2345-6789-ABCD-EF0123456789", 0, "has nested groups"),
-        ("Group not found", 56, "cannot read NestedGroups"),
+        ("NestedGroups: ABCDEF01-2345-6789-ABCD-EF0123456789\n", 0, "has nested groups"),
+        ("NestedGroups:\n ABCDEF01-2345-6789-ABCD-EF0123456789\n", 0, "has nested groups"),
+        # the absent-key text next to a real value, or any extra line, must not pass
+        ("No such key: NestedGroups\nNestedGroups: ABCDEF01\n", 0, "has nested groups"),
+        ("warning: cache stale\nNo such key: NestedGroups\n", 0, "cannot read NestedGroups"),
+        ("No such key: GroupMembership\n", 0, "cannot read NestedGroups"),
+        ("Group not found\n", 56, "cannot read NestedGroups"),
         ("", 0, "cannot read NestedGroups"),
+        ("it's broken\n", 1, "cannot read NestedGroups"),
     ],
 )
-def test_a_nested_group_or_an_unreadable_group_is_refused(tmp_path, output, rc, expected):
-    env = _stub_dscl(tmp_path, output, rc)
-    r = run_zsh(f"{extract_function('check_no_nested_groups')}\n{NESTED_CHECK}", env=env)
-    assert "PASS" not in r.stdout, r.stdout + r.stderr
+def test_a_nested_group_or_unexpected_output_is_refused(tmp_path, output, rc, expected):
+    r = _nested_check(tmp_path, output, rc)
+    assert r.returncode != 0 and "PASS" not in r.stdout, r.stdout + r.stderr
     assert "DIE:" in r.stdout and expected in r.stdout, r.stdout + r.stderr
 
 
-def test_the_run_group_check_is_called():
-    assert 'check_no_nested_groups "$RUNGROUP"' in SETUP.read_text()
+def test_the_run_group_check_is_called_in_the_c_locale():
+    text = SETUP.read_text()
+    assert 'check_no_nested_groups "$RUNGROUP"' in text
+    assert 'LC_ALL=C dscl . -read "/Groups/$1" NestedGroups' in text
