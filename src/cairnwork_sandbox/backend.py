@@ -28,6 +28,9 @@ class Policy:
     """The confinement policy text a backend writes to a file before a run."""
 
     text: str
+    # Operator-facing facts about this policy (e.g. a withheld mount). Not part of ``text``, so
+    # never hashed: adding a note must not change sandbox_profile_sha256 or any bound digest.
+    notes: tuple[str, ...] = ()
 
     @property
     def sha256(self) -> str:

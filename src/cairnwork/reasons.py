@@ -69,6 +69,7 @@ def explain(runs) -> str:
     """``[v1: cause; v2: cause]`` for the runs that failed; ``""`` when every run passed."""
     failed = [
         f"{run.spec.verifier_id}: {run.why or 'no cause recorded'}"
+        + "".join(f" ({note})" for note in run.notes)  # fixed strings from the backend
         for run in runs
         if not run.observation.passed
     ]

@@ -102,6 +102,9 @@ class VerifierRun:
     # is suspect (no timeout, mutation, survivor or oversized log); p2p.py may re-run only this
     plain_failure: bool = False
     why: str = ""  # in words, why the run did not pass ("" when it passed): reasons.py
+    # facts about the sandbox policy used (e.g. "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"); not
+    # in the observation's artifact hash, so recording them changes no bound digest
+    notes: tuple[str, ...] = ()
 
 
 def run_verifiers(
@@ -300,6 +303,7 @@ def _run_one(
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes,
         survivors=survivors, ran=ran, plain_failure=plain_failure, why=why,
+        notes=profile.notes if profile else (),
     )  # fmt: skip
 
 

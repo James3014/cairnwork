@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from cairnwork_sandbox import bwrap, platform_backend
-from cairnwork_sandbox.backend import SandboxError
+from cairnwork_sandbox.backend import Policy, SandboxError
 
 
 @pytest.fixture
@@ -373,3 +373,25 @@ def test_broad_write_roots_are_refused(tmp_path, root):
     path = {"HOME": home, "HOME_PARENT": tmp_path}.get(root, root)
     with pytest.raises(SandboxError):
         bwrap.BACKEND.policy((), (Path(path),), home=home)
+
+
+def test_policy_reports_why_shm_is_withheld_without_changing_its_text(monkeypatch, tmp_path):
+    # #154: a host whose bwrap has no --size cannot verify multiprocessing targets; the policy
+    # carries the reason as a note, and the note is not in the hashed text.
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(bwrap, "bwrap_path", lambda: "/usr/bin/bwrap")
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: False)
+    policy = bwrap.BACKEND.policy((), (), home=_home(tmp_path))
+    assert policy.notes == (f"{bwrap.SHM_NOTE_PREFIX}BWRAP_TMPFS_SIZE_UNSUPPORTED",)
+    assert "BWRAP_TMPFS_SIZE_UNSUPPORTED" not in policy.text and "#" not in policy.text
+    assert policy.sha256 == Policy(policy.text).sha256
+
+
+def test_policy_has_no_shm_note_when_shm_is_mounted(monkeypatch, tmp_path):
+    from cairnwork_sandbox import shm
+
+    monkeypatch.setattr(bwrap, "bwrap_path", lambda: "/usr/bin/bwrap")
+    monkeypatch.setattr(shm, "supports_tmpfs_size", lambda binary: True)
+    policy = bwrap.BACKEND.policy((), (), home=_home(tmp_path))
+    assert policy.notes == () and "BWRAP_TMPFS_SIZE_UNSUPPORTED" not in policy.text

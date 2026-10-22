@@ -1,5 +1,6 @@
 import sys
 import time
+from dataclasses import replace
 
 import pytest
 from conftest import commit_change, git
@@ -318,3 +319,47 @@ def test_a_passing_run_has_no_failure_reason(project, tmp_path):
 def test_a_failing_test_says_which_exit_code(project, tmp_path):
     result = run(project, tmp_path, git(project, "rev-parse", "HEAD"), "tests/test_a.py::test_x")
     assert f"pytest exit code {result.returncode}" in result.why
+
+
+class _NotedBackend:
+    """The selected backend, but its policy carries a note (as bwrap does when shm is withheld)."""
+
+    def __init__(self, real, notes):
+        self._real, self._notes = real, notes
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def policy(self, *args, **kwargs):
+        return replace(self._real.policy(*args, **kwargs), notes=self._notes)
+
+
+def _with_notes(monkeypatch, notes):
+    import cairnwork_sandbox
+
+    real = cairnwork_sandbox.select()
+    monkeypatch.setattr(cairnwork_sandbox, "select", lambda: _NotedBackend(real, notes))
+
+
+def test_policy_notes_reach_the_run_and_the_reason_but_not_the_hash(project, tmp_path, monkeypatch):
+    # #154: the operator sees why shm was withheld; the observation's hash inputs do not change
+    # (per-run paths make two digests differ anyway, so compare what is hashed).
+    from cairnwork import verifiers
+    from cairnwork.reasons import explain
+
+    seen = []
+    real_digest = verifiers._record_digest
+    monkeypatch.setattr(
+        verifiers, "_record_digest", lambda **kw: seen.append(kw) or real_digest(**kw)
+    )
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    plain = run(project, tmp_path / "a", head, "tests/test_a.py::test_x")
+    note = "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"
+    _with_notes(monkeypatch, (note,))
+    noted = run(project, tmp_path / "b", head, "tests/test_a.py::test_x")
+    assert plain.notes == () and noted.notes == (note,)
+    assert noted.observation.passed and explain([noted]) == ""
+    assert seen[0].keys() == seen[1].keys()
+    assert not any(note in str(value) for value in seen[1].values())
+    failing = run(project, tmp_path / "c", head, "tests/test_a.py::test_writes")
+    assert failing.notes == (note,) and f"({note})" in explain([failing])

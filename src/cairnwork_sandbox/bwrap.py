@@ -42,7 +42,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from cairnwork_sandbox.backend import Policy, SandboxError
-from cairnwork_sandbox.shm import shm_flags
+from cairnwork_sandbox.shm import shm_flags, shm_unavailable_reason
 
 NAME = "bwrap"
 
@@ -129,6 +129,9 @@ _PROBE = (
     "/proc",
     "true",
 )
+
+
+SHM_NOTE_PREFIX = "shm withheld: "
 
 
 @lru_cache(maxsize=1)
@@ -249,7 +252,10 @@ def build_policy(
     # Empty the socket trees that exist with a tmpfs (whole tree, uid-independent).
     for socket_dir in _socket_dirs_to_empty():
         flags += ["--tmpfs", _safe(socket_dir)]
-    return Policy("\n".join(flags) + "\n")
+    # Surfaced by the verifier run (Policy.notes), not written into the hashed policy text.
+    reason = shm_unavailable_reason(bwrap_path() or "")
+    notes = (f"{SHM_NOTE_PREFIX}{reason}",) if reason else ()
+    return Policy("\n".join(flags) + "\n", notes)
 
 
 def _home_cred_masks(real_home: str, owner: bool) -> list[tuple[str, bool]]:
