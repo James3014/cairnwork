@@ -11,9 +11,13 @@ scans the core for http.server / socketserver / listening sockets.
 from __future__ import annotations
 
 import hmac
+import io
 import ipaddress
 import json
+import logging
+import math
 import socket
+import time
 from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BufferedIOBase
@@ -23,7 +27,27 @@ MAX_BODY_BYTES = 1 << 20
 MAX_LENGTH_DIGITS = 8
 REQUEST_TIMEOUT_S = 10.0
 
+_log = logging.getLogger("cairnwork.ingress")
+
 Route = Callable[[bytes], tuple[int, Mapping[str, Any]]]
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Socket reader whose every recv is capped by what is left of one request deadline."""
+
+    def __init__(self, sock: socket.socket, deadline: Callable[[], float]) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        left = self._deadline() - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request deadline")
+        self._sock.settimeout(left)
+        return self._sock.recv_into(buffer)
 
 
 class IngressError(Exception):
@@ -108,6 +132,29 @@ def _host_allowed(header: str | None, port: int) -> bool:
     return header.lower() in {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
 
 
+class _DeadlineHandler(BaseHTTPRequestHandler):
+    """One whole-request deadline (``timeout`` seconds) plus quiet early-disconnect handling."""
+
+    _deadline = 0.0
+
+    def setup(self) -> None:
+        super().setup()
+        # One deadline for the whole request (headers + body): the stock per-read
+        # timeout lets a client trickling a byte per interval hold the thread forever.
+        self.rfile.close()
+        self.rfile = io.BufferedReader(_DeadlineReader(self.connection, lambda: self._deadline))
+
+    def handle_one_request(self) -> None:
+        self._deadline = time.monotonic() + cast(float, self.timeout)
+        super().handle_one_request()
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            _log.info("ingress: client disconnected early")
+
+
 def _make_handler(
     token: str, routes: Mapping[str, Route], timeout: float
 ) -> type[BaseHTTPRequestHandler]:
@@ -115,13 +162,16 @@ def _make_handler(
     table = dict(routes)
     limit = timeout
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(_DeadlineHandler):
         timeout = limit  # a stalled client frees its thread instead of holding it forever
 
         def version_string(self) -> str:
             return "cairnwork"
 
         def _send(self, status: int, payload: Mapping[str, Any], allow: str | None = None) -> None:
+            # The deadline reader leaves the socket timeout at whatever was left of the
+            # deadline; the response write gets the normal per-connection timeout back.
+            self.connection.settimeout(self.timeout)
             data = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -183,6 +233,13 @@ def serve(
 ) -> ThreadingHTTPServer:
     """Build (not start) a loopback-only server; refuses any non-loopback ``host``."""
     check_bind(host, port)
+    if (
+        not isinstance(timeout, (int, float))
+        or isinstance(timeout, bool)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise IngressError("INGRESS_TIMEOUT_INVALID")
     handler = _make_handler(token, routes, timeout)
 
     class Server(ThreadingHTTPServer):
