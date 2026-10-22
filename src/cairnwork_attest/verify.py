@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from cairnwork_attest.record import _digest, parse_strict_json
 from cairnwork_attest.statement import PREDICATE_TYPE, STATEMENT_TYPE
 from cairnwork_protocol import (
     acceptance_contract_hash,
+    canonical_json,
     change_manifest_hash,
     change_set_hash,
     evidence_bundle_hash,
@@ -52,12 +54,15 @@ def _verify_envelope_and_payload(
 
     try:
         envelope = read_bundle(Path(bundle_path))
-    except (BundleError, OSError) as exc:
+    except BundleError:
+        raise
+    except OSError as exc:
         return None, _fail("SIGNATURE_INVALID", f"cannot read bundle: {exc}")
 
     verif = verify_envelope(envelope, pubkey)
     if not verif.ok or verif.payload is None:
-        return None, _fail("SIGNATURE_INVALID", f"signature invalid: {verif.reason}")
+        code = "ENVELOPE_SHAPE" if verif.reason == "ENVELOPE_SHAPE" else "SIGNATURE_INVALID"
+        return None, _fail(code, f"signature invalid: {verif.reason}")
 
     return verif.payload, None
 
@@ -90,7 +95,7 @@ def _parse_statement_payload(
 
 
 def _check_subject_and_commits(
-    statement: dict[str, Any], repo: Path
+    statement: dict[str, Any], repo: Path, expected_candidate: str
 ) -> tuple[str | None, str | None, VerifyResult | None]:
     subjects = statement.get("subject")
     if not isinstance(subjects, list) or len(subjects) != 1:
@@ -108,10 +113,27 @@ def _check_subject_and_commits(
     if not isinstance(candidate, str) or not _OID.fullmatch(candidate):
         return None, None, _fail("SUBJECT_SHAPE", f"invalid candidate commit {candidate!r}")
 
-    predicate = statement["predicate"]
+    predicate = statement.get("predicate")
+    if not isinstance(predicate, dict):
+        return None, None, _fail("STATEMENT_SHAPE", "predicate is not an object")
+
     base = predicate.get("base_commit")
     if not isinstance(base, str) or not _OID.fullmatch(base):
         return None, None, _fail("SUBJECT_SHAPE", f"invalid base commit {base!r}")
+
+    if (
+        not isinstance(expected_candidate, str)
+        or not _OID.fullmatch(expected_candidate)
+        or candidate != expected_candidate
+    ):
+        return (
+            None,
+            None,
+            _fail(
+                "CANDIDATE_MISMATCH",
+                f"subject candidate {candidate!r} != expected_candidate {expected_candidate!r}",
+            ),
+        )
 
     repo_path = Path(repo)
     for sha in (base, candidate):
@@ -171,29 +193,57 @@ def _check_manifest(
     except (ChangeSetError, GitCommandError, TypeError, ValueError) as exc:
         return _fail("MANIFEST_MISMATCH", f"cannot build change manifest: {exc}")
 
-    request = predicate["request"]
-    change_set = request["change_set"]
+    request = predicate.get("request")
+    if not isinstance(request, dict):
+        return _fail("MANIFEST_MISMATCH", "predicate.request is not an object")
+
+    change_set = request.get("change_set")
+    if not isinstance(change_set, dict):
+        return _fail("MANIFEST_MISMATCH", "request missing change_set object")
+
     if change_set.get("diff_hash") != recomputed_hash:
         return _fail(
             "MANIFEST_MISMATCH",
             f"change_set.diff_hash {change_set.get('diff_hash')!r} != {recomputed_hash}",
         )
 
+    req_manifest = request.get("change_manifest")
+    if not isinstance(req_manifest, Mapping):
+        return _fail("MANIFEST_MISMATCH", "request missing change_manifest object")
+
+    try:
+        req_manifest_h = change_manifest_hash(req_manifest)
+    except (KeyError, TypeError, ValueError) as exc:
+        return _fail("MANIFEST_MISMATCH", f"malformed request.change_manifest: {exc}")
+
+    if req_manifest_h != recomputed_hash:
+        return _fail(
+            "MANIFEST_MISMATCH",
+            f"request.change_manifest hash {req_manifest_h!r} != {recomputed_hash}",
+        )
+
     response = predicate.get("response")
-    if isinstance(response, dict):
-        hashes = response.get("hashes")
-        if isinstance(hashes, dict) and "change_manifest_hash" in hashes:
-            resp_h = hashes["change_manifest_hash"]
-            if resp_h != recomputed_hash:
-                return _fail(
-                    "MANIFEST_MISMATCH",
-                    f"response change_manifest_hash {resp_h!r} != {recomputed_hash}",
-                )
+    if not isinstance(response, dict):
+        return _fail("RESPONSE_NOT_VERIFIED", "response is not an object")
+
+    hashes = response.get("hashes")
+    if not isinstance(hashes, dict) or "change_manifest_hash" not in hashes:
+        return _fail("RESPONSE_NOT_VERIFIED", "response missing change_manifest_hash")
+
+    if hashes["change_manifest_hash"] != recomputed_hash:
+        return _fail(
+            "RESPONSE_NOT_VERIFIED",
+            f"response change_manifest_hash {hashes['change_manifest_hash']!r}"
+            f" != {recomputed_hash}",
+        )
 
     return None
 
 
-def _check_response_verified(predicate: dict[str, Any]) -> VerifyResult | None:
+def _check_response_verified(
+    predicate: dict[str, Any],
+    core_identity_pin: Mapping[str, Any] | None = None,
+) -> VerifyResult | None:
     response = predicate.get("response")
     if not isinstance(response, dict):
         return _fail("RESPONSE_NOT_VERIFIED", "response is not an object")
@@ -216,12 +266,34 @@ def _check_response_verified(predicate: dict[str, Any]) -> VerifyResult | None:
     if predicate.get("http_status") != 200:
         return _fail("RESPONSE_NOT_VERIFIED", f"http_status={predicate.get('http_status')!r}")
 
-    core_id = response.get("core_identity")
-    if not isinstance(core_id, dict):
-        return _fail("RESPONSE_NOT_VERIFIED", "response missing core_identity")
+    pred_core_id = predicate.get("core_identity")
+    resp_core_id = response.get("core_identity")
+    if not isinstance(pred_core_id, Mapping) or not isinstance(resp_core_id, Mapping):
+        return _fail("RESPONSE_NOT_VERIFIED", "response or predicate missing core_identity")
+
+    try:
+        if canonical_json(pred_core_id) != canonical_json(resp_core_id):
+            return _fail("RESPONSE_NOT_VERIFIED", "predicate and response core_identity mismatch")
+    except TypeError:
+        return _fail("RESPONSE_NOT_VERIFIED", "core_identity not canonical JSON serializable")
+
+    if core_identity_pin is not None:
+        if not isinstance(core_identity_pin, Mapping):
+            return _fail("CORE_IDENTITY_MISMATCH", "core_identity_pin must be a Mapping")
+        try:
+            if canonical_json(core_identity_pin) != canonical_json(resp_core_id):
+                return _fail(
+                    "CORE_IDENTITY_MISMATCH",
+                    "response core_identity does not match pin: "
+                    f"{resp_core_id!r} != {core_identity_pin!r}",
+                )
+        except TypeError:
+            return _fail(
+                "CORE_IDENTITY_MISMATCH", "core_identity_pin not canonical JSON serializable"
+            )
 
     request = predicate["request"]
-    binding_problem = response_binding_problem(request, response, core_id)
+    binding_problem = response_binding_problem(request, response, resp_core_id)
     if binding_problem is not None:
         return _fail("RESPONSE_NOT_VERIFIED", f"response binding problem: {binding_problem}")
 
@@ -235,6 +307,7 @@ def _check_response_verified(predicate: dict[str, Any]) -> VerifyResult | None:
             "change_set_hash": change_set_hash(request["change_set"]),
             "verification_plan_hash": verification_plan_hash(request["verification_plan"]),
             "evidence_bundle_hash": evidence_bundle_hash(request["evidence_bundle"]),
+            "change_manifest_hash": change_manifest_hash(request["change_manifest"]),
         }
     except (KeyError, TypeError, ValueError) as exc:
         return _fail("RESPONSE_NOT_VERIFIED", f"malformed request for hashes: {exc}")
@@ -251,6 +324,8 @@ def verify_bundle(
     *,
     public_key_pem: Path,
     repo: Path,
+    expected_candidate: str,
+    core_identity_pin: Mapping[str, Any] | None = None,
 ) -> VerifyResult:
     """Verify an attestation bundle against local git objects and a trusted public key."""
     payload_bytes, err = _verify_envelope_and_payload(bundle_path, public_key_pem)
@@ -265,7 +340,7 @@ def verify_bundle(
     if statement is None:
         return _fail("STATEMENT_SHAPE")
 
-    candidate, base, err = _check_subject_and_commits(statement, repo)
+    candidate, base, err = _check_subject_and_commits(statement, repo, expected_candidate)
     if err is not None:
         return err
     if candidate is None or base is None:
@@ -281,7 +356,7 @@ def verify_bundle(
     if err is not None:
         return err
 
-    err = _check_response_verified(predicate)
+    err = _check_response_verified(predicate, core_identity_pin)
     if err is not None:
         return err
 

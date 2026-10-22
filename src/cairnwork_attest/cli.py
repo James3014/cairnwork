@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import os
+import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from cairnwork_attest.keys import (
     load_private_key,
     public_key_pem,
 )
-from cairnwork_attest.record import AttestError, verify_record
+from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
 from cairnwork_attest.statement import Producer, build_statement
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
@@ -99,14 +101,57 @@ def _cmd_statement(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    result = verify_bundle(
-        Path(args.bundle),
-        public_key_pem=Path(args.public_key),
-        repo=Path(args.repo),
-    )
+    repo = Path(args.repo)
+    if args.candidate is not None:
+        candidate = args.candidate
+    else:
+        try:
+            res = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                shell=False,
+            )
+            candidate = res.stdout.strip()
+        except (subprocess.SubprocessError, OSError) as exc:
+            print(f"ERROR: cannot resolve HEAD from {repo}: {exc}", file=sys.stderr)
+            return 2
+
+    print(f"Candidate: {candidate}", file=sys.stderr)
+
+    core_id_pin: Mapping[str, Any] | None = None
+    if args.core_identity is not None:
+        try:
+            core_id_text = Path(args.core_identity).read_text(encoding="utf-8")
+            core_id_pin = parse_strict_json(
+                core_id_text,
+                error_cls=BundleError,
+                malformed_code="CORE_IDENTITY_MALFORMED",
+                constant_code="CORE_IDENTITY_MALFORMED",
+            )
+            if not isinstance(core_id_pin, Mapping):
+                print("ERROR: core-identity must decode to a JSON object", file=sys.stderr)
+                return 2
+        except (BundleError, OSError, UnicodeDecodeError) as exc:
+            print(f"ERROR: cannot read core-identity: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        result = verify_bundle(
+            Path(args.bundle),
+            public_key_pem=Path(args.public_key),
+            repo=repo,
+            expected_candidate=candidate,
+            core_identity_pin=core_id_pin,
+        )
+    except BundleError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 1
+
     if result.ok and result.statement is not None:
-        candidate = result.statement["subject"][0]["digest"]["gitCommit"]
-        print(f"OK {candidate}")
+        cand = result.statement["subject"][0]["digest"]["gitCommit"]
+        print(f"OK {cand}")
         return 0
 
     detail = f": {result.detail}" if result.detail else ""
@@ -136,6 +181,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("bundle", type=Path, help="Bundle file path")
     p_ver.add_argument("--public-key", type=Path, required=True, help="Public key PEM file path")
     p_ver.add_argument("--repo", type=Path, required=True, help="Git repository directory")
+    p_ver.add_argument(
+        "--candidate", type=str, default=None, help="Expected candidate commit SHA (40-hex)"
+    )
+    p_ver.add_argument(
+        "--core-identity", type=Path, default=None, help="Path to Core identity JSON pin file"
+    )
 
     return parser
 

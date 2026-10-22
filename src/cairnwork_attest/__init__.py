@@ -13,6 +13,7 @@ from cairnwork_attest.bundle import (
     write_bundle,
 )
 from cairnwork_attest.dsse import (
+    ENVELOPE_SHAPE,
     PAYLOAD_TYPE,
     DsseInputError,
     Verification,
@@ -61,6 +62,7 @@ __all__ = [
     "AttestError",
     "BundleError",
     "DsseInputError",
+    "ENVELOPE_SHAPE",
     "KeyFileError",
     "Producer",
     "RecordMalformed",

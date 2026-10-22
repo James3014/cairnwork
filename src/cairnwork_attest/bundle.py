@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Mapping
@@ -50,32 +51,59 @@ def write_bundle(path: Path, envelope: Mapping[str, Any]) -> None:
 def read_bundle(path: Path) -> dict[str, Any]:
     """Read a DSSE envelope JSON file under 4 MiB with strict JSON validation."""
     p = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        st = p.stat()
+        fd = os.open(p, flags)
     except FileNotFoundError as exc:
+        if os.path.islink(p):
+            raise BundleError(
+                f"bundle is not a regular file (symlink): {p}", code="BUNDLE_NOT_REGULAR"
+            ) from exc
         raise BundleError(f"bundle not found: {p}", code="BUNDLE_NOT_FOUND") from exc
     except OSError as exc:
-        raise BundleError(f"cannot stat bundle: {exc}", code="BUNDLE_UNREADABLE") from exc
-
-    if not stat.S_ISREG(st.st_mode):
-        raise BundleError(f"bundle is not a regular file: {p}", code="BUNDLE_NOT_REGULAR")
-
-    if st.st_size > MAX_BUNDLE_BYTES:
-        raise BundleError(
-            f"bundle size {st.st_size} exceeds {MAX_BUNDLE_BYTES} bytes",
-            code="BUNDLE_TOO_LARGE",
-        )
+        if exc.errno == errno.ELOOP or os.path.islink(p):
+            raise BundleError(
+                f"bundle is not a regular file (symlink): {p}", code="BUNDLE_NOT_REGULAR"
+            ) from exc
+        raise BundleError(f"cannot open bundle: {exc}", code="BUNDLE_UNREADABLE") from exc
 
     try:
-        raw_bytes = p.read_bytes()
-    except OSError as exc:
-        raise BundleError(f"cannot read bundle: {exc}", code="BUNDLE_UNREADABLE") from exc
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise BundleError(f"cannot stat bundle: {exc}", code="BUNDLE_UNREADABLE") from exc
 
-    if len(raw_bytes) > MAX_BUNDLE_BYTES:
-        raise BundleError(
-            f"bundle size {len(raw_bytes)} exceeds {MAX_BUNDLE_BYTES} bytes",
-            code="BUNDLE_TOO_LARGE",
-        )
+        if not stat.S_ISREG(st.st_mode):
+            raise BundleError(f"bundle is not a regular file: {p}", code="BUNDLE_NOT_REGULAR")
+
+        if st.st_size > MAX_BUNDLE_BYTES:
+            raise BundleError(
+                f"bundle size {st.st_size} exceeds {MAX_BUNDLE_BYTES} bytes",
+                code="BUNDLE_TOO_LARGE",
+            )
+
+        chunks: list[bytes] = []
+        total_bytes = 0
+        limit = MAX_BUNDLE_BYTES + 1
+        while total_bytes < limit:
+            to_read = min(65536, limit - total_bytes)
+            try:
+                chunk = os.read(fd, to_read)
+            except OSError as exc:
+                raise BundleError(f"cannot read bundle: {exc}", code="BUNDLE_UNREADABLE") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_bytes += len(chunk)
+
+        if total_bytes > MAX_BUNDLE_BYTES:
+            raise BundleError(
+                f"bundle size exceeds {MAX_BUNDLE_BYTES} bytes",
+                code="BUNDLE_TOO_LARGE",
+            )
+        raw_bytes = b"".join(chunks)
+    finally:
+        os.close(fd)
 
     try:
         text = raw_bytes.decode("utf-8")

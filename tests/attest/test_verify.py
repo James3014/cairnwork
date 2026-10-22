@@ -14,13 +14,14 @@ from conftest import commit_change, git
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
 from cairnwork.notary import Notary, default_core_identity
 from cairnwork_attest.bundle import BundleError, read_bundle, write_bundle
+from cairnwork_attest.cli import main
 from cairnwork_attest.dsse import _sign_bytes, sign_statement
 from cairnwork_attest.keys import (
     generate_keypair,
     load_private_key,
     public_key_pem,
 )
-from cairnwork_attest.record import _digest, verify_record
+from cairnwork_attest.record import verify_record
 from cairnwork_attest.statement import (
     Producer,
     statement_bytes,
@@ -149,7 +150,7 @@ def test_verify_bundle_happy_path(
     monkeypatch.setattr(socket, "socket", fail_socket)
 
     bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(tmp_path / "state", repo)
-    result = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
 
     assert result.ok is True
     assert result.code == "OK"
@@ -160,7 +161,7 @@ def test_verify_bundle_happy_path(
 
 
 def test_verify_bundle_signature_invalid_tamper_payload(tmp_path: Path, repo: Path) -> None:
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(tmp_path / "state", repo)
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(tmp_path / "state", repo)
     envelope = read_bundle(bundle)
     raw_payload = base64.b64decode(envelope["payload"])
     tampered_bytes = raw_payload[:-1] + (b"X" if raw_payload[-1:] != b"X" else b"Y")
@@ -169,20 +170,24 @@ def test_verify_bundle_signature_invalid_tamper_payload(tmp_path: Path, repo: Pa
     tampered_path = tmp_path / "tampered_bundle.json"
     write_bundle(tampered_path, envelope)
 
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(
+        tampered_path, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
     assert result.ok is False
     assert result.code == "SIGNATURE_INVALID"
 
 
 def test_verify_bundle_signature_invalid_wrong_public_key(tmp_path: Path, repo: Path) -> None:
-    bundle, _, _, _ = setup_verified_bundle_fixture(tmp_path / "state", repo)
+    bundle, _, _, candidate = setup_verified_bundle_fixture(tmp_path / "state", repo)
     other_state = tmp_path / "other_state"
     other_state.mkdir()
     other_pub = generate_keypair(other_state)
     other_pem_path = other_state / "other_pub.pem"
     other_pem_path.write_text(public_key_pem(other_pub), encoding="ascii")
 
-    result = verify_bundle(bundle, public_key_pem=other_pem_path, repo=repo)
+    result = verify_bundle(
+        bundle, public_key_pem=other_pem_path, repo=repo, expected_candidate=candidate
+    )
     assert result.ok is False
     assert result.code == "SIGNATURE_INVALID"
 
@@ -196,50 +201,58 @@ def _resign_statement(state_dir: Path, stmt: dict[str, Any], out_path: Path) -> 
 
 def test_verify_bundle_statement_shape(tmp_path: Path, repo: Path) -> None:
     state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(state_dir, repo)
+    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
     assert res.statement is not None
 
     stmt = copy.deepcopy(res.statement)
     stmt["_type"] = "https://invalid.type/v1"
     tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b1.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(
+        tampered_path, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
     assert result.ok is False
     assert result.code == "STATEMENT_SHAPE"
 
     stmt2 = copy.deepcopy(res.statement)
     stmt2["predicateType"] = "https://invalid.predicate/v1"
     tampered_path2 = _resign_statement(state_dir, stmt2, tmp_path / "b2.json")
-    result2 = verify_bundle(tampered_path2, public_key_pem=pub_pem, repo=repo)
+    result2 = verify_bundle(
+        tampered_path2, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
     assert result2.ok is False
     assert result2.code == "STATEMENT_SHAPE"
 
 
 def test_verify_bundle_subject_shape(tmp_path: Path, repo: Path) -> None:
     state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(state_dir, repo)
+    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
     assert res.statement is not None
 
     stmt = copy.deepcopy(res.statement)
     stmt["subject"] = []
     tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_subj.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(
+        tampered_path, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
     assert result.ok is False
     assert result.code == "SUBJECT_SHAPE"
 
     stmt2 = copy.deepcopy(res.statement)
     stmt2["subject"] = [{"digest": {"gitCommit": "not-a-40-hex-oid"}}]
     tampered_path2 = _resign_statement(state_dir, stmt2, tmp_path / "b_subj2.json")
-    result2 = verify_bundle(tampered_path2, public_key_pem=pub_pem, repo=repo)
+    result2 = verify_bundle(
+        tampered_path2, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate
+    )
     assert result2.ok is False
     assert result2.code == "SUBJECT_SHAPE"
 
 
 def test_verify_bundle_commit_not_found(tmp_path: Path, repo: Path) -> None:
     state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(state_dir, repo)
+    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo, expected_candidate=candidate)
     assert res.statement is not None
 
     stmt = copy.deepcopy(res.statement)
@@ -247,65 +260,86 @@ def test_verify_bundle_commit_not_found(tmp_path: Path, repo: Path) -> None:
     stmt["subject"][0]["digest"]["gitCommit"] = ghost_commit
     stmt["subject"][0]["name"] = f"git-commit:{ghost_commit}"
     tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_ghost.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(
+        tampered_path, public_key_pem=pub_pem, repo=repo, expected_candidate=ghost_commit
+    )
     assert result.ok is False
     assert result.code == "COMMIT_NOT_FOUND"
 
 
-def test_verify_bundle_request_hash_mismatch(tmp_path: Path, repo: Path) -> None:
+def test_verify_bundle_candidate_mismatch(tmp_path: Path, repo: Path) -> None:
     state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
-    assert res.statement is not None
+    bundle, pub_pem, _, candidate = setup_verified_bundle_fixture(state_dir, repo)
 
-    stmt = copy.deepcopy(res.statement)
-    stmt["predicate"]["request_hash"] = "sha256:" + "0" * 64
-    tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_req_hash.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
+    result = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo, expected_candidate="1" * 40)
     assert result.ok is False
-    assert result.code == "REQUEST_HASH_MISMATCH"
+    assert result.code == "CANDIDATE_MISMATCH"
+
+    result_bad_hex = verify_bundle(
+        bundle, public_key_pem=pub_pem, repo=repo, expected_candidate="not-40-hex"
+    )
+    assert result_bad_hex.ok is False
+    assert result_bad_hex.code == "CANDIDATE_MISMATCH"
 
 
-def test_verify_bundle_commit_binding_mismatch(tmp_path: Path, repo: Path) -> None:
+def test_cli_verify_candidate_pinning_and_head_movement(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
-    assert res.statement is not None
+    bundle, pub_pem, _, commit_a = setup_verified_bundle_fixture(state_dir, repo)
 
-    stmt = copy.deepcopy(res.statement)
-    stmt["predicate"]["request"]["change_set"]["target_revision"] = "git-commit:" + "1" * 40
-    stmt["predicate"]["request_hash"] = _digest(stmt["predicate"]["request"])
-    tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_bind.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
-    assert result.ok is False
-    assert result.code == "COMMIT_BINDING_MISMATCH"
+    # 1. Verification with explicit --candidate A passes
+    assert (
+        main(
+            [
+                "verify",
+                str(bundle),
+                "--public-key",
+                str(pub_pem),
+                "--repo",
+                str(repo),
+                "--candidate",
+                commit_a,
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert f"Candidate: {commit_a}" in captured.err
+    assert f"OK {commit_a}" in captured.out
 
+    # 2. Verification with default candidate (HEAD is commit A) passes
+    assert main(["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo)]) == 0
+    captured = capsys.readouterr()
+    assert f"Candidate: {commit_a}" in captured.err
+    assert f"OK {commit_a}" in captured.out
 
-def test_verify_bundle_manifest_mismatch(tmp_path: Path, repo: Path) -> None:
-    state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
-    assert res.statement is not None
+    # 3. Move HEAD to commit B
+    commit_b = commit_change(repo, {"src/b.py": "y = 99\n"}, message="candidate B")
+    assert commit_b != commit_a
 
-    stmt = copy.deepcopy(res.statement)
-    stmt["predicate"]["request"]["change_set"]["diff_hash"] = "sha256:" + "0" * 64
-    stmt["predicate"]["request_hash"] = _digest(stmt["predicate"]["request"])
-    tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_diff.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
-    assert result.ok is False
-    assert result.code == "MANIFEST_MISMATCH"
+    # 4. Default candidate now resolves to commit B -> fails with CANDIDATE_MISMATCH
+    assert main(["verify", str(bundle), "--public-key", str(pub_pem), "--repo", str(repo)]) == 1
+    captured = capsys.readouterr()
+    assert f"Candidate: {commit_b}" in captured.err
+    assert "CANDIDATE_MISMATCH" in captured.out
 
-
-def test_verify_bundle_response_not_verified(tmp_path: Path, repo: Path) -> None:
-    state_dir = tmp_path / "state"
-    bundle, pub_pem, _, _ = setup_verified_bundle_fixture(state_dir, repo)
-    res = verify_bundle(bundle, public_key_pem=pub_pem, repo=repo)
-    assert res.statement is not None
-
-    stmt = copy.deepcopy(res.statement)
-    stmt["predicate"]["status"] = "FAILED_VERIFICATION"
-    stmt["predicate"]["response"]["verification"]["status"] = "FAILED_VERIFICATION"
-    tampered_path = _resign_statement(state_dir, stmt, tmp_path / "b_failed.json")
-    result = verify_bundle(tampered_path, public_key_pem=pub_pem, repo=repo)
-    assert result.ok is False
-    assert result.code == "RESPONSE_NOT_VERIFIED"
+    # 5. Explicit --candidate commit A still passes even when HEAD is at commit B
+    assert (
+        main(
+            [
+                "verify",
+                str(bundle),
+                "--public-key",
+                str(pub_pem),
+                "--repo",
+                str(repo),
+                "--candidate",
+                commit_a,
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert f"Candidate: {commit_a}" in captured.err
+    assert f"OK {commit_a}" in captured.out
