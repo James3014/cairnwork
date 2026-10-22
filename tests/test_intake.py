@@ -135,6 +135,19 @@ def test_in_flight_ignores_a_task_another_owner_holds(intake):
     assert intake.in_flight()["count"] == 0
 
 
+def test_in_flight_lists_foreign_rows_apart_from_the_counted_ones(intake, repo):
+    ours = intake.submit(payload(repo))["task_id"]
+    theirs = intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8).record.task_id
+    out = intake.in_flight()
+    assert out["count"] == 1 and out["task_ids"] == [ours]
+    assert out["foreign_task_ids"] == [theirs]
+
+
+def test_in_flight_without_a_ledger_has_no_foreign_rows(tmp_path):
+    (tmp_path / "state").mkdir()
+    assert Intake(tmp_path / "state").in_flight()["foreign_task_ids"] == []
+
+
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first

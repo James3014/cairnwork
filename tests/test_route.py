@@ -110,7 +110,12 @@ def test_drained_by_default_and_unknown_tasks_are_reported(state, project):
     )
     code, out = route(state, "status", "--task-id", "task-nope")
     assert code == 3 and out["error"] == "UNKNOWN_TASK"
-    assert route(state, "in-flight")[1] == {"accepting": False, "count": 0, "task_ids": []}
+    assert route(state, "in-flight")[1] == {
+        "accepting": False,
+        "count": 0,
+        "task_ids": [],
+        "foreign_task_ids": [],
+    }
 
 
 def test_submitted_task_is_fixed_and_core_verified(state, project):
