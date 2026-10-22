@@ -271,6 +271,20 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
     return paths
 
 
+def _verdict_reason(verified: bool, verdict, recorded) -> str:
+    """The reason string for a judged attempt. A verified attempt reads ``CORE_<status>``. Otherwise
+    the readback's reason is shown (``recorded`` when present, so an unverified readback never reads
+    as CORE_VERIFIED; ``verdict`` only if there is no readback); when that reason is empty, a Core
+    that said VERIFIED but did not verify on readback reads ``CORE_NOT_VERIFIED``, else
+    ``CORE_<status>``."""
+    if verified:
+        return f"CORE_{verdict.status}"
+    shown = recorded or verdict
+    if shown.reason:
+        return shown.reason
+    return "CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}"
+
+
 def judge_candidate(
     task, specs, digest, notary, run_root, result, test_files, verifying, reach
 ) -> None:
@@ -311,13 +325,7 @@ def judge_candidate(
     )
     recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
     result.verified = bool(verdict.verified and recorded and recorded.verified)
-    shown = recorded or verdict  # an unverified readback never reads as CORE_VERIFIED
-    result.reason = (
-        f"CORE_{verdict.status}"
-        if result.verified
-        else shown.reason
-        or ("CORE_NOT_VERIFIED" if verdict.status == "VERIFIED" else f"CORE_{verdict.status}")
-    )
+    result.reason = _verdict_reason(result.verified, verdict, recorded)
 
 
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
