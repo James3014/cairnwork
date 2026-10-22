@@ -17,9 +17,10 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SETUP = SCRIPTS / "setup_worker_user.sh"
 ROLLBACK = SCRIPTS / "setup_worker_user_rollback.sh"
-ZSH = shutil.which("zsh")
+_ZSH_FOUND = shutil.which("zsh")
+ZSH: str = _ZSH_FOUND or "zsh"
 
-needs_zsh = pytest.mark.skipif(ZSH is None, reason="zsh not installed")
+needs_zsh = pytest.mark.skipif(_ZSH_FOUND is None, reason="zsh not installed")
 needs_bsd_stat = pytest.mark.skipif(sys.platform != "darwin", reason="BSD stat -f is macOS-only")
 
 
