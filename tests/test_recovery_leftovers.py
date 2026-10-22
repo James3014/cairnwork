@@ -361,14 +361,14 @@ def _routable(crash_project, tmp_path):
     return attempt
 
 
-def test_route_recover_with_leftovers_counts_them_and_exits_3(crash_project, tmp_path):
+def test_route_recover_with_leftovers_counts_them_and_exits_4(crash_project, tmp_path):
     attempt = _routable(crash_project, tmp_path)
     _stuck_dir(tmp_path, attempt, "q")
     try:
         code, out = _route_recover(tmp_path)
     finally:
         (tmp_path / "runs").chmod(0o700)
-    assert code == 3 and out["leftover_run_dirs"] == 2
+    assert code == 4 and out["leftover_run_dirs"] == 2
     assert out["decisions"][0]["leftover_run_dirs"] == 2
 
 
