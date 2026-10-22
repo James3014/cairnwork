@@ -38,9 +38,9 @@ and none may run before the next one. Without one, a process that leaves the
 run's process group is killed only if it still carries the run token in its
 environment. Either way, never pass raw verifier logs to a worker or a model.
 Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
-pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
-pytest configuration and root-level modules out of the files a candidate may
-change (``protected_verifier_inputs``), but that is not enough on its own:
+pytest (a root ``pytest.py`` cannot replace it). Callers must keep tests,
+pytest configuration and shadowing root-level modules out of the files a candidate
+may change (``protected_verifier_inputs``), but that is not enough on its own:
 candidate source code also runs inside the pytest process and can forge a
 result.
 """
