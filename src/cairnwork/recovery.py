@@ -125,6 +125,28 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root, account=
     )
 
 
+_RUN_TAGS = "vbpqr"  # verify, base-test, and the P2P probe / candidate run / re-run (p2p.py)
+
+
+def _run_dirs(root: Path, attempt_id: str) -> tuple[list[Path], list[Path], list[Path]]:
+    """The attempt's run directories under ``root``: verifier checkouts (``.work``), private
+    run dirs (``.priv``...; a verify log stays as evidence, only its run/ goes) and clones.
+    One walk for the owner side and the verifier-account side, so the two cannot drift."""
+    pattern = f"{attempt_id}-[{_RUN_TAGS}]-v*"
+    works = [w for w in root.glob(f"{pattern}.work") if w.is_dir() and not w.is_symlink()]
+    privates = []
+    for private in root.glob(f"{pattern}.*"):  # verifier, base-test and P2P runs
+        if private.suffix == ".work" or private.is_symlink() or not private.is_dir():
+            continue
+        # a base-test or P2P run is not Core evidence and would show the tests: all of it goes
+        keep_log = f"{attempt_id}-v-" in private.name
+        privates.append(private / "run" if keep_log else private)
+    clones = sorted(
+        p for p in root.glob(pattern) if p.is_dir() and not p.is_symlink() and "." not in p.name
+    )
+    return works, privates, clones
+
+
 def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
     """Attempt and verifier clones, a snapshot index, and verifier scratch (run/) dirs.
     Verifier logs (the private dirs themselves) are kept as evidence."""
@@ -133,24 +155,16 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
     root = Path(run_root)
     (root / f"{attempt_id}.index").unlink(missing_ok=True)
     (root / f"{attempt_id}.tests.index").unlink(missing_ok=True)
-    for work in root.glob(f"{attempt_id}-[vb]-v*.work"):  # a verifier checkout's own dir
-        if work.is_dir() and not work.is_symlink():
-            try:
-                remove_attempt_clone(work, work.name.removesuffix(".work"))
-            except WorkspaceError:
-                pass
-            shutil.rmtree(work, ignore_errors=True)
-    for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
-        if private.suffix == ".work":
-            continue
-        if private.is_dir() and not private.is_symlink():
-            # a base-test run is not Core evidence and would show the tests: all of it goes
-            keep_log = f"{attempt_id}-v-" in private.name
-            shutil.rmtree(private / "run" if keep_log else private, ignore_errors=True)
-    names = [attempt_id] + sorted(
-        p.name for p in root.glob(f"{attempt_id}-[vb]-v*") if p.is_dir() and "." not in p.name
-    )
-    for name in names:
+    works, privates, clones = _run_dirs(root, attempt_id)
+    for work in works:  # a verifier checkout's own dir
+        try:
+            remove_attempt_clone(work, work.name.removesuffix(".work"))
+        except WorkspaceError:
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+    for private in privates:
+        shutil.rmtree(private, ignore_errors=True)
+    for name in [attempt_id] + [p.name for p in clones]:
         if (root / name).is_dir():
             try:
                 remove_attempt_clone(root, name)
@@ -171,18 +185,8 @@ def _remove_account_leftovers(account: VerifierAccount, attempt_id: str) -> None
     root = account.run_root
     if not root.is_dir():
         return
-    targets: list[Path] = []
-    for work in root.glob(f"{attempt_id}-[vb]-v*.work"):  # a verifier checkout's own dir
-        if work.is_dir() and not work.is_symlink():
-            targets.append(work)
-    for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
-        if private.suffix == ".work" or private.is_symlink() or not private.is_dir():
-            continue
-        keep_log = f"{attempt_id}-v-" in private.name  # keep the verify log, drop only its run/
-        targets.append(private / "run" if keep_log else private)
-    for p in root.glob(f"{attempt_id}-[vb]-v*"):  # the clones themselves
-        if p.is_dir() and not p.is_symlink() and "." not in p.name:
-            targets.append(p)
+    works, privates, clones = _run_dirs(root, attempt_id)
+    targets = works + privates + clones
     for target in targets:
         try:
             account.remove(target)

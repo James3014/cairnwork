@@ -354,3 +354,23 @@ def test_leftover_cleanup_removes_verifier_work_directories(tmp_path):
     _remove_leftovers(tmp_path, "a1")
     assert not list(tmp_path.glob("*.work"))
     assert (verify_run / "verifier.log").exists() and not (verify_run / "run").exists()
+
+
+@pytest.mark.parametrize("tag", ["p", "q", "r"])
+def test_leftover_cleanup_removes_p2p_run_directories(tmp_path, tag):
+    """#171: the P2P probe (-p) and candidate runs (-q/-r, hidden tests laid over) go whole."""
+    from cairnwork.recovery import _remove_leftovers
+
+    clone = tmp_path / f"a1-{tag}-v0"
+    (clone / "tests").mkdir(parents=True)
+    (clone / "tests" / "test_hidden.py").write_text("x")
+    work = tmp_path / f"a1-{tag}-v0.work"
+    (work / f"a1-{tag}-v0").mkdir(parents=True)
+    run = tmp_path / f"a1-{tag}-v0.abc"
+    (run / "run").mkdir(parents=True)
+    (run / "verifier.log").write_text("log")
+    other = tmp_path / f"a2-{tag}-v0"
+    other.mkdir()
+    _remove_leftovers(tmp_path, "a1")
+    assert not clone.exists() and not work.exists() and not run.exists()
+    assert other.exists()  # another attempt is untouched
