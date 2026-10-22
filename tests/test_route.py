@@ -37,6 +37,13 @@ def project(repo):
             ),
         },
     )
+    # The route runs in a subprocess, so the conftest patch of DEFAULT_CONFIG does not reach
+    # it: give the project a real origin whose main holds the base, so the lineage check
+    # (the product default) is exercised end to end.
+    origin = repo.parent / "origin.git"
+    git(repo.parent, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(repo, "remote", "add", "origin", str(origin))
+    git(repo, "push", "-q", "-u", "origin", "main")
     return repo
 
 
@@ -260,6 +267,7 @@ def test_another_submit_pinning_its_base_does_not_upset_a_running_attempt(state,
         assert time.monotonic() < deadline
         time.sleep(0.2)
     commit_change(project, {"README.md": "a newer base\n"})
+    git(project, "push", "-q", "origin", "main")  # the new base must be on main too
     code, second = route(state, "submit", stdin=request(project, key="gw-2"))
     assert code == 0, second
     assert wait_finished(state, first["task_id"])["status"] == "COMPLETED"
