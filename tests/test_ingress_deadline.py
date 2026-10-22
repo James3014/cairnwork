@@ -277,7 +277,7 @@ def test_non_disconnect_oserror_outside_the_route_reaches_handle_error(monkeypat
 
     monkeypatch.setattr(BaseHTTPRequestHandler, "parse_request", boom)
     httpd = serve("127.0.0.1", 0, TOKEN, {"/x": lambda _b: (200, {})}, timeout=5)
-    errors: list[BaseException] = []
+    errors: list[BaseException | None] = []
     seen = threading.Event()
 
     def record(request, client_address):
