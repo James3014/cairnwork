@@ -95,6 +95,11 @@ class VerifierRun:
     log_path: Path
     observation: VerifierObservation
     outcomes: dict[str, str]
+    survivors: int = 0
+    ran: bool = False
+    # a plain test failure: the guard reported a failed test and nothing about the run itself
+    # is suspect (no timeout, mutation, survivor or oversized log); p2p.py may re-run only this
+    plain_failure: bool = False
 
 
 def run_verifiers(
@@ -109,13 +114,15 @@ def run_verifiers(
     attempt_id: str = "",
     account: VerifierAccount | None = None,
     base_commit: str | None = None,
+    note: str = "",
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
 
     If a checkout cannot be created the error propagates and no observation is
     returned (fail closed). With an account, verifiers run as that dedicated user
     (verifier_account.py), in its run root and with its Python (or ``python``), one at a
-    time. With base_commit, pytest settings come from that commit (pytest_config.py).
+    time. With base_commit, pytest settings come from that commit (pytest_config.py). A non-empty
+    note (the P2P selection rule, p2p.py) is bound into each observation's artifact hash.
     """
     settings = pytest_config.base_settings(repo, base_commit)
     if account is not None:
@@ -135,6 +142,7 @@ def run_verifiers(
                 attempt_id,
                 account,
                 settings,
+                note,
             )
     python = python or sys.executable
     return _run_all(
@@ -148,11 +156,22 @@ def run_verifiers(
         attempt_id,
         None,
         settings,
+        note,
     )
 
 
 def _run_all(
-    repo, candidate_commit, specs, run_root, run_id, python, timeout, attempt_id, account, settings
+    repo,
+    candidate_commit,
+    specs,
+    run_root,
+    run_id,
+    python,
+    timeout,
+    attempt_id,
+    account,
+    settings,
+    note,
 ) -> tuple[VerifierRun, ...]:
     if not os.path.isabs(python):
         raise VerifierRejected(f"python must be an absolute path, got {python!r}")
@@ -185,6 +204,7 @@ def _run_all(
                     attempt_id,
                     account,
                     settings,
+                    note,
                 )
             )
         finally:
@@ -204,7 +224,7 @@ def _remove_scratch(dirs, account) -> None:
 
 
 def _run_one(
-    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings
+    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings, note
 ) -> VerifierRun:
     plugins = pytest_config.installed_plugins(python)
     ini_text = settings.ini_text(checkout, plugins)
@@ -246,14 +266,11 @@ def _run_one(
         mutated = ("checkout replaced",)
     verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
-    passed = (
-        profile is not None
-        and returncode == 0
-        and not timed_out
-        and not mutated
-        and ran
-        and log_path.stat().st_size <= MAX_LOG_BYTES
-        and survivors == 0
+    clean = not timed_out and not mutated and survivors == 0
+    clean = clean and log_path.stat().st_size <= MAX_LOG_BYTES
+    passed = profile is not None and returncode == 0 and clean and ran
+    plain_failure = (
+        profile is not None and returncode == 1 and clean and "failed" in verdict.outcomes.values()
     )
     _remove_scratch((home, tmp), account)
     digest = _record_digest(
@@ -268,13 +285,15 @@ def _run_one(
         tests_passed=ran,
         survivors=survivors,
         log_sha256=_file_sha256(log_path),
+        **({"note": note} if note else {}),
     )
     observation = VerifierObservation(
         spec.verifier_id, f"{private.name}/verifier.log", f"sha256:{digest}", passed
     )
     return VerifierRun(
-        spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes
-    )
+        spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes,
+        survivors=survivors, ran=ran, plain_failure=plain_failure,
+    )  # fmt: skip
 
 
 def _same_directory(path: Path, before: os.stat_result) -> bool:

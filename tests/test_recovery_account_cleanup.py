@@ -51,7 +51,7 @@ def test_account_leftover_cleanup_removes_account_run_dirs(tmp_path):
     (runs / "b2-v-v0").mkdir()  # an unrelated attempt, must be untouched
     (runs / "b2-v-v0.work").mkdir()
 
-    _remove_account_leftovers(_FakeAccount(runs), "a1")
+    _remove_account_leftovers(_FakeAccount(runs), "a1")  # type: ignore[arg-type]
 
     assert not (runs / "a1-v-v0").exists()
     assert not (runs / "a1-v-v0.work").exists()
@@ -66,7 +66,7 @@ def test_account_leftover_cleanup_ignores_a_bad_attempt_id(tmp_path):
     victim = runs / "x-v-v0"
     victim.mkdir()
     account = _FakeAccount(runs)
-    _remove_account_leftovers(account, "../x")
+    _remove_account_leftovers(account, "../x")  # type: ignore[arg-type]
     assert victim.exists() and account.removed == []
 
 
@@ -107,7 +107,7 @@ def test_recover_cleans_the_accounts_own_run_dirs(repo, tmp_path):
         notary=notary,
         journal=journal,
         run_root=tmp_path / "runs",
-        verifier_account=account,
+        verifier_account=account,  # type: ignore[arg-type]
     )
 
     assert [(d.new_status, d.reason) for d in decisions] == [

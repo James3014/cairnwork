@@ -50,7 +50,7 @@ class EditWorker:
     def __init__(self, files):
         self.files = files
 
-    def run(self, workdir: Path, _task) -> None:
+    def run(self, workdir: Path, task) -> None:
         for name, text in self.files.items():
             (workdir / name).parent.mkdir(parents=True, exist_ok=True)
             (workdir / name).write_text(text)

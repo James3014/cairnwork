@@ -58,7 +58,7 @@ def recover(
     with runlock.held(ledger.path, exclusive=True), account_lock:
         if verifier_account is not None:
             verifier_account.require_idle()
-        for record in ledger.in_flight():
+        for record in ledger.in_flight(include_foreign=True):
             if record.owner != OWNER:  # not ours: report it, never settle it
                 decisions.append(
                     Decision(record.task_id, "", record.status, record.status, "FOREIGN_OWNER")
