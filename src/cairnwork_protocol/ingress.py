@@ -17,7 +17,7 @@ import socket
 from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BufferedIOBase
-from typing import Any
+from typing import Any, cast
 
 MAX_BODY_BYTES = 1 << 20
 MAX_LENGTH_DIGITS = 8
@@ -101,8 +101,8 @@ _HTTP_CODES = {
 
 
 def _host_allowed(header: str | None, port: int) -> bool:
-    # The explicit bound port is required on purpose: a bare host would mean port 80,
-    # and this service never binds 80, so a bare-host request is not for us.
+    # The explicit bound port is required on purpose: a bare Host (no port) is refused,
+    # fail closed, even when the service is bound to port 80.
     if not isinstance(header, str):
         return False
     return header.lower() in {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
@@ -146,7 +146,8 @@ def _make_handler(
             try:
                 if len(self.headers.get_all("Host", [])) > 1:
                     raise IngressError("INGRESS_HOST_DUPLICATE")
-                if not _host_allowed(self.headers.get("Host"), self.server.server_address[1]):
+                bound_port = cast(ThreadingHTTPServer, self.server).server_port
+                if not _host_allowed(self.headers.get("Host"), bound_port):
                     raise IngressError("INGRESS_HOST_NOT_ALLOWED", 421)
                 if len(self.headers.get_all("Authorization", [])) > 1 or not authorized(
                     self.headers.get("Authorization"), secret
