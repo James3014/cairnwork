@@ -63,7 +63,7 @@ from cairnwork import confined, pytest_config, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.treecompare import tree_differences
-from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
+from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lock_wait_seconds
 from cairnwork.verifier_spec import (  # re-exported for existing importers
     VerifierRejected,
     VerifierSpec,
@@ -127,7 +127,7 @@ def run_verifiers(
     settings = pytest_config.base_settings(repo, base_commit)
     if account is not None:
         run_root, python = account.run_root, python or account.python
-        with account.exclusive():
+        with account.exclusive(lock_wait_seconds(len(specs), timeout)):
             if not account.available(python):
                 raise VerifierAccountError(f"account {account.user} is not usable")
             account.require_idle()

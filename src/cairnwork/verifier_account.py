@@ -25,6 +25,7 @@ making sure the account runs nothing.
 from __future__ import annotations
 
 import fcntl
+import math
 import os
 import pwd
 import subprocess
@@ -48,10 +49,20 @@ DEFAULT_ROOT = Path(
 )
 
 
-# A verifier run is bounded by its own timeout (verifiers.DEFAULT_TIMEOUT_SECONDS, 600 s);
-# a waiter gives up a little later than that instead of queueing behind a stuck holder.
+# A waiter gives up after this long instead of queueing behind a stuck holder. run_verifiers
+# holds the lock across every spec (each bounded by its timeout, 600 s by default), so it does
+# not use this fixed floor alone: lock_wait_seconds() sizes the wait from the spec count.
+# Waiters poll, so there is no FIFO order: under steady contention one can starve until its
+# own timeout, which is the bound.
 LOCK_TIMEOUT_SECONDS = 900.0
+_LOCK_MARGIN_SECONDS = 300.0
 _LOCK_POLL_SECONDS = 0.05
+
+
+def lock_wait_seconds(spec_count: int, spec_timeout: float) -> float:
+    """How long a waiter should queue for a holder like itself: every spec at its full timeout,
+    plus a margin, never below LOCK_TIMEOUT_SECONDS (read at call time)."""
+    return max(LOCK_TIMEOUT_SECONDS, max(spec_count, 0) * spec_timeout + _LOCK_MARGIN_SECONDS)
 
 
 class VerifierAccountError(Exception):
@@ -240,14 +251,19 @@ class VerifierAccount:
         os.chmod(root, os.stat(root).st_mode | 0o055)
 
     @contextmanager
-    def exclusive(self, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    def exclusive(self, timeout: float | None = None) -> Iterator[None]:
         """One verifier at a time: kill_all() would otherwise end another run's processes.
 
         Waits at most ``timeout`` seconds, then raises RESOURCE_LEASE_TIMEOUT so a stuck but
         live holder turns into a recorded failure, not an endless queue (a dead holder's lock
         is released by the kernel). Not reentrant: flock locks per open file, so a nested call
-        waits until the timeout.
+        waits until the timeout. ``timeout`` must be a finite number >= 0 (default
+        LOCK_TIMEOUT_SECONDS, read at call time); anything else raises ValueError.
         """
+        if timeout is None:
+            timeout = LOCK_TIMEOUT_SECONDS
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError(f"lock timeout must be a finite number >= 0, got {timeout!r}")
         fd = os.open(self.root / ".verifier.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             deadline = time.monotonic() + timeout
@@ -256,11 +272,12 @@ class VerifierAccount:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise VerifierAccountError(
                             f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
                         ) from None
-                    time.sleep(_LOCK_POLL_SECONDS)
+                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
             yield
         finally:
             os.close(fd)
