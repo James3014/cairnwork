@@ -44,6 +44,7 @@ class Decision:
     reason: str
     killed_processes: int = 0
     detail: str = ""  # e.g. "LEFTOVER_RUN_DIRS: 2: a1-q-v0, a1-r-v0.x"; "" when nothing remains
+    leftover_run_dirs: int = 0  # how many run directories the cleanup could not remove
 
 
 def recover(
@@ -137,7 +138,9 @@ def _settle(
     else:
         new, reason = "FAILED", f"INTERRUPTED_AFTER_{phases[-1].phase}"
     ledger.set_status(record.task_id, new)
-    return Decision(record.task_id, attempt_id, record.status, new, reason, killed, detail)
+    return Decision(
+        record.task_id, attempt_id, record.status, new, reason, killed, detail, len(left)
+    )
 
 
 def _log_leftovers(path: Path, task_id: str, attempt_id: str, left: list[str]) -> None:

@@ -342,3 +342,56 @@ def test_both_the_state_and_the_dispatched_run_root_are_cleaned(crash_project, t
     )  # fmt: skip
     assert decision.detail == ""
     assert not list(other.iterdir()) and not list((tmp_path / "runs").glob(f"{attempt}-r-*"))
+
+
+def _route_recover(state):
+    done = subprocess.run(
+        [sys.executable, "-I", "-m", "cairnwork.route", "--state", str(state), "recover"],
+        capture_output=True, text=True, timeout=120, check=False,
+    )  # fmt: skip
+    return done.returncode, json.loads(done.stdout)
+
+
+def _routable(crash_project, tmp_path):
+    """The crashed state under the file names the route reads."""
+    _, attempt = _crashed_attempt(crash_project, tmp_path)
+    (tmp_path / "own.sqlite").rename(tmp_path / "ownership.sqlite")
+    (tmp_path / "config.json").write_text(json.dumps({"verifier_account": False}))
+    tmp_path.chmod(0o700)
+    return attempt
+
+
+def test_route_recover_with_leftovers_counts_them_and_exits_3(crash_project, tmp_path):
+    attempt = _routable(crash_project, tmp_path)
+    _stuck_dir(tmp_path, attempt, "q")
+    try:
+        code, out = _route_recover(tmp_path)
+    finally:
+        (tmp_path / "runs").chmod(0o700)
+    assert code == 3 and out["leftover_run_dirs"] == 2
+    assert out["decisions"][0]["leftover_run_dirs"] == 2
+
+
+def test_route_recover_when_clean_counts_zero_and_exits_0(crash_project, tmp_path):
+    _routable(crash_project, tmp_path)
+    code, out = _route_recover(tmp_path)
+    assert code == 0 and out["leftover_run_dirs"] == 0
+
+
+def test_a_symlinked_leftovers_log_is_refused(crash_project, tmp_path):
+    _, attempt = _crashed_attempt(crash_project, tmp_path)
+    target = tmp_path / "elsewhere.jsonl"
+    log = tmp_path / "leftovers.jsonl"
+    log.symlink_to(target)
+    _stuck_dir(tmp_path, attempt, "q")
+    ledger, notary, journal = stores(tmp_path)
+    try:
+        (decision,) = recover(
+            ledger=ledger, notary=notary, journal=journal, run_root=tmp_path / "runs",
+            leftovers_log=log,
+        )  # fmt: skip
+    finally:
+        (tmp_path / "runs").chmod(0o700)
+    assert not target.exists()  # O_NOFOLLOW: the link was not followed or created through
+    assert decision.detail.endswith("(leftover log write failed)")
+    assert decision.leftover_run_dirs == 2
