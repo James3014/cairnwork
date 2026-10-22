@@ -162,8 +162,10 @@ def _verify_single_branch(clone: Path) -> None:
     if not specs:
         raise RuntimeError(f"{code}: origin has no fetch refspec; {advice}")
     for spec in specs:
-        if "*" in spec or "refs/heads/main" not in spec:
-            raise RuntimeError(f"{code}: origin fetch {spec!r} pulls more than main; {advice}")
+        # The source of a fetch refspec is "[+]<src>:<dst>"; accept only main exactly, so a
+        # wildcard ("refs/heads/*") or another branch ("refs/heads/mainline") is refused.
+        if spec.lstrip("+").split(":", 1)[0] != "refs/heads/main":
+            raise RuntimeError(f"{code}: origin fetch {spec!r} is not refs/heads/main; {advice}")
 
 
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:

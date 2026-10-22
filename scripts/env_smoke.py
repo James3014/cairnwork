@@ -137,7 +137,8 @@ def _mirror_multi_branch_reason(repo: Path) -> str | None:
     specs = [s for s in got.stdout.splitlines() if s.strip()]
     if not specs:
         return None
-    if any("*" in spec or "refs/heads/main" not in spec for spec in specs):
+    # The source of "[+]<src>:<dst>" must be exactly main; a wildcard or another branch is refused.
+    if any(spec.lstrip("+").split(":", 1)[0] != "refs/heads/main" for spec in specs):
         return (
             "mirror not single-branch; re-clone with: git clone --single-branch --branch main <url>"
         )
