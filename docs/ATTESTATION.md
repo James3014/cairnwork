@@ -137,12 +137,50 @@ uv run python -m cairnwork_attest.keys public --state <state-dir>    # prints th
   encrypting the key at rest (the state directory's permissions are the
   boundary).
 
+## Offline Verification
+
+Offline verification (`cairnwork_attest.verify.verify_bundle`) validates a DSSE
+attestation bundle against local git repository objects and a trusted Ed25519
+public key. Verification is completely fail-closed and runs with **no network access**.
+
+### What Is Recomputed vs. What Is Trusted
+
+- **What is trusted**:
+  - Only the Ed25519 public key you supply.
+  - The local git repository objects (`cat-file` and `diff-tree`).
+- **What is recomputed and checked** (in order, failing closed at the first violation):
+  1. `SIGNATURE_INVALID`: Bundle envelope is read (capped at 4 MiB, strict JSON) and its DSSE signature verified over `PAE(payloadType, payload)` using the supplied public key.
+  2. `STATEMENT_SHAPE`: Statement payload decodes as strict JSON with `_type == "https://in-toto.io/Statement/v1"`, `predicateType == "https://cairnwork.github.io/attestation/verified-change/v0.1"`, and an object `predicate`.
+  3. `SUBJECT_SHAPE`: Statement has exactly one subject entry with a valid 40-hex `gitCommit` digest, and `predicate.base_commit` is a 40-hex commit hash.
+  4. `COMMIT_NOT_FOUND`: Both candidate and base commits exist in the target git repository (`git cat-file -e <sha>^{commit}`).
+  5. `REQUEST_HASH_MISMATCH`: `predicate.request_hash` matches the recomputed SHA-256 digest of canonical JSON `predicate.request` using the notary digest rule.
+  6. `COMMIT_BINDING_MISMATCH`: `predicate.request.change_set.target_revision` and `source_revision` match `git-commit:<candidate>` and `git-commit:<base>`.
+  7. `MANIFEST_MISMATCH`: The change manifest is recomputed from raw git tree objects between base and candidate commits (`read_change_set`), and its canonical `change_manifest_hash` matches `predicate.request.change_set.diff_hash` and `predicate.response.hashes.change_manifest_hash` (when present).
+  8. `RESPONSE_NOT_VERIFIED`: The verification response reports status `"VERIFIED"` and integrity `"VALID"` with HTTP 200, echoes all request hashes (`acceptance_contract_hash`, `change_set_hash`, `verification_plan_hash`, `evidence_bundle_hash`), and satisfies `response_binding_problem` against the response's own reported `core_identity`.
+
+### CLI Usage
+
+The `cairnwork-attest` CLI provides key management, statement creation, and offline verification:
+
+```bash
+# 1. Key generation: generate an Ed25519 signing keypair into the state directory
+cairnwork-attest keygen --state <state-dir>
+
+# 2. Statement creation: read verified notary record and build/sign statement bundle
+cairnwork-attest statement --state <state-dir> --task-id <id> --attempt-id <id> --candidate <sha> --out bundle.json --sign
+
+# 3. Offline verification: verify the signed bundle using public key and git repo
+cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo>
+```
+
+On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
+
 ## Planned Follow-ups (Phase 2+)
 
-The following capabilities and gaps are explicitly deferred from Phase 1:
-- signing CLI / offline verify CLI (next PR)
-- `hidden_test_commit`: Durably binding the secret evaluation test commit in the notary record.
+The following capabilities and gaps are explicitly deferred:
+- Sigstore signing and transparency log integration.
+- Forge reporting and PR status checks.
+- `hidden_test_commit`: Durably binding secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
 - Timestamp validation: Timestamp is caller-supplied and not validated as UTC or against a trusted timestamping authority.
-- Dedicated CLI and network distribution workflows.

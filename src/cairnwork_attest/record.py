@@ -51,20 +51,45 @@ def _reject_constant(val: str) -> Any:
     raise RecordMalformed(f"unsupported JSON constant: {val!r}", code="RECORD_MALFORMED")
 
 
-def _parse_json_dict(raw: str, prefix: str) -> dict[str, Any]:
+def parse_strict_json(
+    raw: str,
+    *,
+    error_cls: type[AttestError] = RecordMalformed,
+    malformed_code: str = "RECORD_MALFORMED",
+    constant_code: str = "RECORD_MALFORMED",
+) -> Any:
+    """Parse JSON strictly: reject duplicate keys, NaN, Infinity, and -Infinity."""
+
+    def pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        res: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in res:
+                raise error_cls(f"duplicate key in JSON: {key!r}", code="DUPLICATE_KEY")
+            res[key] = value
+        return res
+
+    def reject_constant(val: str) -> Any:
+        raise error_cls(f"unsupported JSON constant: {val!r}", code=constant_code)
+
     try:
-        parsed = json.loads(
+        return json.loads(
             raw,
-            object_pairs_hook=_pairs_no_duplicates,
-            parse_constant=_reject_constant,
+            object_pairs_hook=pairs_hook,
+            parse_constant=reject_constant,
         )
-    except RecordMalformed:
+    except AttestError:
         raise
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise RecordMalformed(
-            f"{prefix}_json is not valid JSON: {exc}",
-            code=f"INVALID_{prefix.upper()}_JSON",
-        ) from exc
+        raise error_cls(f"invalid JSON: {exc}", code=malformed_code) from exc
+
+
+def _parse_json_dict(raw: str, prefix: str) -> dict[str, Any]:
+    parsed = parse_strict_json(
+        raw,
+        error_cls=RecordMalformed,
+        malformed_code=f"INVALID_{prefix.upper()}_JSON",
+        constant_code="RECORD_MALFORMED",
+    )
     if not isinstance(parsed, dict):
         raise RecordMalformed(
             f"{prefix}_json must decode to a JSON object",
