@@ -18,6 +18,7 @@ Rules (from Nexus-new's experience, see docs/LESSONS_FROM_NEXUS.md):
 from __future__ import annotations
 
 import shutil
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, OwnershipRecord
-from cairnwork.verifier_account import VerifierAccount
+from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
 from cairnwork.workspace import ATTEMPT_ID, WorkspaceError, remove_attempt_clone
 
 
@@ -50,10 +51,13 @@ def recover(
 ) -> list[Decision]:
     """Settle every BOUND or DISPATCHED task. Raises RunLockBusy if a run is active."""
     decisions = []
-    with runlock.held(ledger.path, exclusive=True):
+    # Hold the account's lock across the whole settle loop: a dead run's verifier ran as that
+    # account, and settling removes its leftover run directories (owned by the account) with
+    # account.remove, so no other run may touch the account meanwhile.
+    account_lock = verifier_account.exclusive() if verifier_account is not None else nullcontext()
+    with runlock.held(ledger.path, exclusive=True), account_lock:
         if verifier_account is not None:
-            with verifier_account.exclusive():
-                verifier_account.require_idle()  # a dead run's verifier ran as that account
+            verifier_account.require_idle()
         for record in ledger.in_flight():
             if record.owner != OWNER:  # not ours: report it, never settle it
                 decisions.append(
@@ -61,7 +65,9 @@ def recover(
                 )
                 continue
             try:
-                decisions.append(_settle(record, ledger, notary, journal, run_root))
+                decisions.append(
+                    _settle(record, ledger, notary, journal, run_root, verifier_account)
+                )
             except Exception as exc:  # noqa: BLE001 - one bad record must not stop the others
                 decisions.append(
                     Decision(
@@ -75,7 +81,7 @@ def recover(
     return decisions
 
 
-def _settle(record: OwnershipRecord, ledger, notary, journal, run_root) -> Decision:
+def _settle(record: OwnershipRecord, ledger, notary, journal, run_root, account=None) -> Decision:
     entries = journal.entries(record.task_id)
     if not entries and record.status == "DISPATCHED":
         # the journal is written before DISPATCHED, so this is the wrong or a lost journal
@@ -88,6 +94,8 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root) -> Decis
     killed = sweep_marked(ATTEMPT_ENV, attempt_id)  # SWEEP_UNAVAILABLE (-1): not checked
     dispatched = [e.detail for e in phases if e.phase == "DISPATCHED" and e.detail]
     _remove_leftovers(Path(dispatched[-1]) if dispatched else Path(run_root), attempt_id)
+    if account is not None:  # the verifier ran under the account's run root; the owner cannot rm it
+        _remove_account_leftovers(account, attempt_id)
     candidates = [e.detail for e in phases if e.phase == "CANDIDATE"]
     finished = [e.detail for e in phases if e.phase == "FINISHED"]
     verified = False
@@ -148,3 +156,35 @@ def _remove_leftovers(run_root: Path, attempt_id: str) -> None:
                 remove_attempt_clone(root, name)
             except WorkspaceError:
                 pass  # a leftover directory is disk space, not a wrong status
+
+
+def _remove_account_leftovers(account: VerifierAccount, attempt_id: str) -> None:
+    """Remove the attempt's verifier run directories under the account's OWN run root.
+
+    When a verifier account is used the verifier clones and scratch live under
+    ``account.run_root`` and are owned by the account, so only ``account.remove`` (chmod + rm
+    as that account) can delete them — the owner-side ``_remove_leftovers`` cannot. This mirrors
+    normal cleanup (verifiers.py removes the same dirs with ``account.remove``) and keeps the
+    verify run's log directory as evidence, as ``_remove_leftovers`` does."""
+    if not ATTEMPT_ID.fullmatch(attempt_id):  # the journal is a file: do not trust it for paths
+        return
+    root = account.run_root
+    if not root.is_dir():
+        return
+    targets: list[Path] = []
+    for work in root.glob(f"{attempt_id}-[vb]-v*.work"):  # a verifier checkout's own dir
+        if work.is_dir() and not work.is_symlink():
+            targets.append(work)
+    for private in root.glob(f"{attempt_id}-[vb]-v*.*"):  # verifier and base-test runs
+        if private.suffix == ".work" or private.is_symlink() or not private.is_dir():
+            continue
+        keep_log = f"{attempt_id}-v-" in private.name  # keep the verify log, drop only its run/
+        targets.append(private / "run" if keep_log else private)
+    for p in root.glob(f"{attempt_id}-[vb]-v*"):  # the clones themselves
+        if p.is_dir() and not p.is_symlink() and "." not in p.name:
+            targets.append(p)
+    for target in targets:
+        try:
+            account.remove(target)
+        except VerifierAccountError:
+            pass  # a leftover directory is disk space, not a wrong status
