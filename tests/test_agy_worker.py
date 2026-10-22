@@ -33,14 +33,16 @@ def fake_agy(tmp_path, body):
     return str(path)
 
 
-def expire_once_ready(monkeypatch, ready):
+def expire_once_ready(monkeypatch, ready, only=None):
     """Make the worker's timeout fire only after the fake binary wrote `ready`, so a loaded
-    host cannot kill it (or time it out) before it has set up what the test inspects."""
+    host cannot kill it (or time it out) before it has set up what the test inspects.
+    With `only`, just the process started with that path expires; others wait normally."""
     real = subprocess.Popen
 
     class Popen(real):
         def wait(self, timeout=None):
-            if timeout is not None:
+            mine = only is None or (isinstance(self.args, list) and self.args[0] == only)
+            if timeout is not None and mine:
                 deadline = time.monotonic() + 120
                 while not ready.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)

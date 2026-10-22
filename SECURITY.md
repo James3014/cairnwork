@@ -35,6 +35,14 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
 - CI 只用最小權限（`permissions: contents: read`）。
 - 不在 repo 裡寫主機路徑、內部 IP、帳號 email。
 - 依賴固定版本。升級要用獨立 PR。
+- **worker 帳號隔離（state `agy_run_as_user`，#183）是帳號邊界，不是完成的證明。** 設了之後 agy 模型程序跑在
+  `_cairnwork_worker` 帳號下（經調度器、`sudo` 與 `agy-worker-exec` wrapper），讀不到 owner 的家目錄、agy 帳號池、
+  Cairnwork 的 repo／log 和其他 attempt。它**不**保證：run 之間的分隔（同一個 uid，靠調度器的 per-run Seatbelt
+  profile）、調度器本身的權限（仍是 owner）、也不會讓 worker 的輸出變得可信（候選仍只靠快照與 verifier 判定）。
+  調度器回報帳號或 wrapper 失敗時 attempt 直接失敗（`WORKER_ACCOUNT_FAILED`），不會退回以 owner 身分執行；
+  owner 無法對 worker uid 送訊號，殺掉調度器後靠 wrapper 的 `--sweep` 清掃，清不乾淨就是 `WORKER_SWEEP_UNCLEAN`，
+  run 目錄保留。情境三發生在 worker 帳號下時，先查 `/Users/Shared/cairnwork-worker/worker-runs/` 有沒有留下的 run。
+  細節與設定見 `docs/ISSUE_INTAKE.md`。
 - **verifier 的通過是證據，不是完成的證明。** 候選程式碼和測試跑在同一個程序，判決在候選碰得到的
   地方產生，能讀環境的候選仍可偽造。一個任務是否真的完成，信任分層在 verifier 以外：Core VERIFIED
   綁定確切 commit、獨立審查、線上見證、真實使用、以及在 A/B 贏過裸骨幹。

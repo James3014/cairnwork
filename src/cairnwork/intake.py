@@ -6,8 +6,8 @@ in one state directory (owner-only):
 
     ACCEPTING          present: new tasks are taken; absent (the default): refused
     config.json        {"model", "agy", "agy_dispatch", "agy_dispatch_*_seconds",
-                        "verifier_account", "verifier_python", "gh", "mirror", "core_url",
-                        "core_token_file", "core_identity", "test_roots"}
+                        "agy_run_as_user", "verifier_account", "verifier_python", "gh",
+                        "mirror", "core_url", "core_token_file", "core_identity", "test_roots"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -26,6 +26,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -69,6 +70,10 @@ DEFAULT_CONFIG = {
     "agy_dispatch_pool_wait_seconds": 600,
     "agy_dispatch_provider_stall_seconds": 900,
     "agy_dispatch_stream_no_progress_seconds": 900,
+    # The macOS account the dispatcher runs agy as (its --run-as-user; scripts/
+    # setup_worker_user.sh, Issue #183). Needs agy_dispatch: only the dispatcher can change
+    # account. None (the default) runs agy as the owner, as before.
+    "agy_run_as_user": None,
     "verifier_account": True,
     "verifier_python": None,
     # The gh the Issue runner was started with (cairnwork-issues writes it), so the runner
@@ -153,6 +158,12 @@ class Intake:
         for key in DEFAULT_CONFIG.keys() & loaded.keys():
             if key.startswith("agy_dispatch_") and not _seconds(loaded[key]):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be a whole number of seconds")
+        if loaded.get("agy_run_as_user") is not None:
+            user = loaded["agy_run_as_user"]
+            if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user):
+                raise IntakeRefused("BAD_CONFIG", "agy_run_as_user must be an account name")
+            if loaded.get("agy_dispatch") is None:
+                raise IntakeRefused("BAD_CONFIG", "agy_run_as_user needs agy_dispatch")
         if loaded.get("core_identity") is not None and not isinstance(
             loaded["core_identity"], dict
         ):
