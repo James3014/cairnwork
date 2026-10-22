@@ -51,19 +51,28 @@ def test_stderr_tail_strips_the_whole_userinfo_and_keeps_plain_urls(raw, expecte
     assert stderr_tail(raw) == expected
 
 
-@pytest.mark.parametrize("split", ["\r", "\x0b", "\x85", "\n", "\u202e"])
+@pytest.mark.parametrize("split", ["\r", "\t", "\x0b", "\x85", "\n", "\u202e"])
 def test_stderr_tail_redacts_userinfo_split_by_a_control_character(split):
     tail = stderr_tail(f"fatal: https://u:p{split}@host/x failed")
     assert "u:p" not in tail and "@" not in tail and "host/x failed" in tail
 
 
-def test_the_error_names_the_subcommand_not_a_leading_c_override(monkeypatch, tmp_path):
+def test_stderr_tail_redacts_a_tab_inside_the_userinfo():
+    tail = stderr_tail("fatal: https://u:p\tq@host/x failed")
+    assert tail == "fatal: https://host/x failed"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("-c", "x=y", "--no-pager", "push"), ("-C", "p", "push"), ("-c", "x=y", "-C", "p", "push")],
+)
+def test_the_error_names_the_subcommand_not_a_leading_option_value(monkeypatch, tmp_path, args):
     def boom(*a, **kw):
         raise subprocess.TimeoutExpired("git", 1)
 
     monkeypatch.setattr(gitcmd.subprocess, "run", boom)
     with pytest.raises(GitCommandError) as caught:
-        run_git(tmp_path, "-c", "x=y", "--no-pager", "push")
+        run_git(tmp_path, *args)
     assert str(caught.value) == "GIT_COMMAND_FAILED: git push failed"
 
 

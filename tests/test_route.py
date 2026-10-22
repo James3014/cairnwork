@@ -125,6 +125,15 @@ def test_drained_by_default_and_unknown_tasks_are_reported(state, project):
     }
 
 
+def test_submit_refuses_a_base_that_is_not_on_origin_main(state, project):
+    route(state, "accept")
+    git(project, "checkout", "-q", "-b", "hidden")  # a commit that is on no main (the #76 class)
+    commit_change(project, {"src/calc.py": "x = 1\n"})
+    code, out = route(state, "submit", stdin=request(project))
+    assert code == 2 and out["error"] == "BASE_NOT_ON_MAIN"
+    assert route(state, "in-flight")[1]["count"] == 0
+
+
 def test_submitted_task_is_fixed_and_core_verified(state, project):
     route(state, "accept")
     code, out = route(state, "submit", stdin=request(project))
