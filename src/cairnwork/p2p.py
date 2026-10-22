@@ -83,6 +83,7 @@ def _probe(task, files, run_root, result, verifying, budget):
         task.repo, task.base_commit, (VerifierSpec("p2p-probe", files),), run_root,
         f"{result.attempt_id}-p", attempt_id=result.attempt_id, account=verifying[0],
         python=verifying[1], base_commit=task.base_commit, timeout=budget,
+        import_paths=task.import_paths,
     )  # fmt: skip
     for run in runs:  # base evidence is not for Core
         shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
@@ -185,6 +186,7 @@ def _run_once(spec, plan, note, task, judged, run_root, result, verifying, tag) 
         task.repo, judged, (spec,), run_root, f"{result.attempt_id}-{tag}",
         attempt_id=result.attempt_id, account=verifying[0], python=verifying[1],
         base_commit=task.base_commit, timeout=plan.timeout, note=note,
+        import_paths=task.import_paths,
     )  # fmt: skip
     try:
         (Path(run.log_path).parent / "p2p-selection.json").write_text(note)

@@ -81,6 +81,7 @@ class TaskSpec:
     allow_deletions: bool = False
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
     test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
+    import_paths: tuple[str, ...] = ()  # state config: dirs prepended to the import path (#82)
     test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
     p2p_mode: str = DIRECT_MODE  # state config p2p_selection (p2p.py); only with a test_commit
     p2p_budget: int = DEFAULT_BUDGET_SECONDS  # state config p2p_time_budget_seconds
@@ -277,6 +278,7 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
         account=verifying[0],
         python=verifying[1],
         base_commit=task.base_commit,
+        import_paths=task.import_paths,
     )
     teeth = failed_on_base(runs, targets)
     for run in runs:  # not evidence for Core; would show the tests to later workers
@@ -307,6 +309,7 @@ def judge_candidate(
         account=verifying[0],
         python=verifying[1],
         base_commit=task.base_commit,
+        import_paths=task.import_paths,
     )
     if p2p is not None:
         p2p_runs, result.p2p = run_plan(p2p, task, judged, run_root, result, verifying)
