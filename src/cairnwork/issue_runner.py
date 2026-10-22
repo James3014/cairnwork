@@ -36,6 +36,8 @@ from typing import Any
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
+from cairnwork.lineage import require_on_main
+from cairnwork.lineage import verify_origin as _verify_origin
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
 from cairnwork.pipeline import TaskRejected
 from cairnwork.workspace import ATTEMPT_ID
@@ -49,7 +51,6 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
 )
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-ORIGIN = re.compile(r"https://github\.com/([^/:@\s]+/[^/:@\s]+)")
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
 
 
@@ -125,23 +126,6 @@ class GitHub:
             "pr", "create", "-R", self.repo, "--draft", "--base", "main", "--head", branch,
             "--title", title, "--body-file", "-", stdin=body,
         ).strip()  # fmt: skip
-
-
-def _verify_origin(clone: Path, repo: str) -> None:
-    """Every fetch and push URL of origin must be https://github.com/<repo>.
-
-    ``get-url --push --all origin`` is the set ``git push origin`` uses (insteadOf included),
-    so the push must name the remote, never a URL built here."""
-    for flags in (("--all",), ("--push", "--all")):
-        urls = _git(clone, "remote", "get-url", *flags, "origin").splitlines()
-        if not any(urls):
-            raise RuntimeError("LINEAGE_REMOTE_UNKNOWN: origin has no URL")
-        for url in urls:
-            found = ORIGIN.fullmatch(url)
-            if not found:
-                raise RuntimeError(f"LINEAGE_REMOTE_UNKNOWN: origin {url!r} is not a github URL")
-            if found[1].removesuffix(".git").lower() != repo.lower():
-                raise RuntimeError(f"LINEAGE_REPOSITORY_MISMATCH: origin {url!r} is not {repo}")
 
 
 def _verify_single_branch(clone: Path) -> None:
@@ -300,6 +284,8 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     if not ATTEMPT_ID.fullmatch(attempt) or not COMMIT.fullmatch(commit):
         raise ValueError(f"unexpected attempt or commit: {attempt!r} {commit!r}")
     request = intake.load_request(str(status["task_id"]))
+    # take() fetched main this pass; a stale ref can only refuse, never admit
+    require_on_main(clone, request.base_commit, fetch=False)
     _git(clone, "merge-base", "--is-ancestor", request.base_commit, commit)
     changed = _git(clone, "diff", "--name-only", "--no-renames", request.base_commit, commit)
     tests = ()
