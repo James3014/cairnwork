@@ -184,13 +184,16 @@ def build_policy(
 ) -> Policy:
     """bwrap flags, one argv element per line; later flags override earlier ones.
 
-    ``mask_home_credentials`` masks the credential dirs/files under ``home``. It applies only
-    when the sandbox runs as the owner of that home (the launching-account path): under the
-    dedicated verifier account (Issue #84) the sandbox runs as a different uid that cannot
-    even enter the owner's ``0700`` home, so those tmpfs mounts would fail with EPERM — and
-    are unnecessary, because the uid boundary already denies the owner's credentials. The
-    narrow-check still uses the real home, and the system socket / ``/run/user`` masks (which
-    do not touch the owner's home) are always applied.
+    ``mask_home_credentials`` true is the launching-account path: the sandbox runs as the owner
+    of ``home``, who can mount over any path in their own home, so every existing credential
+    dir/file is masked. False is the dedicated verifier account (Issue #84): the sandbox runs as
+    a different uid, so a tmpfs over a path it cannot even resolve (a ``0700`` home) would fail
+    with EPERM. It is not all-or-nothing, though — a *world-readable* secret under a loosened
+    (``0755``) home still leaks to that uid, so the reachable, leaking credential paths are masked
+    (traversable ancestors + other-readable target): exactly the ones that both leak and can be
+    mounted without EPERM. A correctly ``0700`` home yields none, as before. The narrow-check
+    still uses the real home, and the system socket / ``/run/user`` masks (which do not touch the
+    owner's home) are always applied.
     """
     real_home = _safe(home or Path.home())
     # read_roots are validated but never emitted: the whole root is already bound read-only, so
@@ -222,19 +225,12 @@ def build_policy(
     ]
     for root in writes:
         flags += ["--bind", root, root]
-    # Mask only credential paths that exist: a tmpfs or /dev/null bind over a path that is not
-    # there fails on top of the read-only root (no mountpoint to create), and a path that does
-    # not exist has nothing to leak. The policy is rebuilt per run, so one created later is
-    # masked on the next run.
-    if mask_home_credentials:
-        for rel in _CRED_DIRS:
-            target = f"{real_home}/{rel}"
-            if os.path.lexists(target):
-                flags += ["--tmpfs", target]
-        for rel in _CRED_FILES:
-            target = f"{real_home}/{rel}"
-            if os.path.lexists(target):
-                flags += ["--ro-bind", "/dev/null", target]
+    # Mask only credential paths that exist (a bind over an absent path fails on the read-only
+    # root, and an absent path leaks nothing) and, off the owner path, only those the account uid
+    # can both reach and read. The policy is rebuilt per run, so one created later is masked next.
+    for rel, is_dir in _home_cred_masks(real_home, owner=mask_home_credentials):
+        target = f"{real_home}/{rel}"
+        flags += ["--tmpfs", target] if is_dir else ["--ro-bind", "/dev/null", target]
     # Mask root-equivalent daemon sockets (Docker/Podman/containerd): a read-only root bind
     # does not stop connect() to a pathname socket, and no network namespace covers it.
     # Bind over the canonical path (realpath collapses the /var/run -> /run symlink and the
@@ -251,6 +247,42 @@ def build_policy(
     for socket_dir in _socket_dirs_to_empty():
         flags += ["--tmpfs", _safe(socket_dir)]
     return Policy("\n".join(flags) + "\n")
+
+
+def _home_cred_masks(real_home: str, owner: bool) -> list[tuple[str, bool]]:
+    """``(relative path, is_dir)`` for each existing credential path under ``real_home`` to mask.
+
+    ``owner`` true (the owner runs the sandbox): every existing credential path, since the owner
+    can mount over any path in their own home. False (the dedicated account, a different uid):
+    only the paths that uid can both reach and read, so the mount does not EPERM and the mask is
+    not wasted on a path that does not leak."""
+    masks: list[tuple[str, bool]] = []
+    for rel, is_dir in [(d, True) for d in _CRED_DIRS] + [(f, False) for f in _CRED_FILES]:
+        if not os.path.lexists(f"{real_home}/{rel}"):
+            continue
+        if owner or _other_can_read(real_home, rel, is_dir):
+            masks.append((rel, is_dir))
+    return masks
+
+
+def _other_can_read(real_home: str, rel: str, is_dir: bool) -> bool:
+    """True if a uid that is neither the owner nor in the path's group could reach and read
+    ``real_home/rel``: every ancestor directory within the home is world-traversable (``o+x``)
+    and the target is world-readable (a file ``o+r``; a directory ``o+r`` and ``o+x``, to list and
+    enter). A stat error or a broken symlink means not reachable — do not mask a path we cannot
+    confirm, rather than risk an EPERM mount."""
+    try:
+        ancestor = real_home
+        for part in rel.split("/")[:-1]:  # home, then each intermediate dir (not the target)
+            if not os.stat(ancestor).st_mode & 0o001:
+                return False
+            ancestor = f"{ancestor}/{part}"
+        if not os.stat(ancestor).st_mode & 0o001:  # the target's parent directory
+            return False
+        mode = os.stat(f"{real_home}/{rel}").st_mode
+    except OSError:
+        return False
+    return bool(mode & 0o004) and (not is_dir or bool(mode & 0o001))
 
 
 def _socket_dirs_to_empty() -> list[str]:

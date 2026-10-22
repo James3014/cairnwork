@@ -100,21 +100,49 @@ def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_pat
     assert lines[netrc - 2 : netrc + 1] == ["--ro-bind", "/dev/null", f"{real_home}/.netrc"]
 
 
-def test_home_credential_masks_are_skipped_when_asked(tmp_path):
+def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path):
     # Under the dedicated account (#84) the sandbox runs as a uid that cannot enter the owner's
-    # 0700 home, so those tmpfs mounts would EPERM; mask_home_credentials=False skips them. The
-    # narrow-check still uses the real home, and the write bind is unaffected.
+    # 0700 home, so those tmpfs mounts would EPERM; mask_home_credentials=False then masks nothing.
+    # The narrow-check still uses the real home, and the write bind is unaffected.
     home, work = _home(tmp_path), tmp_path / "work"
     work.mkdir()
     for rel in bwrap._CRED_DIRS:
         (home / rel).mkdir(parents=True, exist_ok=True)
     for rel in bwrap._CRED_FILES:
         (home / rel).write_text("secret\n")
+    home.chmod(0o700)  # a correctly private home: the account uid cannot enter it
     lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
     real_home = str(home.resolve())
     assert f"{real_home}/.ssh" not in lines and f"{real_home}/.netrc" not in lines
     assert "--tmpfs" not in lines.splitlines()  # the autouse fixture also clears /run/user
     assert str(work.resolve()) in lines  # the write bind is still there
+
+
+def test_reachable_world_readable_credentials_are_masked_under_the_account(tmp_path):
+    # Issue #93: on a loosened (0755) owner home the account uid can reach credential paths, so a
+    # world-readable one still leaks. mask_home_credentials=False masks exactly the reachable,
+    # leaking paths (not the unreadable ones, whose mask would be wasted and could EPERM).
+    home, work = _home(tmp_path), tmp_path / "work"
+    work.mkdir()
+    home.chmod(0o755)  # traversable by others — a misconfigured home
+    (home / ".netrc").write_text("secret\n")
+    (home / ".netrc").chmod(0o644)  # world-readable file: leaks, and can be masked
+    (home / ".git-credentials").write_text("token\n")
+    (home / ".git-credentials").chmod(0o600)  # owner-only: no leak, left unmasked
+    (home / ".ssh").mkdir()
+    (home / ".ssh").chmod(0o700)  # owner-only dir: the account cannot enter it, left unmasked
+    (home / ".config").mkdir()
+    (home / ".config").chmod(0o755)  # world-readable+traversable dir: its contents leak
+    lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
+    real_home = str(home.resolve())
+    netrc = lines.splitlines().index(f"{real_home}/.netrc")
+    assert lines.splitlines()[netrc - 2 : netrc + 1] == [
+        "--ro-bind", "/dev/null", f"{real_home}/.netrc",
+    ]  # fmt: skip
+    config = lines.splitlines().index(f"{real_home}/.config")
+    assert lines.splitlines()[config - 1] == "--tmpfs"
+    assert f"{real_home}/.git-credentials" not in lines  # owner-only file: not masked
+    assert f"{real_home}/.ssh" not in lines  # owner-only dir: not masked
 
 
 def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
