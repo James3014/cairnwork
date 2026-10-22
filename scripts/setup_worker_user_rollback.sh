@@ -8,6 +8,14 @@
 # Run as the owner with: sudo zsh scripts/setup_worker_user_rollback.sh [<owner-username>] [--purge-dirs]
 # The owner is only needed to hand worker-runs back to the owner's group; it is read from the
 # directory itself when omitted. Idempotent: anything already absent is skipped.
+#
+# Orphan files: the account is deleted only when no file under /Users/Shared, /tmp, /var/tmp or
+# /private/var/folders is still owned by the worker uid. After ANY real agy run the worker owns its own
+# per-user temp/cache entry under /private/var/folders (macOS creates one per uid on first use), so expect
+# the first rollback to stop there. To find and remove it, BEFORE the account is gone:
+#   sudo -u _cairnwork_worker /usr/bin/getconf DARWIN_USER_DIR   # e.g. /var/folders/xy/<hash>/0/
+#   sudo rm -rf /private/var/folders/xy/<hash>                   # the parent of that 0/ (C/ and T/ too)
+# then re-run this script.
 set -euo pipefail
 
 WORKER="_cairnwork_worker"
@@ -86,7 +94,7 @@ if [[ -e "$RUNS" || -L "$RUNS" ]]; then
   chgrp "$OGROUP" "$RUNS" || die "chgrp $RUNS failed"
   chmod 0700 "$RUNS" || die "chmod $RUNS failed"
   chmod -N "$RUNS" || die "cannot clear ACLs on $RUNS"
-  [[ "$(stat -f '%Su %Sg %Lp' "$RUNS")" == "$OWNER $OGROUP 700" ]] || die "$RUNS is not '$OWNER $OGROUP 700' after neutralising"
+  [[ "$(stat -f '%Su %Sg %Mp%Lp' "$RUNS")" == "$OWNER $OGROUP 0700" ]] || die "$RUNS is not '$OWNER $OGROUP 0700' (no setgid) after neutralising"
   [[ -z "$(ls -lde "$RUNS" | sed -n '2,$p')" ]] || die "$RUNS still has an ACL"
   echo "neutralised $RUNS (owner-only, 0700, no ACL)"
 fi
@@ -95,12 +103,12 @@ fi
 #    id to the next service account, which would inherit them (orphan files / uid reuse).
 if dscl . -read "/Users/$WORKER" UniqueID >/dev/null 2>&1; then
   orphans=""
-  for d in "$ROOT" /tmp /var/tmp /private/var/folders; do
+  for d in /Users/Shared /tmp /var/tmp /private/var/folders; do   # /Users/Shared covers ROOT
     [[ -d "$d" ]] || continue
     found=$(find "$d" -xdev -uid "$WUID" -print -quit) || die "find under $d failed; cannot prove no files are owned by uid $WUID"
     [[ -z "$found" ]] || orphans+="$found "
   done
-  [[ -z "$orphans" ]] || die "files owned by uid $WUID remain (e.g. $orphans); remove or chown them by hand, then re-run"
+  [[ -z "$orphans" ]] || die "files owned by uid $WUID remain (e.g. $orphans); remove or chown them by hand, then re-run (a /private/var/folders entry after an agy run is expected: see the header)"
 fi
 if dscl . -read "/Users/$WORKER" >/dev/null 2>&1; then
   dscl . -delete "/Users/$WORKER" || die "cannot delete user $WORKER"
