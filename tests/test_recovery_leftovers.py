@@ -67,12 +67,12 @@ def _hidden(root: Path, attempt: str = "*") -> list[Path]:
 
 def _driver(p2p_project, state, step, *account):
     repo, base, tests = p2p_project
-    return subprocess.Popen(
-        [sys.executable, str(DRIVER), str(repo), str(state), base, tests, step, *account],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    with open(Path(state) / "driver.err", "w") as err:  # the child keeps its own copy
+        return subprocess.Popen(
+            [sys.executable, str(DRIVER), str(repo), str(state), base, tests, step, *account],
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+        )
 
 
 def _kill_in_p2p(p2p_project, state, step, run_root, *account):
@@ -80,12 +80,11 @@ def _kill_in_p2p(p2p_project, state, step, run_root, *account):
     proc = _driver(p2p_project, state, step, *account)
     deadline = time.monotonic() + 240
     while not ({p.name for p in run_root.glob(f"*-{step}-v*")} - before):
-        assert proc.poll() is None, proc.stderr.read()[-2000:]
+        assert proc.poll() is None, (state / "driver.err").read_text()[-2000:]
         assert time.monotonic() < deadline
         time.sleep(0.2)
     os.kill(proc.pid, signal.SIGKILL)
     proc.wait()
-    proc.stderr.close()
 
 
 def _recover(state, account=None):
@@ -105,8 +104,7 @@ def _assert_clean_and_logs_kept(root: Path, attempt: str):
 @pytest.mark.sandbox
 def test_a_normal_run_leaves_nothing_but_the_logs(p2p_project, tmp_path):
     proc = _driver(p2p_project, tmp_path, "n")
-    assert proc.wait(timeout=300) == 0, proc.stderr.read()[-2000:]
-    proc.stderr.close()
+    assert proc.wait(timeout=300) == 0, (tmp_path / "driver.err").read_text()[-2000:]
     runs = tmp_path / "runs"
     names = [p.name for p in runs.iterdir()]
     # only the private log dirs (verify and P2P evidence) are kept: no clone, checkout or scratch
