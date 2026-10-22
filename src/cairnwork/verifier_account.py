@@ -224,19 +224,17 @@ class VerifierAccount:
         procs = self._list(deadline, attempts)
         if procs is None:
             return -1
-        if not procs or sys.platform != "darwin":
-            # launchd's on-demand distnoted is macOS-only; elsewhere every process is an escape
-            # (and proc_pidpath does not exist off Darwin), so skip the exemption entirely.
+        # Only a launchd child (ppid 1) can be an exempt daemon, and proc_pidpath is macOS-only, so
+        # resolve real paths (a separate probe, as the account) ONLY for those pids, and not at all
+        # off Darwin or when none have ppid 1 — every other process simply counts.
+        launchd = [pid for pid, ppid in procs if ppid == 1]
+        if not launchd or sys.platform != "darwin":
             return len(procs)
-        real = self._real_paths([pid for pid, _ in procs])
+        real = self._real_paths(launchd)
         if real is None:
             return -1
-        escaped = 0
-        for pid, ppid in procs:
-            if verifier_escape.is_exempt(real.get(pid), ppid):
-                continue  # a launchd system daemon: killed like the rest, not an escape
-            escaped += 1
-        return escaped
+        exempt = sum(1 for pid in launchd if verifier_escape.is_exempt(real.get(pid), 1))
+        return len(procs) - exempt
 
     def reap(self) -> int:
         """Kill everything the account runs; return how many escaped processes were running.
