@@ -2,6 +2,22 @@
 
 Cairnwork 是 Nexus-new 的後繼產品：一個接任務、執行、驗證，再交給 nexus-core 公證的 agent 工作主體。三層結構（第一層：包住模型前後的輔助與完成驗證；第二層：本機模型能力；第三層：前沿模型）從這裡長出來。
 
+## 定位：完成有證據
+
+Cairnwork 是 AI 寫程式代理人的交付驗證層。核心價值不是提高成功率，而是「完成有證據」：變更唯有通過 worker 執行時看不到的延後隱藏測試才算完成，並可附上離線可驗證的簽署證明（見 [docs/ATTESTATION.md](docs/ATTESTATION.md)）。具體是四件事：
+
+- **僅驗收完成**：沒通過驗收程序的候選 commit 不算完成。
+- **延後隱藏測試**：驗收用的測試在 worker 結束後才套到候選上，worker 的 clone 只有 base（現況限制：測試 commit 仍在目標 repo 的分支上，worker 專屬帳號與非公開位置在 #19 進行中）。
+- **隔離驗證器＋Core 公證**：驗收在專用帳號與沙盒（macOS Seatbelt／Linux bubblewrap）執行，請求與結果進只增不改的紀錄，由 Core（nexus-certify）核驗並綁定確切的候選 commit。
+- **簽署證明可離線驗證**：驗收紀錄可用 `cairnwork-attest statement --sign` 產出 in-toto＋DSSE Ed25519 證明包，第三方用 `cairnwork-attest verify` 只靠公鑰與本機 git 物件離線重算；PR 上可用 [cairnwork/verify-action](https://github.com/cairnwork/verify-action) 自動檢查。
+
+不主張：
+
+- 不主張提高模型解決任務的成功率（強模型在小 bug 上本來就很少錯）。
+- 不主張取代人工程式碼審查。
+- 不主張是互動式 coding agent 或對話助理。
+- 不主張驗證通過就沒有缺陷：Nexus-new#2813（修正 PR #2856）是 Core VERIFIED、但獨立審查仍抓到拒絕檢查可被繞過的實例。驗證是證據，不是證明。
+
 Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md`；議會條文 A–I：`nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md`。
 
 ## 快速開始
@@ -49,7 +65,7 @@ cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證�
 
 ## 對外說法
 
-README、發布說明、PR 描述只寫已經量到的結果，不寫預期的提升。11/16 試點到期時，評估標準是有沒有在 A/B 贏過裸骨幹、四種演練有沒有通過，不看功能數或 PR 數。
+README、發布說明、PR 描述只寫已經量到的結果，不寫預期的提升；主張一律照「完成有證據」定位（交付有程序證據），不講提高模型成功率。11/16 試點到期時，評估標準是有沒有在 A/B 贏過裸骨幹、四種演練有沒有通過，不看功能數或 PR 數。
 
 ## 參與方式
 
