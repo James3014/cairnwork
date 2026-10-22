@@ -72,6 +72,7 @@ def test_a_sibling_regression_in_a_flat_test_directory_is_caught(project, tmp_pa
     # a real test failure is a plain failure: re-run once, fails again, the first run recorded
     assert result.p2p["rerun"]["failed"] == ["tests/test_sibling.py::test_neg"]
     assert result.p2p["rerun"]["mutated"] == [] and result.p2p["rerun"]["survivors"] == 0
+    assert result.p2p["p2p_rerun_passed"] is False
 
 
 def test_the_same_fix_without_the_regression_is_verified_and_the_rule_is_recorded(

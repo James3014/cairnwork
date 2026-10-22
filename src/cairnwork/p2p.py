@@ -16,8 +16,10 @@ Failure paths, none of which can end VERIFIED:
 * the candidate run fails only because a test failed (``VerifierRun.plain_failure``: no timeout,
   mutated checkout, surviving process or oversized log, and the guard reported a failed test):
   it is re-run once (flaky rule). A pass on the re-run is what Core sees, with the first run's
-  failing tests and integrity signals recorded in the rule (``rerun``); a second failure is what
-  Core sees, so not verified. Any other failed run blocks as it is, without a re-run;
+  failing tests and integrity signals recorded in the rule (``rerun``) and ``p2p_rerun_passed``
+  set, so a clean pass and a pass after re-run can be told apart (the verdict is the same); a
+  second failure is what Core sees, so not verified. Any other failed run blocks as it is,
+  without a re-run;
 * the p2p verifier id clashes with an author verifier: REFUSED.
 
 ``p2p_time_budget_seconds`` bounds each run (probe, degraded probe, candidate run, re-run).
@@ -38,10 +40,8 @@ from posixpath import basename
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.issue_task import test_target
-from cairnwork.p2p_selection import select_p2p_targets
+from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, select_p2p_targets
 from cairnwork.verifiers import VerifierRun, VerifierSpec, run_verifiers
-
-DEFAULT_BUDGET_SECONDS = 300
 
 
 class P2PRejected(TestCommitRejected):
@@ -165,13 +165,19 @@ def run_plan(
     run = _run_once(plan.spec, plan, plan.note, task, judged, run_root, result, verifying, "q")
     if run.observation.passed or not run.plain_failure:  # timeout, mutation, survivors...: block
         return (run,), plan.rule
-    failing = sorted(n for n, outcome in run.outcomes.items() if outcome != "passed")
+    failing = sorted(_clean(n) for n, outcome in run.outcomes.items() if outcome != "passed")
     first = {"failed": failing, "returncode": run.returncode, "timed_out": run.timed_out,
              "mutated": list(run.mutated), "survivors": run.survivors, "ran": run.ran}  # fmt: skip
     rule = plan.rule | {"rerun": first}
     note = json.dumps(rule, sort_keys=True)
     run = _run_once(plan.spec, plan, note, task, judged, run_root, result, verifying, "r")
-    return (run,), rule
+    # Not in the note: the flag is the re-run's outcome, which the note is hashed before.
+    return (run,), rule | {"p2p_rerun_passed": bool(run.observation.passed)}
+
+
+def _clean(name: str) -> str:
+    """A test id for the record: printable, bounded."""
+    return "".join(c if c.isprintable() else "?" for c in str(name))[:200]
 
 
 def _run_once(spec, plan, note, task, judged, run_root, result, verifying, tag) -> VerifierRun:
