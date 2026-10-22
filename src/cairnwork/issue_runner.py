@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.deferred_tests import TestCommitRejected
+from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.lineage import require_on_main
@@ -134,14 +135,14 @@ def _verify_single_branch(clone: Path) -> None:
     A wildcard fetch refspec means a full clone that pulled every branch."""
     # check=False: git config exits 1 when the key is absent, which is the no-refspec case below,
     # not a command failure — reading it through _git would raise a generic "git config failed".
-    done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
-        ["git", "-C", str(clone), "config", "--get-all", "remote.origin.fetch"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    specs = [s for s in done.stdout.splitlines() if s]
+    try:
+        specs = [
+            s
+            for s in run_git(clone, "config", "--get-all", "remote.origin.fetch").splitlines()
+            if s
+        ]
+    except GitCommandError:
+        specs = []
     advice = "re-clone with: git clone --single-branch --branch main <url>"
     code = "LINEAGE_MIRROR_NOT_SINGLE_BRANCH"
     if not specs:
@@ -204,9 +205,7 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     }
     if task.test_commit:  # bind to the tests' parent; the tests stay off this machine
         payload["test_commit"] = task.test_commit
-        payload["base_commit"] = _test_base(
-            github, clone, task.test_commit, base, intake.test_store()
-        )
+        payload["base_commit"] = _test_base(github, clone, task.test_commit, intake.test_store())
     out = intake.submit(payload)
     _remember(intake, github.repo, number, out["task_id"], task.block_sha256)
     github.relabel(number, RUNNING, QUEUE)
@@ -217,7 +216,7 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     return out
 
 
-def _test_base(github: GitHub, clone: Path, test_commit: str, main: str, store) -> str:
+def _test_base(github: GitHub, clone: Path, test_commit: str, store) -> str:
     """The test commit's only parent (private store #119, else GitHub API); must be on main."""
     try:
         if store.has(test_commit) or store.required:
@@ -233,7 +232,7 @@ def _test_base(github: GitHub, clone: Path, test_commit: str, main: str, store) 
     if len(parents) != 1 or not COMMIT.fullmatch(parents[0]):
         raise IssueRefused("TASK_TEST_COMMIT_SHAPE", "the test commit needs exactly one parent")
     try:
-        _git(clone, "merge-base", "--is-ancestor", parents[0], main)
+        require_on_main(clone, parents[0], fetch=False)  # take() fetched main this pass
     except RuntimeError as exc:
         raise IssueRefused("TASK_TEST_BASE_NOT_ON_MAIN", parents[0]) from exc
     return parents[0]
@@ -342,12 +341,12 @@ def _recall(intake: Intake, repo: str, number: int) -> dict[str, Any] | None:
 
 
 def _git(repo: Path, *args: str) -> str:
-    done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=300, check=False
-    )
-    if done.returncode != 0:
-        raise RuntimeError(f"git {args[0]} failed: {done.stderr.strip()[-300:]}")
-    return done.stdout
+    """The one git runner of this module, shared with lineage: no GIT_* environment, so the
+    remote that is checked is the remote that is pushed to (GIT_CONFIG_*, GIT_DIR, ...)."""
+    try:
+        return run_git(repo, *args)
+    except GitCommandError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> int:

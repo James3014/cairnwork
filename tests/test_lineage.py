@@ -48,7 +48,7 @@ def test_a_local_commit_ahead_of_origin_main_is_refused(setup):
         lineage.require_on_main(setup["clone"], local)
 
 
-@pytest.mark.parametrize("base", ["f" * 40, "HEAD^{tree}", "origin/main^{tree}"])
+@pytest.mark.parametrize("base", ["f" * 40, "HEAD^{tree}", "origin/main^{tree}", "HEAD", "A" * 40])
 def test_an_unknown_or_non_commit_object_is_refused(setup, base):
     with pytest.raises(RuntimeError, match="LINEAGE_BASE_NOT_COMMIT"):
         lineage.require_on_main(setup["clone"], base)
@@ -93,5 +93,48 @@ def test_settle_refuses_a_base_that_is_not_on_main_before_pushing(setup, monkeyp
 def test_settle_with_a_base_on_main_opens_the_pr(setup, monkeypatch):
     base = git(setup["clone"], "rev-parse", "origin/main")
     out, pushes, github = _settle_with_base(setup, monkeypatch, base)
-    assert "error" not in out[0] or "push" not in str(out[0])  # no lineage refusal
     assert "LINEAGE" not in str(out[0])
+    assert len(pushes) == 1 and len(github.prs) == 1  # the PR was actually opened
+
+
+def test_a_failed_fetch_is_its_own_error(setup):
+    git(setup["clone"], "remote", "set-url", "origin", str(setup["clone"] / "nowhere"))
+    with pytest.raises(RuntimeError, match="LINEAGE_FETCH_FAILED"):
+        lineage.require_on_main(setup["clone"], "a" * 40)
+
+
+def test_the_fetch_updates_the_tracking_ref(setup):
+    repo = setup["origin"].parent / "repo"
+    new = commit_change(repo, {"newer.txt": "n\n"})
+    git(repo, "push", "-q", str(setup["origin"]), "main")
+    lineage.require_on_main(setup["clone"], new)
+    assert git(setup["clone"], "rev-parse", "refs/remotes/origin/main") == new
+
+
+def test_an_uppercase_git_suffix_is_normalised(tmp_path):
+    clone = tmp_path / "c"
+    git(tmp_path, "init", "-q", str(clone))
+    git(clone, "remote", "add", "origin", "https://github.com/James3014/Demo.GIT")
+    lineage.verify_origin(clone, "James3014/demo")
+
+
+def test_env_pushinsteadof_cannot_split_checker_and_pusher(setup, monkeypatch):
+    # GIT_CONFIG_* would redirect a push made with the full environment; the runner drops it
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "url.https://evil.example/x/.pushInsteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/James3014/")
+    clone = setup["clone"]
+    git(clone, "remote", "set-url", "origin", "https://github.com/James3014/demo.git")
+    lineage.verify_origin(clone, "James3014/demo")
+    out = runner._git(clone, "remote", "get-url", "--push", "origin").strip()
+    assert out == "https://github.com/James3014/demo.git"
+
+
+def test_git_dir_in_the_environment_is_ignored(setup, monkeypatch, tmp_path):
+    other = tmp_path / "other"
+    git(tmp_path, "init", "-q", str(other))
+    git(other, "remote", "add", "origin", "https://evil.example/James3014/demo.git")
+    git(setup["clone"], "remote", "set-url", "origin", "https://github.com/James3014/demo.git")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))  # after the test's own git calls
+    lineage.verify_origin(setup["clone"], "James3014/demo")
+    assert "github.com" in runner._git(setup["clone"], "remote", "get-url", "origin")
