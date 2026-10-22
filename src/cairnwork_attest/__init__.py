@@ -7,6 +7,22 @@ from cairnwork_attest.assurance import (
     AssuranceConfigError,
     assurance_from_record,
 )
+from cairnwork_attest.dsse import (
+    PAYLOAD_TYPE,
+    DsseInputError,
+    Verification,
+    sign_statement,
+    verify,
+    verify_envelope,
+)
+from cairnwork_attest.keys import (
+    KeyFileError,
+    generate_keypair,
+    keyid,
+    load_private_key,
+    load_public_key_pem,
+    public_key_pem,
+)
 from cairnwork_attest.record import (
     AttestError,
     RecordMalformed,
@@ -28,22 +44,34 @@ from cairnwork_attest.statement import (
 )
 
 __all__ = [
+    "PAYLOAD_TYPE",
     "PREDICATE_TYPE",
     "Assurance",
     "AssuranceConfigError",
     "AttestError",
+    "DsseInputError",
+    "KeyFileError",
     "Producer",
     "RecordMalformed",
     "RecordNotFound",
     "RecordNotVerified",
     "StatementInputError",
     "VerdictRecord",
+    "Verification",
     "VerifiedRecord",
     "assurance_from_record",
     "build_statement",
     "check_record_bindings",
+    "generate_keypair",
+    "keyid",
+    "load_private_key",
+    "load_public_key_pem",
+    "public_key_pem",
     "read_record",
+    "sign_statement",
     "statement_bytes",
     "statement_hash",
+    "verify",
+    "verify_envelope",
     "verify_record",
 ]

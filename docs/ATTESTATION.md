@@ -67,10 +67,80 @@ not accept unproven caller assertions.
 
 - Core identity at re-verification: `verify_record` re-runs the notary's response binding against the Core identity of the *currently installed* `nexus-certify` unless the caller passes `core_identity=` explicitly. A record notarized under an older Core therefore reads as not verified (fail closed) until the caller supplies that Core's identity; the recorded response's own `core_identity` is carried in the predicate for that purpose.
 
+## Signing (DSSE, Ed25519)
+
+A Statement is signed by wrapping its canonical bytes (`statement_bytes`) in a
+[DSSE v1](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md)
+envelope (`cairnwork_attest.dsse`):
+
+```json
+{
+  "payloadType": "application/vnd.in-toto+json",
+  "payload": "<base64 of the statement bytes>",
+  "signatures": [{"keyid": "<sha256 hex of the raw public key>", "sig": "<base64>"}]
+}
+```
+
+- Public signing is performed via `sign_statement(verified: VerifiedRecord, *, producer: Producer, timestamp: str, private_key: Ed25519PrivateKey) -> dict`: it accepts only an in-process `VerifiedRecord`, builds the Statement via `build_statement`, serialises it with `statement_bytes`, and signs it. The raw-bytes signer is private (`_sign_bytes`).
+- The Ed25519 signature covers the DSSE Pre-Authentication Encoding
+  `PAE(payloadType, payload)` =
+  `"DSSEv1" SP len(type) SP type SP len(payload) SP payload`, never the base64
+  text or the JSON envelope, so the payload type is bound by the signature.
+- `keyid` is SHA-256 (hex) of the 32-byte raw public key. It is only a hint for
+  picking a signature; trust comes from the public key the verifier supplies.
+- Multi-signature semantics: DSSE threshold-1 verification is used. The envelope
+  verifies when ONE signature whose keyid names the trusted key verifies over PAE;
+  other signatures (stale, unrelated, or malformed under other keyids) are ignored.
+  `Verification` records `signature_index: int | None` (which entry in `signatures`
+  verified). A malformed entry under the TRUSTED keyid still fails closed.
+- Strict base64: For the payload and every signature `sig`, standard base64 alphabet
+  only is accepted (matching regex `^[A-Za-z0-9+/]*={0,2}$`), decoded with validation,
+  and canonical padding is required (`base64.b64encode(decoded) == original.encode()`).
+  Urlsafe envelopes and non-canonical padding are refused on purpose (`PAYLOAD_NOT_BASE64`
+  / `SIGNATURE_NOT_BASE64`).
+- `verify(envelope, public_key)` returns `True` only when a signature whose
+  `keyid` names that key verifies over PAE. Everything else is `False`
+  (fail-closed); `verify_envelope` returns the same verdict with a reason code
+  (`PAYLOAD_TYPE_MISMATCH`, `PAYLOAD_NOT_BASE64`, `SIGNATURES_MISSING`,
+  `SIGNATURE_MALFORMED`, `SIGNATURE_NOT_BASE64`, `KEYID_MISMATCH`,
+  `BAD_SIGNATURE`, `PUBLIC_KEY_INVALID`, ...) and, only on success, the
+  authenticated payload bytes and `signature_index`. Consumers must read the
+  Statement from that payload, not from an unverified envelope.
+
+### Keys
+
+`cairnwork_attest.keys` manages one Ed25519 key pair per state directory:
+
+```bash
+uv run python -m cairnwork_attest.keys generate --state <state-dir>  # prints keyid + public PEM
+uv run python -m cairnwork_attest.keys public --state <state-dir>    # prints them again
+```
+
+- The private key is written to `<state-dir>/attest_ed25519.pem` (PKCS#8 PEM,
+  unencrypted) with mode `0600`, created exclusively: an existing file or a
+  symlink is never overwritten (`KEY_EXISTS`). Key creation is durable: `os.write`
+  loops until the entire PEM is written, `os.fsync(fd)` is called before close,
+  and the parent directory fd is fsynced after close. On any failure, the path is
+  unlinked only if its `st_dev` and `st_ino` match the created file descriptor
+  (never deleting a foreign file). Between `_safe_unlink`'s `stat` and `unlink`
+  (both via the directory fd) the path can still be replaced by someone who can
+  already write into the owner's 0700 key directory; that window is out of scope.
+- Loading avoids check/use races: `load_private_key(state_dir)` opens the key file
+  with `O_RDONLY | O_NOFOLLOW` directly, checks `os.fstat(fd)` for a regular file
+  (`KEY_NOT_REGULAR`), no group/other permission bits (`KEY_PERMISSIONS_LOOSE`),
+  matching owner `st_uid == os.getuid()` (`KEY_WRONG_OWNER`), and reads the PEM
+  from that same file descriptor before closing it in `finally`. Missing files
+  raise `KEY_NOT_FOUND`. There is no fallback key.
+- Private keys never live in the repository or its tests; tests generate keys
+  in memory or under a temporary directory.
+- Not yet covered: key rotation, revocation, publishing the public key, and
+  encrypting the key at rest (the state directory's permissions are the
+  boundary).
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred from Phase 1:
-- Digital signatures: Cryptographic DSSE or in-toto envelope signing.
+- signing CLI / offline verify CLI (next PR)
 - `hidden_test_commit`: Durably binding the secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
