@@ -30,6 +30,8 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
   Only paths that exist are masked. Write roots that are `/`, a system or temp directory, `$HOME`
   or an ancestor of `$HOME` are refused.
 
+  POSIX semaphores are allowed (macOS: names `^/mp-` only; Linux: a private tmpfs `/dev/shm` capped at 64 MiB) so multiprocessing-based test suites can be verified; shared memory and Mach IPC remain denied.
+
   **Deployment note:** a verifier write root or state directory must not live under a masked path
   (a masked credential dir such as `~/.config` or `~/.local/state`, or a masked socket tree such as
   `/run/user`, `/tmp/.X11-unix`, `/run/libvirt`). The tmpfs is applied after the write binds, so

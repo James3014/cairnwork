@@ -20,7 +20,6 @@ cairnwork = "cairnwork_quickstart.cli:main"
 cairnwork-route = "cairnwork.route:main"
 cairnwork-issues = "cairnwork.issue_runner:main"
 cairnwork-verify = "cairnwork.verify_cli:main"
-cairnwork-attest = "cairnwork_attest.cli:main"
 
 [dependency-groups]
 dev = [

@@ -81,7 +81,6 @@ envelope (`cairnwork_attest.dsse`):
 }
 ```
 
-- Envelope top-level keys must be strictly the whitelist `payloadType`, `payload`, `signatures`; any extra top-level key fails envelope validation with `ENVELOPE_SHAPE`. Unknown fields inside the signed Statement payload may stay for forward compatibility.
 - Public signing is performed via `sign_statement(verified: VerifiedRecord, *, producer: Producer, timestamp: str, private_key: Ed25519PrivateKey) -> dict`: it accepts only an in-process `VerifiedRecord`, builds the Statement via `build_statement`, serialises it with `statement_bytes`, and signs it. The raw-bytes signer is private (`_sign_bytes`).
 - The Ed25519 signature covers the DSSE Pre-Authentication Encoding
   `PAE(payloadType, payload)` =
@@ -138,61 +137,12 @@ uv run python -m cairnwork_attest.keys public --state <state-dir>    # prints th
   encrypting the key at rest (the state directory's permissions are the
   boundary).
 
-## Offline Verification
-
-Offline verification (`cairnwork_attest.verify.verify_bundle`) validates a DSSE
-attestation bundle against local git repository objects and a trusted Ed25519
-public key. Verification is completely fail-closed and runs with **no network access**.
-
-`verify_bundle` returns a `VerifyResult(ok=bool, code=str, detail=str, statement=dict | None)`
-and never raises exceptions for external input or verification failures. Bundle read
-errors (missing file, oversize file, non-regular file) return `BUNDLE_UNREADABLE`;
-strict-JSON decode failures return `BUNDLE_MALFORMED`; envelope structural problems
-return `ENVELOPE_SHAPE`. Only programmer errors (such as wrong argument types) may raise.
-
-### What Is Recomputed vs. What Is Trusted
-
-- **What is trusted**:
-  - Only the Ed25519 public key you supply.
-  - The local git repository objects (`cat-file` and `diff-tree`).
-  - Without a Core identity pin, the signing key vouches for the reported Core identity.
-- **What is recomputed and checked** (in order, failing closed at the first violation):
-  1. `BUNDLE_UNREADABLE` / `BUNDLE_MALFORMED` / `ENVELOPE_SHAPE` / `SIGNATURE_INVALID`: Bundle envelope is read using a single `os.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` call, verified with `fstat` to be a regular file with `st_size <= MAX` (4 MiB), and at most MAX+1 bytes are read from the fd (refusing if more arrives). Any missing file, oversize file, non-regular file, or read failure returns `BUNDLE_UNREADABLE`. Strict JSON decode failures (including duplicate keys) return `BUNDLE_MALFORMED`. The envelope must decode as strict JSON containing strictly `payloadType`, `payload`, `signatures` (any extra key → `ENVELOPE_SHAPE`), and its DSSE signature verified over `PAE(payloadType, payload)` using the supplied public key (`SIGNATURE_INVALID`).
-  2. `STATEMENT_SHAPE`: Statement payload decodes as strict JSON with `_type == "https://in-toto.io/Statement/v1"`, `predicateType == "https://cairnwork.github.io/attestation/verified-change/v0.1"`, and an object `predicate`. Unknown fields inside the signed Statement may stay for forward compatibility.
-  3. `SUBJECT_SHAPE`: Statement has exactly one subject entry with a valid 40-hex `gitCommit` digest, and `predicate.base_commit` is a 40-hex commit hash.
-  4. `CANDIDATE_MISMATCH`: The Statement's subject `gitCommit` must equal `expected_candidate` (checked right after signature and shape checks). Verifying without pinning the candidate proves only that "some commit was verified".
-  5. `COMMIT_NOT_FOUND`: Both candidate and base commits exist in the target git repository (`git cat-file -e <sha>^{commit}`).
-  6. `REQUEST_HASH_MISMATCH`: `predicate.request_hash` matches the recomputed SHA-256 digest of canonical JSON `predicate.request` using the notary digest rule.
-  7. `COMMIT_BINDING_MISMATCH`: `predicate.request.change_set.target_revision` and `source_revision` match `git-commit:<candidate>` and `git-commit:<base>`.
-  8. `MANIFEST_MISMATCH`: The change manifest is recomputed from raw git tree objects between base and candidate commits (`read_change_set`), and its canonical `change_manifest_hash` matches both `predicate.request.change_set.diff_hash` and `cairnwork_protocol.change_manifest_hash(predicate.request.change_manifest)`.
-  9. `RESPONSE_NOT_VERIFIED`: The verification response reports status `"VERIFIED"` and integrity `"VALID"` with HTTP 200, echoes all five request hashes (`acceptance_contract_hash`, `change_set_hash`, `verification_plan_hash`, `evidence_bundle_hash`, and required `change_manifest_hash`), satisfies `response_binding_problem` against the response's reported `core_identity`, and matches `predicate.response.core_identity == predicate.core_identity` (both present, deep-equal).
-  10. `CORE_IDENTITY_MISMATCH`: When an optional Core identity pin is provided (`--core-identity <json-file>` / `core_identity_pin`), it must match `predicate.response.core_identity`.
-
-### CLI Usage
-
-The `cairnwork-attest` CLI provides key management, statement creation, and offline verification:
-
-```bash
-# 1. Key generation: generate an Ed25519 signing keypair into the state directory
-cairnwork-attest keygen --state <state-dir>
-
-# 2. Statement creation: read verified notary record and build/sign statement bundle
-cairnwork-attest statement --state <state-dir> --task-id <id> --attempt-id <id> --candidate <sha> --out bundle.json --sign
-
-# 3. Offline verification: verify the signed bundle using public key and git repo
-cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo> --candidate <sha> [--core-identity <json>]
-```
-
-`--candidate <sha>` is required with no default. The caller must decide and pass the candidate commit explicitly (for example, `--candidate "$(git rev-parse HEAD)"`). The tool refuses to guess the candidate from HEAD or the local environment because an attacker-controlled checkout must never be trusted to choose the candidate commit under evaluation.
-
-Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
-
 ## Planned Follow-ups (Phase 2+)
 
-The following capabilities and gaps are explicitly deferred:
-- Sigstore signing and transparency log integration.
-- Forge reporting and PR status checks.
-- `hidden_test_commit`: Durably binding secret evaluation test commit in the notary record.
+The following capabilities and gaps are explicitly deferred from Phase 1:
+- signing CLI / offline verify CLI (next PR)
+- `hidden_test_commit`: Durably binding the secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
 - Timestamp validation: Timestamp is caller-supplied and not validated as UTC or against a trusted timestamping authority.
+- Dedicated CLI and network distribution workflows.

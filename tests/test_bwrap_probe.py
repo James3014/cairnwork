@@ -96,6 +96,10 @@ def _home(tmp_path):
     return home
 
 
+def _tmpfs_targets(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "--tmpfs"]
+
+
 def test_policy_is_read_only_root_plus_write_binds_then_credential_masks(tmp_path):
     home, work = _home(tmp_path), tmp_path / "work"
     work.mkdir()
@@ -134,7 +138,11 @@ def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path):
     lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
     real_home = str(home.resolve())
     assert f"{real_home}/.ssh" not in lines and f"{real_home}/.netrc" not in lines
-    assert "--tmpfs" not in lines.splitlines()  # the autouse fixture also clears /run/user
+    argv = lines.splitlines()
+    tmpfs_targets = _tmpfs_targets(argv)
+    assert "/dev/shm" in tmpfs_targets
+    for target in tmpfs_targets:
+        assert not target.startswith(real_home)
     assert str(work.resolve()) in lines  # the write bind is still there
 
 
@@ -284,7 +292,7 @@ def test_x11_socket_dir_is_masked_with_tmpfs(tmp_path, monkeypatch):
 def test_socket_dirs_absent_add_no_tmpfs(tmp_path, monkeypatch):
     monkeypatch.setattr(bwrap.os.path, "isdir", lambda p: False)
     lines = bwrap.BACKEND.policy((), (), home=_home(tmp_path)).text.splitlines()
-    assert "--tmpfs" not in lines
+    assert _tmpfs_targets(lines) == ["/dev/shm"]
 
 
 def test_absent_credentials_are_not_masked(tmp_path):
@@ -292,7 +300,7 @@ def test_absent_credentials_are_not_masked(tmp_path):
     # tmpfs over a non-existent path fails on top of the read-only root).
     home = _home(tmp_path)
     lines = bwrap.BACKEND.policy((), (), home=home).text.splitlines()
-    assert "--tmpfs" not in lines
+    assert _tmpfs_targets(lines) == ["/dev/shm"]
     assert f"{home.resolve()}/.netrc" not in lines
 
 

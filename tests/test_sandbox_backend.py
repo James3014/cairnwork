@@ -1,9 +1,7 @@
-"""The sandbox backend interface (cairnwork_sandbox) and the move of Seatbelt out of the core.
+"""The sandbox backend interface (cairnwork_sandbox) and the Seatbelt profile bytes.
 
-The profile hashes below were computed on origin/main at 3a91e76, before Seatbelt moved
-from src/cairnwork/sandbox.py, with the same fixed inputs: the move must not change one
-byte of the policy (its sha256 also enters the verifier observation digest).
-These run everywhere: building a profile does not need sandbox-exec.
+The profile hashes below are pinned as of the POSIX-semaphore change (#116),
+with the same fixed inputs: building a profile does not need sandbox-exec.
 """
 
 import importlib.util
@@ -23,20 +21,21 @@ READS = (
 )
 WRITES = (Path("/Users/fixture/run/attempt"), Path("/Users/fixture/run/private/run"))
 PINNED = {
-    (): ("586f2f89c28b51225d8e3d59f758be7f9bb15022c9bc357d6c7bc07b440c6e39", 1381),
+    (): ("db6d79c085c4073a1fcc8173b5bf5de888a0d6cd8c1a15aa077dba50f0b6e08b", 1435),
     ("/Library/Developer/CommandLineTools",): (
-        "e10da2ac22cc5e42500c1ff126640aee0074df9b58e4f89b2404b25e4194f70e",
-        1431,
+        "9938948b6dbbb4ec7e891d3ed9ef0468577f3971f7ac61ba23dc6f078d568faf",
+        1485,
     ),
     ("/Applications/Xcode.app",): (
-        "b7e076ce7085147ec6342005a57087295ddee4d2ba1b92aee965a0551f7fec83",
-        1479,
+        "6a1daab4ca02eaa34986ca53d92cd32f1dc9edf14c8c7a91c25378fac5190f2f",
+        1533,
     ),
 }
 
 
 @pytest.mark.parametrize("dirs", list(PINNED))
-def test_seatbelt_profile_is_byte_identical_to_before_the_move(monkeypatch, dirs):
+def test_seatbelt_profile_is_pinned_as_of_the_posix_semaphore_change_116(monkeypatch, dirs):
+    """Profile is pinned as of the POSIX-semaphore change (#116)."""
     monkeypatch.setattr(seatbelt, "developer_dirs", lambda: dirs)
     for profile in (
         seatbelt.build_profile(READS, WRITES, home=HOME),

@@ -86,6 +86,23 @@ def _probe(policy: str) -> int | None:
     return done.returncode
 
 
+@lru_cache(maxsize=1)
+def posix_sem_rule() -> str:
+    """The narrowest rule allowing multiprocessing's POSIX named semaphores.
+
+    CPython names them /mp-<random>. If the regex form is not accepted by
+    sandbox-exec on this host, fall back to (allow ipc-posix-sem).
+    """
+    regex_rule = '(allow ipc-posix-sem (ipc-posix-name-regex #"^/mp-"))'
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        return regex_rule
+    allowed = _probe(f"(version 1) (allow default) {regex_rule}")
+    if allowed == 0:
+        return regex_rule
+    # Fallback if the regex form is not accepted by sandbox-exec on this host:
+    return "(allow ipc-posix-sem)"
+
+
 def sbpl_path(path: Path | str) -> str:
     """The real path, checked so it cannot break out of an SBPL string."""
     real = os.path.realpath(path)
@@ -135,6 +152,7 @@ def build_profile(
         "(allow process-exec)",
         "(allow signal (target same-sandbox))",
         "(allow sysctl-read)",
+        posix_sem_rule(),
         "(allow file-read-metadata)",
         "(allow file-read*",
         *[f'  (subpath "{p}")' for p in SYSTEM_READ_SUBPATHS],

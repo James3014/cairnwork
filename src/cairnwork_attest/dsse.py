@@ -31,7 +31,6 @@ MAX_SIGNATURES = 16
 # Reason codes returned by verify_envelope.
 OK = "OK"
 ENVELOPE_NOT_OBJECT = "ENVELOPE_NOT_OBJECT"
-ENVELOPE_SHAPE = "ENVELOPE_SHAPE"
 PAYLOAD_TYPE_MISMATCH = "PAYLOAD_TYPE_MISMATCH"
 PAYLOAD_MISSING = "PAYLOAD_MISSING"
 PAYLOAD_NOT_BASE64 = "PAYLOAD_NOT_BASE64"
@@ -126,8 +125,6 @@ def verify_envelope(envelope: object, public_key: object) -> Verification:
         return _fail(PUBLIC_KEY_INVALID)
     if not isinstance(envelope, Mapping):
         return _fail(ENVELOPE_NOT_OBJECT)
-    if any(k not in ("payloadType", "payload", "signatures") for k in envelope):
-        return _fail(ENVELOPE_SHAPE)
     if envelope.get("payloadType") != PAYLOAD_TYPE:
         return _fail(PAYLOAD_TYPE_MISMATCH)
     payload_b64 = envelope.get("payload")

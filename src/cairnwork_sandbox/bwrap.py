@@ -42,6 +42,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from cairnwork_sandbox.backend import Policy, SandboxError
+from cairnwork_sandbox.shm import shm_flags
 
 NAME = "bwrap"
 
@@ -223,6 +224,7 @@ def build_policy(
         "/dev",
         "--proc",
         "/proc",
+        *shm_flags(bwrap_path() or ""),
     ]
     for root in writes:
         flags += ["--bind", root, root]
