@@ -67,10 +67,60 @@ not accept unproven caller assertions.
 
 - Core identity at re-verification: `verify_record` re-runs the notary's response binding against the Core identity of the *currently installed* `nexus-certify` unless the caller passes `core_identity=` explicitly. A record notarized under an older Core therefore reads as not verified (fail closed) until the caller supplies that Core's identity; the recorded response's own `core_identity` is carried in the predicate for that purpose.
 
+## Signing (DSSE, Ed25519)
+
+A Statement is signed by wrapping its canonical bytes (`statement_bytes`) in a
+[DSSE v1](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md)
+envelope (`cairnwork_attest.dsse`):
+
+```json
+{
+  "payloadType": "application/vnd.in-toto+json",
+  "payload": "<base64 of the statement bytes>",
+  "signatures": [{"keyid": "<sha256 hex of the raw public key>", "sig": "<base64>"}]
+}
+```
+
+- The Ed25519 signature covers the DSSE Pre-Authentication Encoding
+  `PAE(payloadType, payload)` =
+  `"DSSEv1" SP len(type) SP type SP len(payload) SP payload`, never the base64
+  text or the JSON envelope, so the payload type is bound by the signature.
+- `keyid` is SHA-256 (hex) of the 32-byte raw public key. It is only a hint for
+  picking a signature; trust comes from the public key the verifier supplies.
+- `verify(envelope, public_key)` returns `True` only when a signature whose
+  `keyid` names that key verifies over PAE. Everything else is `False`
+  (fail-closed); `verify_envelope` returns the same verdict with a reason code
+  (`PAYLOAD_TYPE_MISMATCH`, `PAYLOAD_NOT_BASE64`, `SIGNATURES_MISSING`,
+  `SIGNATURE_MALFORMED`, `SIGNATURE_NOT_BASE64`, `KEYID_MISMATCH`,
+  `BAD_SIGNATURE`, `PUBLIC_KEY_INVALID`, ...) and, only on success, the
+  authenticated payload bytes. Consumers must read the Statement from that
+  payload, not from an unverified envelope.
+
+### Keys
+
+`cairnwork_attest.keys` manages one Ed25519 key pair per state directory:
+
+```bash
+uv run python -m cairnwork_attest.keys generate --state <state-dir>  # prints keyid + public PEM
+uv run python -m cairnwork_attest.keys public --state <state-dir>    # prints them again
+```
+
+- The private key is written to `<state-dir>/attest_ed25519.pem` (PKCS#8 PEM,
+  unencrypted) with mode `0600`, created exclusively: an existing file or a
+  symlink is never overwritten (`KEY_EXISTS`).
+- Loading refuses a missing file, a symlink or non-regular file, any
+  group/other permission bits (`KEY_PERMISSIONS`), and anything that is not an
+  Ed25519 key. There is no fallback key.
+- Private keys never live in the repository or its tests; tests generate keys
+  in memory or under a temporary directory.
+- Not yet covered: key rotation, revocation, publishing the public key, and
+  encrypting the key at rest (the state directory's permissions are the
+  boundary).
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred from Phase 1:
-- Digital signatures: Cryptographic DSSE or in-toto envelope signing.
+- signing CLI / offline verify CLI (next PR)
 - `hidden_test_commit`: Durably binding the secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
