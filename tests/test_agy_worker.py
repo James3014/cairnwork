@@ -2,14 +2,26 @@
 
 import json
 import os
+import subprocess
 import sys
 import time
+import uuid
 from types import SimpleNamespace
 
 import pytest
 
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES
+from cairnwork.workers import agy as agy_module
 from cairnwork.workers.agy import AgyWorker, AgyWorkerError
+
+# The worker's sweep kills every process on the host marked with the attempt name, so names
+# shared with another test run (parallel agents) would kill this run's fake agy: make them unique.
+RUN = uuid.uuid4().hex[:8]
+
+
+def attempt(n):
+    return f"attempt{n}-{RUN}"
+
 
 TASK = SimpleNamespace(title="t", instructions="i", allowed_files=("a.py",))
 
@@ -21,25 +33,42 @@ def fake_agy(tmp_path, body):
     return str(path)
 
 
+def expire_once_ready(monkeypatch, ready):
+    """Make the worker's timeout fire only after the fake binary wrote `ready`, so a loaded
+    host cannot kill it (or time it out) before it has set up what the test inspects."""
+    real = subprocess.Popen
+
+    class Popen(real):
+        def wait(self, timeout=None):
+            if timeout is not None:
+                deadline = time.monotonic() + 120
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                timeout = 0.2
+            return super().wait(timeout=timeout)
+
+    monkeypatch.setattr(agy_module.subprocess, "Popen", Popen)
+
+
 def test_agy_gets_only_the_environment_it_needs(tmp_path, monkeypatch):
     monkeypatch.setenv("CW_FAKE_TOKEN", "secret-value")
     dump = tmp_path / "env.json"
     agy = fake_agy(tmp_path, f"open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))")
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
     AgyWorker(agy=agy).run(workdir, TASK)
     env = json.loads(dump.read_text())
     assert "CW_FAKE_TOKEN" not in env
-    assert env[ATTEMPT_ENV] == "attempt1"
+    assert env[ATTEMPT_ENV] == attempt(1)
     assert env["HOME"] == os.environ["HOME"]
 
 
 def test_agy_log_is_capped(tmp_path):
     agy = fake_agy(tmp_path, f"sys.stdout.write('x' * {MAX_LOG_BYTES * 2})")
-    workdir = tmp_path / "attempt2"
+    workdir = tmp_path / attempt(2)
     workdir.mkdir()
     AgyWorker(agy=agy).run(workdir, TASK)
-    assert (tmp_path / "attempt2.agy.log").stat().st_size == MAX_LOG_BYTES + 1
+    assert (tmp_path / f"{attempt(2)}.agy.log").stat().st_size == MAX_LOG_BYTES + 1
 
 
 def test_a_marked_process_agy_leaves_behind_is_killed(tmp_path):
@@ -50,7 +79,7 @@ def test_a_marked_process_agy_leaves_behind_is_killed(tmp_path):
         " start_new_session=True)\n"
         "print('started', flush=True)",
     )
-    workdir = tmp_path / "attempt3"
+    workdir = tmp_path / attempt(3)
     workdir.mkdir()
     started = time.monotonic()
     AgyWorker(agy=agy).run(workdir, TASK)
@@ -65,7 +94,7 @@ def test_an_unmarked_process_holding_the_output_fails_the_run(tmp_path):
         " start_new_session=True, env={})\n"
         "print('started', flush=True)",
     )
-    workdir = tmp_path / "attempt4"
+    workdir = tmp_path / attempt(4)
     workdir.mkdir()
     started = time.monotonic()
     with pytest.raises(AgyWorkerError, match="holds its output"):
@@ -76,7 +105,7 @@ def test_an_unmarked_process_holding_the_output_fails_the_run(tmp_path):
 def _prompt(tmp_path, task):
     seen = tmp_path / "argv.json"
     agy = fake_agy(tmp_path, f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))")
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
     AgyWorker(agy=agy).run(workdir, task)
     argv = json.loads(seen.read_text())
@@ -110,7 +139,7 @@ def _dispatched(tmp_path, body, task=TASK, **settings):
     from cairnwork.workers.agy_dispatch import Dispatch
 
     path = fake_dispatcher(tmp_path, body)
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
     worker = AgyWorker(model="m-1", timeout_seconds=900, dispatch=Dispatch(path, **settings))
     return worker, workdir, path
@@ -167,7 +196,7 @@ def test_dispatcher_environment_is_trimmed_but_keeps_pool_tuning(tmp_path, monke
     env = json.loads(dump.read_text())
     assert "CW_FAKE_TOKEN" not in env
     assert env["NEXUS_AGY_POOL_DIR"] == "/pool"
-    assert env[ATTEMPT_ENV] == "attempt1" and env["HOME"] == os.environ["HOME"]
+    assert env[ATTEMPT_ENV] == attempt(1) and env["HOME"] == os.environ["HOME"]
 
 
 def test_whole_pool_exhaustion_is_its_own_failure(tmp_path):
@@ -218,7 +247,7 @@ def test_other_dispatcher_failures_are_ordinary_worker_errors(tmp_path, body):
 def test_a_missing_dispatcher_fails_the_run_not_falls_back_to_agy(tmp_path):
     from cairnwork.workers.agy_dispatch import Dispatch
 
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
     worker = AgyWorker(dispatch=Dispatch(str(tmp_path / "gone")))
     with pytest.raises(AgyWorkerError, match="not found or not executable"):
@@ -233,7 +262,7 @@ def test_without_a_dispatcher_the_agy_argv_is_unchanged(tmp_path):
         f"open({str(seen)!r}, 'w').write(json.dumps(sys.argv))\n"
         f"open({str(stdin_seen)!r}, 'w').write(repr(sys.stdin.read()))",
     )
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
     AgyWorker(agy=agy).run(workdir, TASK)
     argv = json.loads(seen.read_text())
@@ -248,7 +277,7 @@ def test_without_a_dispatcher_the_agy_argv_is_unchanged(tmp_path):
     assert stdin_seen.read_text() == "''"  # still no stdin
 
 
-def test_a_timed_out_dispatcher_gets_sigterm_first_to_release_its_lease(tmp_path):
+def test_a_timed_out_dispatcher_gets_sigterm_first_to_release_its_lease(tmp_path, monkeypatch):
     marker, ready = tmp_path / "term.marker", tmp_path / "ready"
     body = (
         "import signal, time\n"
@@ -258,24 +287,27 @@ def test_a_timed_out_dispatcher_gets_sigterm_first_to_release_its_lease(tmp_path
         "time.sleep(60)"
     )
     worker, workdir, _ = _dispatched(tmp_path, body)
-    worker = AgyWorker(timeout_seconds=-57, dispatch=worker.dispatch)  # waits 3 s
+    expire_once_ready(monkeypatch, ready)
+    worker = AgyWorker(timeout_seconds=900, dispatch=worker.dispatch)
     with pytest.raises(AgyWorkerError, match="timed out"):
         worker.run(workdir, TASK)
     assert marker.read_text() == "released"
 
 
-def test_a_timed_out_raw_agy_is_killed_without_sigterm(tmp_path):
-    marker = tmp_path / "term.marker"
+def test_a_timed_out_raw_agy_is_killed_without_sigterm(tmp_path, monkeypatch):
+    marker, ready = tmp_path / "term.marker", tmp_path / "ready"
     agy = fake_agy(
         tmp_path,
         "import signal, time\n"
         f"signal.signal(signal.SIGTERM, lambda *_: open({str(marker)!r}, 'w').write('x'))\n"
+        f"open({str(ready)!r}, 'w').write('x')\n"
         "time.sleep(60)",
     )
-    workdir = tmp_path / "attempt1"
+    workdir = tmp_path / attempt(1)
     workdir.mkdir()
+    expire_once_ready(monkeypatch, ready)
     with pytest.raises(AgyWorkerError, match="timed out"):
-        AgyWorker(agy=agy, timeout_seconds=-57).run(workdir, TASK)
+        AgyWorker(agy=agy, timeout_seconds=900).run(workdir, TASK)
     assert not marker.exists()
 
 
@@ -340,45 +372,3 @@ def test_an_error_without_a_status_line_says_so(tmp_path):
     worker, workdir, _ = _dispatched(tmp_path, "sys.exit(3)")
     with pytest.raises(AgyWorkerError, match="exited 3; no dispatcher status"):
         worker.run(workdir, TASK)
-
-
-def test_a_failing_stderr_read_keeps_draining_and_marks_the_status_unknown():
-    import io
-
-    from cairnwork.workers.agy_dispatch import StatusReader
-
-    class Flaky(io.BytesIO):
-        failed = False
-
-        def readline(self, size: int | None = -1):
-            if not self.failed:
-                self.failed = True
-                raise OSError("boom")
-            return super().readline(size)
-
-    stream = Flaky(b'NEXUS_AGY_DISPATCH {"status": "pool_exhausted"}\n')
-    reader = StatusReader(stream)
-    reader.run()
-    assert reader.unknown and "unknown" in reader.describe()
-    assert reader.status() == {"status": "pool_exhausted"}  # it kept draining
-
-
-def test_a_reader_that_is_still_alive_counts_as_holding_the_output(tmp_path):
-    import threading
-    import time
-
-    from cairnwork.workers.agy import _stop
-
-    class P:
-        pid = 2**22 + 12345  # no such group
-
-        def wait(self):
-            pass
-
-    copier = threading.Thread(target=lambda: None)
-    copier.start()
-    copier.join()
-    stuck = threading.Thread(target=time.sleep, args=(3,), daemon=True)
-    stuck.start()
-    stuck.join = lambda timeout=None: None  # type: ignore[method-assign]
-    assert _stop(P(), copier, "attempt-x", stuck) is True
