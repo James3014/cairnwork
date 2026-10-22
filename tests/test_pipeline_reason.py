@@ -4,7 +4,7 @@ by testing the extracted pure function directly."""
 
 from types import SimpleNamespace
 
-from cairnwork.pipeline import _verdict_reason
+from cairnwork.reasons import verdict_reason
 
 
 def _v(status, reason=""):
@@ -12,7 +12,7 @@ def _v(status, reason=""):
 
 
 def test_a_verified_attempt_reads_core_status():
-    assert _verdict_reason(True, _v("VERIFIED"), _v("VERIFIED")) == "CORE_VERIFIED"
+    assert verdict_reason(True, _v("VERIFIED"), _v("VERIFIED")) == "CORE_VERIFIED"
 
 
 def test_the_readback_reason_is_shown_not_the_notarize_return():
@@ -22,11 +22,11 @@ def test_the_readback_reason_is_shown_not_the_notarize_return():
         _v("VERIFIED", reason="from-verdict"),
         _v("VERIFIED", "CORE_IDENTITY_MISMATCH"),
     )
-    assert _verdict_reason(False, verdict, recorded) == "CORE_IDENTITY_MISMATCH"
+    assert verdict_reason(False, verdict, recorded) == "CORE_IDENTITY_MISMATCH"
 
 
-def test_without_a_readback_the_verdict_reason_is_used():
-    assert _verdict_reason(False, _v("VERIFIED", reason="CORE_MANIFEST_HASH_MISMATCH"), None) == (
+def test_without_a_readback_theverdict_reason_is_used():
+    assert verdict_reason(False, _v("VERIFIED", reason="CORE_MANIFEST_HASH_MISMATCH"), None) == (
         "CORE_MANIFEST_HASH_MISMATCH"
     )
 
@@ -34,10 +34,10 @@ def test_without_a_readback_the_verdict_reason_is_used():
 def test_verified_status_but_unverified_readback_with_no_reason_is_core_not_verified():
     # Kills the CORE_NOT_VERIFIED fallback mutant: Core said VERIFIED but the readback did not
     # verify and set no reason, so it must read CORE_NOT_VERIFIED, not CORE_VERIFIED.
-    assert _verdict_reason(False, _v("VERIFIED"), _v("VERIFIED", "")) == "CORE_NOT_VERIFIED"
+    assert verdict_reason(False, _v("VERIFIED"), _v("VERIFIED", "")) == "CORE_NOT_VERIFIED"
 
 
 def test_a_non_verified_status_with_no_reason_reads_core_status():
-    assert _verdict_reason(False, _v("FAILED_VERIFICATION"), _v("FAILED_VERIFICATION")) == (
+    assert verdict_reason(False, _v("FAILED_VERIFICATION"), _v("FAILED_VERIFICATION")) == (
         "CORE_FAILED_VERIFICATION"
     )
