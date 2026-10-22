@@ -18,6 +18,7 @@ Rules (from Nexus-new's experience, see docs/LESSONS_FROM_NEXUS.md):
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,7 @@ class Decision:
     new_status: str
     reason: str
     killed_processes: int = 0
+    detail: str = ""  # e.g. "LEFTOVER_RUN_DIRS: 2 (a1-q-v0, a1-r-v0.x)"; "" when nothing remains
 
 
 def recover(
@@ -93,11 +95,16 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root, account=
     phases = [e for e in entries if e.attempt_id == attempt_id]
     killed = sweep_marked(ATTEMPT_ENV, attempt_id)  # SWEEP_UNAVAILABLE (-1): not checked
     dispatched = [e.detail for e in phases if e.phase == "DISPATCHED" and e.detail]
-    _remove_leftovers(Path(dispatched[-1]) if dispatched else Path(run_root), attempt_id)
+    owner_root = Path(dispatched[-1]) if dispatched else Path(run_root)
+    _remove_leftovers(owner_root, attempt_id)
     if account is not None:  # the verifier ran under the account's run root; the owner cannot rm it
         _remove_account_leftovers(account, attempt_id)
+    left = _leftover_names(owner_root, attempt_id)
+    if account is not None:
+        left += _leftover_names(account.run_root, attempt_id)
+    detail = f"LEFTOVER_RUN_DIRS: {len(left)} ({', '.join(left)})" if left else ""
     candidates = [e.detail for e in phases if e.phase == "CANDIDATE"]
-    finished = [e.detail for e in phases if e.phase == "FINISHED"]
+    finished = [e.detail for e in phases if e.phase == "FINISHED" and e.detail in _RESULTS]
     verified = False
     if candidates and finished[-1:] != ["FAILED"]:  # the run's own FAILED decision stands
         verdict = notary.verdict(record.task_id, attempt_id, expected_candidate=candidates[-1])
@@ -105,26 +112,19 @@ def _settle(record: OwnershipRecord, ledger, notary, journal, run_root, account=
     if verified:
         if record.status == "BOUND":
             ledger.set_status(record.task_id, "DISPATCHED")
-        ledger.set_status(record.task_id, "COMPLETED")
-        return Decision(
-            record.task_id,
-            attempt_id,
-            record.status,
-            "COMPLETED",
-            "CORE_VERIFIED_BEFORE_CRASH",
-            killed,
-        )
-    ledger.set_status(record.task_id, "FAILED")
-    return Decision(
-        record.task_id,
-        attempt_id,
-        record.status,
-        "FAILED",
-        f"INTERRUPTED_AFTER_{phases[-1].phase}",
-        killed,
-    )
+        new, reason = "COMPLETED", "CORE_VERIFIED_BEFORE_CRASH"
+    else:
+        new, reason = "FAILED", f"INTERRUPTED_AFTER_{phases[-1].phase}"
+    ledger.set_status(record.task_id, new)
+    if detail:  # a separate, visible signal: the task's own status stays as decided above
+        try:
+            journal.record(record.task_id, attempt_id, "FINISHED", detail)
+        except sqlite3.Error:
+            detail += " (journal write failed)"  # the Decision still carries the signal
+    return Decision(record.task_id, attempt_id, record.status, new, reason, killed, detail)
 
 
+_RESULTS = ("COMPLETED", "FAILED")  # the run's own FINISHED details (pipeline.py)
 _RUN_TAGS = "vbpqr"  # verify, base-test, and the P2P probe / candidate run / re-run (p2p.py)
 
 
@@ -191,4 +191,24 @@ def _remove_account_leftovers(account: VerifierAccount, attempt_id: str) -> None
         try:
             account.remove(target)
         except VerifierAccountError:
-            pass  # a leftover directory is disk space, not a wrong status
+            pass  # the re-scan after cleanup reports what is still there (_leftover_names)
+        # the verifier checkout and its work dir are the OWNER's (verifiers.py makes them), so
+        # the account's rm cannot remove them: the owner finishes what the account could not
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _leftover_names(root: Path, attempt_id: str) -> list[str]:
+    """Names (only) of the attempt's directories still under ``root`` after cleanup: anything
+    that can hold laid-over hidden tests. A verify run's private dir is evidence and does not
+    count, its ``run/`` scratch does. Re-scans from disk; it trusts nothing the removers said."""
+    if not ATTEMPT_ID.fullmatch(attempt_id) or not Path(root).is_dir():
+        return []
+    root = Path(root)
+    works, privates, clones = _run_dirs(root, attempt_id)
+    own = [root / attempt_id] if (root / attempt_id).is_dir() else []
+    names = {
+        p.name if p.name != "run" else p.parent.name + "/run"
+        for p in works + privates + clones + own
+        if p.exists()
+    }
+    return sorted(names)
