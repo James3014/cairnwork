@@ -100,6 +100,23 @@ require_real_dir_or_absent "$RUNS" root "$OWNER"
 # a hidden service id in the quiet range 450..499 that is used by NO user (UniqueID) and NO group
 # (PrimaryGroupID), so the uid and gid spaces never overlap with an existing account or group. (max+1
 # would land next to Apple's own service ids, which new macOS releases keep adding.)
+# The NestedGroups key is normally absent. dscl then prints "No such key: NestedGroups"; its exit
+# status is not reliable for this (macOS 27 exits 0), so judge by the output, in the C locale: only
+# an output that is exactly the absent-key message (surrounding whitespace aside) passes; a
+# "NestedGroups:" value or anything else (an unreadable group, extra lines) is refused.
+check_no_nested_groups() {
+  local out
+  out=$(LC_ALL=C dscl . -read "/Groups/$1" NestedGroups 2>&1)
+  # ERE without REG_NEWLINE: ^ and $ anchor the whole output, so extra lines never match.
+  if [[ "$out" =~ '^[[:space:]]*No such key: NestedGroups[[:space:]]*$' ]]; then
+    return 0
+  elif [[ "$out" == *NestedGroups:* ]]; then
+    die "run group has nested groups (${out//$'\n'/ })"
+  else
+    die "cannot read NestedGroups of $1: ${out//$'\n'/ }"
+  fi
+}
+
 free_id() {
   local used id
   used=$( { dscl . -list /Users UniqueID; dscl . -list /Groups PrimaryGroupID; } | awk '{print $2}') \
@@ -166,13 +183,7 @@ members=$(dscl . -read "/Groups/$RUNGROUP" GroupMembership 2>/dev/null \
 expected=$(printf '%s\n' "$OWNER" "$WORKER" | sort | tr '\n' ' ')
 [[ "$members" == "$expected" ]] \
   || { echo "run group members are {$members}, expected {$expected}; refusing" >&2; exit 1; }
-# the NestedGroups key is normally absent (dscl exits non-zero with "No such key"); any other failure
-# or any value is refused.
-if nested=$(dscl . -read "/Groups/$RUNGROUP" NestedGroups 2>&1); then
-  die "run group has nested groups ($nested)"
-else
-  [[ "$nested" == *"No such key"* ]] || die "cannot read NestedGroups of $RUNGROUP: $nested"
-fi
+check_no_nested_groups "$RUNGROUP"
 # creating the account may have added it to the file-sharing group; remove it and READ IT BACK.
 for g in com.apple.sharepoint.group.1; do
   if dscl . -search /Groups GroupMembership "$WORKER" | awk '/GroupMembership/{print $1}' | grep -qx "$g"; then
