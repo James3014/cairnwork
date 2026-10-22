@@ -18,6 +18,7 @@ cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證�
 試點中（2026-10-20 → 2026-11-16）。目前只接一種任務：**小 bug 修正**（eia-task 格式：allowed_files ≤10、`pytest` 驗證）。
 
 第一次 A/B（Cairnwork 過濾 vs 裸跑，28 題）：**打平、未贏**，原因與下一步見 [docs/results/2026-10-22-ab-run2.md](docs/results/2026-10-22-ab-run2.md)。
+延後驗收擋錯能力量測（偵測器評估、方向性）：真實模型錯誤只有 7 份、擋下 5，不下結論；規則式突變 205/205 擋下；真實正確修補誤擋 0/83；驗證通過不等於沒有缺陷。見 [docs/results/2026-10-22-filter-mechanism.md](docs/results/2026-10-22-filter-mechanism.md)。
 
 ## 能力入場規則
 
