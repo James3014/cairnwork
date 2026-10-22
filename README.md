@@ -16,7 +16,7 @@ Cairnwork 是 AI 寫程式代理人的交付驗證層。核心價值不是提高
 - 不主張提高模型解決任務的成功率（強模型在小 bug 上本來就很少錯）。
 - 不主張取代人工程式碼審查。
 - 不主張是互動式 coding agent 或對話助理。
-- 不主張驗證通過就沒有缺陷：Nexus-new#2813 是 Core VERIFIED、但獨立審查仍抓到可繞過安全漏洞的實例。驗證是證據，不是證明。
+- 不主張驗證通過就沒有缺陷：Nexus-new#2813（修正 PR #2856）是 Core VERIFIED、但獨立審查仍抓到拒絕檢查可被繞過的實例。驗證是證據，不是證明。
 
 Nexus-new 是**參考**，不是搬家來源。決定與理由：knowledge `nexus/decisions/2026-10-19-cairnwork-owner-decision.md`；議會條文 A–I：`nexus/decisions/council-2026-10-19-cairnwork/CONSENSUS_R2.md`。
 
