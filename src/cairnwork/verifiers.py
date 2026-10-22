@@ -38,9 +38,9 @@ and none may run before the next one. Without one, a process that leaves the
 run's process group is killed only if it still carries the run token in its
 environment. Either way, never pass raw verifier logs to a worker or a model.
 Python runs with ``-P`` so the checkout is never on ``sys.path`` before the real
-pytest (a root ``pytest.py`` cannot replace it). Callers should keep tests,
-pytest configuration and root-level modules out of the files a candidate may
-change (``protected_verifier_inputs``), but that is not enough on its own:
+pytest (a root ``pytest.py`` cannot replace it). Callers must keep tests,
+pytest configuration and shadowing root-level modules out of the files a candidate
+may change (``protected_verifier_inputs``), but that is not enough on its own:
 candidate source code also runs inside the pytest process and can forge a
 result.
 """
@@ -62,39 +62,28 @@ import cairnwork_sandbox
 from cairnwork import confined, pytest_config, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
-from cairnwork.issue_task import DEFAULT_TEST_ROOTS, test_target
 from cairnwork.treecompare import tree_differences
 from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
+from cairnwork.verifier_spec import (  # re-exported for existing importers
+    VerifierRejected,
+    VerifierSpec,
+    parse_verifier,
+    protected_verifier_inputs,
+)
 from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
 
+__all__ = [
+    "DEFAULT_TIMEOUT_SECONDS",
+    "VerifierRejected",
+    "VerifierRun",
+    "VerifierSpec",
+    "parse_verifier",
+    "protected_verifier_inputs",
+    "run_verifiers",
+]
+
 DEFAULT_TIMEOUT_SECONDS = 600
-_OPTIONS = {("-q",), ("-p", "no:cacheprovider")}
 _ENV_KEEP = ("PATH", "LANG", "LC_ALL")
-_PROTECTED_NAMES = frozenset(
-    {
-        "conftest.py",
-        "pytest.ini",
-        "pyproject.toml",
-        "setup.cfg",
-        "tox.ini",
-        "setup.py",
-        "sitecustomize.py",
-        "usercustomize.py",
-    }
-)
-
-
-class VerifierRejected(Exception):
-    code = "VERIFIER_NOT_ALLOWED"
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(f"{self.code}: {detail}")
-
-
-@dataclass(frozen=True)
-class VerifierSpec:
-    verifier_id: str
-    targets: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -106,27 +95,6 @@ class VerifierRun:
     log_path: Path
     observation: VerifierObservation
     outcomes: dict[str, str]
-
-
-def parse_verifier(verifier_id: str, argv: list[str], roots=DEFAULT_TEST_ROOTS) -> VerifierSpec:
-    """Accept only python3 -m pytest with allowed options and <test root>/*.py targets."""
-    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
-        raise VerifierRejected("argv must be a list of strings")
-    if argv[:3] != ["python3", "-m", "pytest"]:
-        raise VerifierRejected(f"{verifier_id}: only 'python3 -m pytest' is allowed")
-    rest, targets, target = argv[3:], [], test_target(roots)
-    while rest:
-        if tuple(rest[:1]) in _OPTIONS:
-            rest = rest[1:]
-        elif tuple(rest[:2]) in _OPTIONS:
-            rest = rest[2:]
-        elif target.fullmatch(rest[0]):
-            targets.append(rest.pop(0))
-        else:
-            raise VerifierRejected(f"{verifier_id}: argument {rest[0]!r} is not allowed")
-    if not targets:
-        raise VerifierRejected(f"{verifier_id}: no {'|'.join(roots)}/*.py target")
-    return VerifierSpec(verifier_id, tuple(targets))
 
 
 def run_verifiers(
@@ -226,18 +194,6 @@ def _run_all(
                 pass  # the run's verdict stands; a leftover directory is only disk space
             _remove_scratch((work,), account)
     return tuple(runs)
-
-
-def protected_verifier_inputs(paths: tuple[str, ...], roots=DEFAULT_TEST_ROOTS) -> tuple[str, ...]:
-    """Paths a candidate must not change, because they decide what the verifier runs."""
-    return tuple(
-        path
-        for path in paths
-        if path in roots
-        or path.startswith(tuple(f"{r}/" for r in roots))
-        or path.rsplit("/", 1)[-1] in _PROTECTED_NAMES
-        or ("/" not in path and path.endswith((".py", ".pth")))
-    )
 
 
 def _remove_scratch(dirs, account) -> None:
