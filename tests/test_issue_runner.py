@@ -116,6 +116,15 @@ def test_a_multi_branch_mirror_is_refused_at_startup(setup):
         runner.take(setup["intake"], FakeGitHub([issue()]), setup["clone"])
 
 
+def test_a_mirror_holding_an_extra_branch_is_refused(setup):
+    # Even with a main-only fetch config, a mirror that already fetched another branch (a full clone
+    # later reconfigured) still holds the hidden-test branch; the ref check refuses it (Issue #76).
+    head = git(setup["clone"], "rev-parse", "HEAD").strip()
+    git(setup["clone"], "update-ref", "refs/remotes/origin/hidden", head)
+    with pytest.raises(RuntimeError, match="LINEAGE_MIRROR_NOT_SINGLE_BRANCH"):
+        runner.take(setup["intake"], FakeGitHub([issue()]), setup["clone"])
+
+
 def test_untrusted_or_malformed_issues_are_not_taken(setup):
     github = FakeGitHub([issue()], trusted="AUTHOR_UNTRUSTED")
     assert runner.take(setup["intake"], github, setup["clone"]) == [

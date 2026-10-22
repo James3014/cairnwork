@@ -135,13 +135,30 @@ def _mirror_multi_branch_reason(repo: Path) -> str | None:
         check=False,
     )
     specs = [s for s in got.stdout.splitlines() if s.strip()]
+    advice = "re-clone with: git clone --single-branch --branch main <url>"
     if not specs:
         return None
     # The source of "[+]<src>:<dst>" must be exactly main; a wildcard or another branch is refused.
     if any(spec.lstrip("+").split(":", 1)[0] != "refs/heads/main" for spec in specs):
-        return (
-            "mirror not single-branch; re-clone with: git clone --single-branch --branch main <url>"
-        )
+        return f"mirror not single-branch; {advice}"
+    # The config only governs future fetches; refuse a mirror that already holds a non-main branch.
+    refs = subprocess.run(  # noqa: S603, S607 - fixed argv, no shell
+        [
+            "git",
+            "-C",
+            str(repo),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],  # fmt: skip
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    allowed = {"refs/heads/main", "refs/remotes/origin/main", "refs/remotes/origin/HEAD"}
+    if any(r not in allowed for r in refs.stdout.split()):
+        return f"mirror holds a branch beyond main; {advice}"
     return None
 
 

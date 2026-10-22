@@ -166,6 +166,13 @@ def _verify_single_branch(clone: Path) -> None:
         # wildcard ("refs/heads/*") or another branch ("refs/heads/mainline") is refused.
         if spec.lstrip("+").split(":", 1)[0] != "refs/heads/main":
             raise RuntimeError(f"{code}: origin fetch {spec!r} is not refs/heads/main; {advice}")
+    # The config only governs future fetches; a mirror full-cloned once and later reconfigured still
+    # holds the branches it already fetched. Refuse if any branch beyond main is actually present.
+    allowed = {"refs/heads/main", "refs/remotes/origin/main", "refs/remotes/origin/HEAD"}
+    refs = _git(clone, "for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/origin/")
+    extra = [r for r in refs.split() if r not in allowed]
+    if extra:
+        raise RuntimeError(f"{code}: mirror holds a branch beyond main ({extra[0]}); {advice}")
 
 
 def take(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
