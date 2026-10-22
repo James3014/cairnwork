@@ -358,8 +358,8 @@ def main(argv: list[str] | None = None) -> int:
     github = GitHub(args.gh, args.repo)
     clone = Path(args.clone).resolve()
     try:
-        require_bot_gh(args.gh)
         _verify_origin(clone, github.repo)
+        require_bot_gh(args.gh, github.repo, clone)
     except RuntimeError as exc:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))
         return 3

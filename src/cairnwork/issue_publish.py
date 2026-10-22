@@ -7,12 +7,14 @@ or Issue text. Those stay in the local JSON output."""
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from cairnwork.journal import PHASES
 
 STATUSES = frozenset({"FAILED", "CANCELLED", "SUPERSEDED", "COMPLETED"})
 BOT_GH = "nexus-agent-gh"
+PROBE = "/installation/repositories"
 REFUSAL_CODE = re.compile(r"[A-Z0-9_]{1,64}")
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")  # plain text: no markdown, @, #, spaces
 PR_URL = r"https://github\.com/{repo}/pull/[0-9]+"
@@ -41,13 +43,23 @@ def refusal_code(exc: Exception) -> str:
     return code if isinstance(code, str) and REFUSAL_CODE.fullmatch(code) else "REFUSED"
 
 
-def require_bot_gh(gh: str) -> None:
-    """Fail closed unless --gh is named like the bot's wrapper.
+def require_bot_gh(gh: str, repo: str, cwd: Path) -> None:
+    """Fail closed unless --gh is the bot wrapper AND it really acts as the GitHub App.
 
-    A misconfiguration guard, not an identity check: any file called nexus-agent-gh passes.
-    A real probe (installation token or GraphQL viewer login) is a follow-up Issue."""
+    The name check only catches a misconfiguration. The probe is the identity check:
+    ``GET /installation/repositories`` answers only to an installation token (a personal login
+    gets 403) and must list the configured repo. Any error, timeout or odd output refuses."""
     if Path(gh).name != BOT_GH:
         raise RuntimeError(f"GH_IDENTITY_NOT_BOT: --gh must be the {BOT_GH} wrapper")
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
+            [gh, "api", PROBE, "--paginate", "--jq", ".repositories[].full_name"],
+            capture_output=True, text=True, timeout=60, check=False, cwd=cwd,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        done = None
+    if done is None or done.returncode != 0 or repo not in done.stdout.split():
+        raise RuntimeError(f"GH_IDENTITY_NOT_BOT: {BOT_GH} has no installation token for {repo}")
 
 
 def pr_body(number: int, task_id: str, attempt: str, commit: str) -> str:
