@@ -27,7 +27,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,7 @@ from cairnwork.changeset import ChangeSetError, read_change_set
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.gitcmd import NETWORK_TIMEOUT_SECONDS, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
+from cairnwork.issue_github import GitHub
 from cairnwork.issue_publish import (
     TASK_ID,
     done_text,
@@ -44,7 +44,7 @@ from cairnwork.issue_publish import (
     refusal_text,
     require_bot_gh,
 )
-from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
+from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block
 from cairnwork.lineage import require_on_main
 from cairnwork.lineage import verify_origin as _verify_origin
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
@@ -58,94 +58,9 @@ QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
     "cairnwork:pr-opened",
     "cairnwork:needs-fix",
 )
-REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 TRUST_CHANGED = "TRUST_CHANGED_BEFORE_DISPATCH"
 DEFAULT_GH = str(Path.home() / ".config/nexus-agent-bot/bin/nexus-agent-gh")
-
-
-class GitHub:
-    def __init__(self, gh: str, repo: str) -> None:
-        if not REPO.fullmatch(repo):
-            raise ValueError(f"repo must be OWNER/NAME, got {repo!r}")
-        self.gh, self.repo = gh, repo
-
-    def _run(self, *args: str, stdin: str | None = None) -> str:
-        done = subprocess.run(  # noqa: S603 - fixed binary, argv list, no shell
-            [self.gh, *args], input=stdin, capture_output=True, text=True, timeout=120, check=False
-        )
-        if done.returncode != 0:
-            raise RuntimeError(f"gh {args[0]} failed: {done.stderr.strip()[-300:]}")
-        return done.stdout
-
-    def issues(self, label: str) -> list[dict[str, Any]]:
-        out = self._run(
-            "issue", "list", "-R", self.repo, "--state", "open", "--label", label,
-            "--limit", "50", "--json", "number,title,body",
-        )  # fmt: skip
-        return json.loads(out)
-
-    def trust(self, number: int, label: str) -> str:
-        try:
-            return self._trust(number, label)
-        except (TypeError, AttributeError, KeyError, ValueError):  # odd GitHub output: refuse
-            return "TRUST_CHECK_FAILED"
-
-    def current(self, number: int) -> dict[str, Any]:
-        out = self._run("issue", "view", str(number), "-R", self.repo, "--json", "body,title")
-        return json.loads(out)
-
-    def _trust(self, number: int, label: str) -> str:
-        jq = (
-            '.[] | select(.event=="labeled" or .event=="renamed") | '
-            "{event, label: .label.name, actor: .actor.login, at: .created_at}"
-        )
-        out = self._run(
-            "api", "--paginate", f"repos/{self.repo}/issues/{number}/timeline", "--jq", jq
-        )
-        events = [json.loads(line) for line in out.splitlines() if line.strip()]
-        owner, name = self.repo.split("/")
-        query = (
-            f'query($num:Int!){{repository(owner:"{owner}",name:"{name}"){{issue(number:$num)'
-            "{author{login __typename} userContentEdits(first:100)"
-            "{totalCount nodes{editedAt editor{login __typename}}}}}}"
-        )
-        data = json.loads(
-            self._run("api", "graphql", "-f", f"query={query}", "-F", f"num={number}")
-        )
-        issue = (((data or {}).get("data") or {}).get("repository") or {}).get("issue") or {}
-        return queue_trusted(
-            label=label, events=events, author=issue.get("author"),
-            edits=issue.get("userContentEdits"),
-        )  # fmt: skip
-
-    def comment(self, number: int, text: str) -> None:
-        self._run("issue", "comment", str(number), "-R", self.repo, "--body-file", "-", stdin=text)
-
-    def relabel(self, number: int, add: str, remove: str) -> None:
-        self._run(
-            "issue", "edit", str(number), "-R", self.repo, "--add-label", add,
-            "--remove-label", remove,
-        )  # fmt: skip
-
-    def parents(self, commit: str) -> list[str]:
-        out = self._run(
-            "api", f"repos/{self.repo}/commits/{commit}", "--jq", ".parents[].sha"
-        )  # fmt: skip
-        return out.split()
-
-    def find_pr(self, branch: str) -> str:
-        out = self._run(
-            "pr", "list", "-R", self.repo, "--head", branch, "--state", "all",
-            "--json", "url", "--jq", ".[0].url // empty",
-        )  # fmt: skip
-        return out.strip()
-
-    def draft_pr(self, branch: str, title: str, body: str) -> str:
-        return self._run(
-            "pr", "create", "-R", self.repo, "--draft", "--base", "main", "--head", branch,
-            "--title", title, "--body-file", "-", stdin=body,
-        ).strip()  # fmt: skip
 
 
 def _verify_single_branch(clone: Path) -> None:
