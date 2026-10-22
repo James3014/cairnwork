@@ -305,7 +305,7 @@ def test_concurrent_creation_of_a_new_ledger_never_reports_a_schema_mismatch(tmp
             thread.join()
         assert errors == []
         conn = sqlite3.connect(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2  # schema 2 (Issue #74)
         conn.close()
 
 

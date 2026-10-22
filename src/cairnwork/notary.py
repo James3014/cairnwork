@@ -38,8 +38,11 @@ from typing import Any
 
 from cairnwork.changeset import read_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
+from cairnwork.notary_schema import SCHEMA, SCHEMA_VERSION
 from cairnwork_protocol import (
+    IDENTITY_MISMATCH,
     acceptance_contract_hash,
+    canonical_json,
     change_set_hash,
     evidence_bundle_hash,
     response_binding_problem,
@@ -48,37 +51,7 @@ from cairnwork_protocol import (
 
 CoreVerify = Callable[[dict[str, Any]], tuple[int, dict[str, Any]]]
 CORE_ERROR = "CORE_ERROR"
-SCHEMA_VERSION = 1
 _OID = re.compile(r"^[0-9a-f]{40}$")
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS core_verifications (
-    seq              INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id          TEXT NOT NULL,
-    attempt_id       TEXT NOT NULL,
-    base_commit      TEXT NOT NULL,
-    candidate_commit TEXT NOT NULL,
-    request_hash     TEXT NOT NULL,
-    request_json     TEXT NOT NULL,
-    http_status      INTEGER NOT NULL,
-    status           TEXT NOT NULL,
-    integrity        TEXT NOT NULL,
-    response_json    TEXT NOT NULL,
-    recorded_at      TEXT NOT NULL,
-    UNIQUE (task_id, attempt_id)
-);
-CREATE TRIGGER IF NOT EXISTS core_verifications_no_update
-    BEFORE UPDATE ON core_verifications
-    BEGIN SELECT RAISE(ABORT, 'core_verifications is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS core_verifications_no_delete
-    BEFORE DELETE ON core_verifications
-    BEGIN SELECT RAISE(ABORT, 'core_verifications is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS core_verifications_no_overwrite
-    BEFORE INSERT ON core_verifications
-    WHEN EXISTS (SELECT 1 FROM core_verifications
-                 WHERE task_id = NEW.task_id AND attempt_id = NEW.attempt_id)
-    BEGIN SELECT RAISE(ABORT, 'core_verifications is append-only'); END;
-"""
 
 _HASH_KEYS = (
     "acceptance_contract_hash",
@@ -134,6 +107,25 @@ def default_core_identity() -> dict[str, Any]:
     return core_identity()
 
 
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add the expected_identity column and bump to schema 2 (Issue #74); existing append-only rows
+    keep a NULL value. Serialised by BEGIN IMMEDIATE and idempotent under a concurrent migration."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == SCHEMA_VERSION:  # another connection migrated while we waited for the lock
+            conn.execute("COMMIT")
+            return
+        if version != 1:
+            raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
+        conn.execute("ALTER TABLE core_verifications ADD COLUMN expected_identity TEXT")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 class Notary:
     def __init__(
         self,
@@ -141,11 +133,13 @@ class Notary:
         core_verify: CoreVerify | None = None,
         core_identity: dict[str, Any] | None = None,
     ) -> None:
-        """core_identity is what a Core response must report as itself (default: the Core
-        installed beside Cairnwork); a remote Core needs its own pinned identity."""
+        """core_identity is the pin a Core response must report as itself; None expects the Core
+        installed beside Cairnwork. Kept separate from the resolved default so a readback can tell a
+        real operator pin from the local default (Issue #74)."""
         self._path = Path(path)
         self._core_verify = core_verify or default_core_verify()
-        self._core_identity = core_identity
+        self._core_identity = core_identity  # the configured pin, or None
+        self._default: dict[str, Any] | None = None  # the local Core identity, resolved once
         conn = self._connect()
         try:
             conn.execute("BEGIN")  # one read snapshot for both checks
@@ -154,16 +148,43 @@ class Notary:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'core_verifications'"
             ).fetchone()
             conn.execute("COMMIT")
-            if has_table and version != SCHEMA_VERSION:
-                raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
             if not has_table:  # only a new database is written to; readers never take the lock
                 # Tables, triggers and user_version commit together, so no other connection
                 # can see the tables without the version (or race to a half-built schema).
                 conn.executescript(
-                    f"BEGIN IMMEDIATE;{_SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
+                    f"BEGIN IMMEDIATE;{SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
                 )
+            elif version == 1 and SCHEMA_VERSION == 2:
+                _migrate_v1_to_v2(conn)
+            elif version != SCHEMA_VERSION:
+                raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
         finally:
             conn.close()
+
+    def _expected_identity(self) -> dict[str, Any]:
+        """Expected identity with no per-row value: the pin, else the local Core (cached)."""
+        if self._core_identity is not None:
+            return self._core_identity
+        if self._default is None:
+            self._default = default_core_identity()
+        return self._default
+
+    def _identity_problem(
+        self, request: dict[str, Any], response: dict[str, Any], expected_identity: str | None
+    ) -> str:
+        """Why the response's Core identity is not acceptable, else "". A schema-2 row is checked
+        against the identity it was notarized against, so it survives a Core upgrade (#74); a pin
+        must also equal that. A pre-migration (NULL) row keeps the read-time identity."""
+        if expected_identity is None:
+            return response_binding_problem(request, response, self._expected_identity()) or ""
+        expected = json.loads(expected_identity)
+        reason = response_binding_problem(request, response, expected) or ""
+        if reason:
+            return reason
+        pin = self._core_identity
+        if pin is not None and canonical_json(expected) != canonical_json(pin):
+            return IDENTITY_MISMATCH
+        return ""
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30, isolation_level=None)
@@ -203,13 +224,15 @@ class Notary:
             integrity,
             _dumps(response),
             datetime.now(UTC).isoformat(),
+            _dumps(self._expected_identity()),  # frozen so readback survives a later Core upgrade
         )
         conn = self._connect()
         try:
             conn.execute(
                 "INSERT INTO core_verifications (task_id, attempt_id, base_commit,"
                 " candidate_commit, request_hash, request_json, http_status, status,"
-                " integrity, response_json, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " integrity, response_json, recorded_at, expected_identity)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
         except sqlite3.IntegrityError:
@@ -234,7 +257,7 @@ class Notary:
         try:
             row = conn.execute(
                 "SELECT base_commit, candidate_commit, request_hash, request_json, http_status,"
-                " status, integrity, response_json FROM core_verifications"
+                " status, integrity, response_json, expected_identity FROM core_verifications"
                 " WHERE task_id = ? AND attempt_id = ?",
                 (task_id, attempt_id),
             ).fetchone()
@@ -242,14 +265,12 @@ class Notary:
             conn.close()
         if row is None:
             return None
-        base, candidate, request_hash, request_json, http_status, status, integrity, resp = row
+        base, candidate, request_hash, request_json, http_status, status, integrity, resp, exp = row
         request, response = json.loads(request_json), json.loads(resp)
         verified = _is_verified(http_status, status, integrity, response, request, request_hash)
         reason = ""
         if verified:
-            if self._core_identity is None:
-                self._core_identity = default_core_identity()
-            reason = response_binding_problem(request, response, self._core_identity) or ""
+            reason = self._identity_problem(request, response, exp)
         verified = (
             verified
             and not reason
