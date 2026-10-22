@@ -128,6 +128,7 @@ class VerifiedRecord:
                 "VerifiedRecord cannot be constructed directly",
                 code="VERIFIED_RECORD_FORGED",
             )
+        object.__setattr__(self, "_token", None)
 
 
 def _fetch_row(uri: str, task_id: str, attempt_id: str) -> tuple[Any, ...]:
@@ -195,7 +196,7 @@ def read_record(notary_sqlite: Path, task_id: str, attempt_id: str) -> VerdictRe
     )
 
 
-def _check_record_bindings(record: VerdictRecord) -> None:
+def check_record_bindings(record: VerdictRecord) -> None:
     expected_hash = _digest(record.request)
     if record.request_hash != expected_hash:
         raise RecordMalformed(
@@ -223,6 +224,9 @@ def _check_record_bindings(record: VerdictRecord) -> None:
         )
 
 
+_check_record_bindings = check_record_bindings
+
+
 def _never_call_core(_: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     raise RuntimeError("attest never calls Core")
 
@@ -246,7 +250,7 @@ def verify_record(
             f" != expected_candidate {expected_candidate!r}",
             code="CANDIDATE_MISMATCH",
         )
-    _check_record_bindings(record)
+    check_record_bindings(record)
 
     try:
         notary = Notary(notary_sqlite, core_verify=_never_call_core, core_identity=core_identity)

@@ -20,6 +20,10 @@ confirming that all integrity invariants hold:
 If any check fails or the notary verdict is not verified, statement creation is refused
 with `RecordNotVerified` or `RecordMalformed`.
 
+## In-Process Trust Boundary
+
+The opaque type and re-checks defend against accidental misuse and against callers that only hold the public API; they do not defend against code running in the same process that bypasses them (`object.__setattr__`, direct SQLite writes); the signed envelope (next PR) binds the Statement bytes, and offline verification recomputes everything from the notary database and git objects.
+
 ## Statement Structure
 
 An attestation statement is an unsigned in-toto v1 Statement containing:

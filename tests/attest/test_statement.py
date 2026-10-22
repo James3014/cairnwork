@@ -12,8 +12,7 @@ from conftest import commit_change, git
 
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation
 from cairnwork.notary import Notary, default_core_identity
-from cairnwork_attest.assurance import Assurance
-from cairnwork_attest.record import RecordNotVerified, verify_record
+from cairnwork_attest.record import AttestError, RecordNotVerified, _digest, verify_record
 from cairnwork_attest.statement import (
     PREDICATE_TYPE,
     Producer,
@@ -75,13 +74,11 @@ def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
-    assurance = Assurance(sandbox_backend="seatbelt", verifier_account_isolated=True)
     timestamp = "2026-10-22T09:00:00Z"
 
     statement = build_statement(
         verified,
         producer=producer,
-        assurance=assurance,
         timestamp=timestamp,
     )
 
@@ -113,7 +110,13 @@ def test_round_trip_read_to_statement(tmp_path: Path, repo: Path) -> None:
     }
     assert pred["recorded_at"] == verified.record.recorded_at
     assert pred["timestamp"] == timestamp
-    assert pred["assurance"] == assurance.to_dict()
+    assert pred["assurance"] == {
+        "sandbox_backend": "unknown",
+        "verifier_account_isolated": "unknown",
+        "worker_isolated": "unknown",
+        "hidden_tests": "unknown",
+        "network": "unknown",
+    }
 
 
 def test_statement_hash_stable_across_two_builds(tmp_path: Path, repo: Path) -> None:
@@ -122,11 +125,10 @@ def test_statement_hash_stable_across_two_builds(tmp_path: Path, repo: Path) -> 
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
-    assurance = Assurance(sandbox_backend="seatbelt")
     ts = "2026-10-22T09:00:00Z"
 
-    s1 = build_statement(verified, producer=producer, assurance=assurance, timestamp=ts)
-    s2 = build_statement(verified, producer=producer, assurance=assurance, timestamp=ts)
+    s1 = build_statement(verified, producer=producer, timestamp=ts)
+    s2 = build_statement(verified, producer=producer, timestamp=ts)
 
     assert statement_hash(s1) == statement_hash(s2)
     assert statement_bytes(s1) == statement_bytes(s2)
@@ -136,7 +138,7 @@ def test_statement_hash_stable_across_two_builds(tmp_path: Path, repo: Path) -> 
 @pytest.mark.parametrize(
     ("field_name", "modified_val"),
     [
-        ("request_hash", "sha256:" + "9" * 64),
+        ("recorded_at", "2026-10-22T10:00:00Z"),
         ("timestamp", "2026-10-22T09:00:01Z"),
         ("http_status", 201),
     ],
@@ -149,24 +151,17 @@ def test_statement_hash_changes_when_predicate_field_changes(
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     producer = Producer(name="cairnwork", version="0.0.1.dev0", git_commit="c" * 40)
-    assurance = Assurance(sandbox_backend="seatbelt")
     base_ts = "2026-10-22T09:00:00Z"
 
-    base_statement = build_statement(
-        verified, producer=producer, assurance=assurance, timestamp=base_ts
-    )
+    base_statement = build_statement(verified, producer=producer, timestamp=base_ts)
     base_hash = statement_hash(base_statement)
 
     if field_name == "timestamp":
-        mod_statement = build_statement(
-            verified, producer=producer, assurance=assurance, timestamp=modified_val
-        )
+        mod_statement = build_statement(verified, producer=producer, timestamp=modified_val)
     else:
         mod_record = replace(verified.record, **{field_name: modified_val})
-        mod_verified = replace(verified, record=mod_record)
-        mod_statement = build_statement(
-            mod_verified, producer=producer, assurance=assurance, timestamp=base_ts
-        )
+        object.__setattr__(verified, "record", mod_record)
+        mod_statement = build_statement(verified, producer=producer, timestamp=base_ts)
 
     assert statement_hash(mod_statement) != base_hash
 
@@ -190,67 +185,59 @@ def test_invalid_commit_raises_statement_input_error(
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     producer = Producer()
-    assurance = Assurance()
     ts = "2026-10-22T09:00:00Z"
 
     bad_cand = replace(verified.record, candidate_commit=bad_commit)
-    bad_verified_cand = replace(verified, record=bad_cand)
+    object.__setattr__(verified, "record", bad_cand)
     with pytest.raises(StatementInputError):
-        build_statement(bad_verified_cand, producer=producer, assurance=assurance, timestamp=ts)
+        build_statement(verified, producer=producer, timestamp=ts)
 
     bad_base = replace(verified.record, base_commit=bad_commit)
-    bad_verified_base = replace(verified, record=bad_base)
+    object.__setattr__(verified, "record", bad_base)
     with pytest.raises(StatementInputError):
-        build_statement(bad_verified_base, producer=producer, assurance=assurance, timestamp=ts)
+        build_statement(verified, producer=producer, timestamp=ts)
 
 
-def test_build_statement_unverified_verdict_raises_record_not_verified(
-    tmp_path: Path, repo: Path
-) -> None:
+def test_build_statement_unverified_verdict_raises_tampered(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
     _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     unverified = replace(verified.verdict, verified=False, status="FAILED_VERIFICATION")
-    bad_verified = replace(verified, verdict=unverified)
-    with pytest.raises(RecordNotVerified) as exc_info:
+    object.__setattr__(verified, "verdict", unverified)
+    with pytest.raises(StatementInputError) as exc_info:
         build_statement(
-            bad_verified,
+            verified,
             producer=Producer(),
-            assurance=Assurance(),
             timestamp="2026-10-22T09:00:00Z",
         )
-    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+    assert exc_info.value.code == "VERIFIED_RECORD_TAMPERED"
 
 
-def test_build_statement_mismatched_verdict_raises_record_not_verified(
-    tmp_path: Path, repo: Path
-) -> None:
+def test_build_statement_mismatched_verdict_raises_tampered(tmp_path: Path, repo: Path) -> None:
     db_path = tmp_path / "notary.sqlite"
     _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
 
     mismatched_task = replace(verified.verdict, task_id="other-task")
-    bad_verified_task = replace(verified, verdict=mismatched_task)
-    with pytest.raises(RecordNotVerified) as exc_info:
+    object.__setattr__(verified, "verdict", mismatched_task)
+    with pytest.raises(StatementInputError) as exc_info:
         build_statement(
-            bad_verified_task,
+            verified,
             producer=Producer(),
-            assurance=Assurance(),
             timestamp="2026-10-22T09:00:00Z",
         )
-    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+    assert exc_info.value.code == "VERIFIED_RECORD_TAMPERED"
 
     mismatched_cand = replace(verified.verdict, candidate_commit="0" * 40)
-    bad_verified_cand = replace(verified, verdict=mismatched_cand)
-    with pytest.raises(RecordNotVerified) as exc_info:
+    object.__setattr__(verified, "verdict", mismatched_cand)
+    with pytest.raises(StatementInputError) as exc_info:
         build_statement(
-            bad_verified_cand,
+            verified,
             producer=Producer(),
-            assurance=Assurance(),
             timestamp="2026-10-22T09:00:00Z",
         )
-    assert exc_info.value.code == "RECORD_NOT_VERIFIED"
+    assert exc_info.value.code == "VERIFIED_RECORD_TAMPERED"
 
 
 def test_build_statement_subject_has_exactly_one_entry(tmp_path: Path, repo: Path) -> None:
@@ -261,7 +248,6 @@ def test_build_statement_subject_has_exactly_one_entry(tmp_path: Path, repo: Pat
     statement = build_statement(
         verified,
         producer=Producer(),
-        assurance=Assurance(),
         timestamp="2026-10-22T09:00:00Z",
     )
     assert len(statement["subject"]) == 1
@@ -277,7 +263,6 @@ def test_build_statement_bare_record_or_pair_raises_statement_input_error(
     _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
     verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
     producer = Producer()
-    assurance = Assurance()
     ts = "2026-10-22T09:00:00Z"
 
     bad_inputs: list[Any] = [
@@ -289,7 +274,7 @@ def test_build_statement_bare_record_or_pair_raises_statement_input_error(
     ]
     for bad in bad_inputs:
         with pytest.raises(StatementInputError) as exc_info:
-            build_statement(bad, producer=producer, assurance=assurance, timestamp=ts)
+            build_statement(bad, producer=producer, timestamp=ts)
         assert exc_info.value.code == "STATEMENT_INPUT_ERROR"
 
 
@@ -307,7 +292,6 @@ def test_verified_record_is_snapshot_after_db_tamper(tmp_path: Path, repo: Path)
     statement = build_statement(
         verified,
         producer=Producer(),
-        assurance=Assurance(),
         timestamp="2026-10-22T09:00:00Z",
     )
     assert statement["predicate"]["status"] == "VERIFIED"
@@ -326,14 +310,65 @@ def test_build_statement_missing_core_identity_and_observations(tmp_path: Path, 
     stripped_req["evidence_bundle"] = {}
     stripped_resp = dict(verified.record.response)
     stripped_resp.pop("core_identity", None)
-    mod_record = replace(verified.record, request=stripped_req, response=stripped_resp)
-    mod_verified = replace(verified, record=mod_record)
+    mod_record = replace(
+        verified.record,
+        request=stripped_req,
+        response=stripped_resp,
+        request_hash=_digest(stripped_req),
+    )
+    object.__setattr__(verified, "record", mod_record)
 
     statement = build_statement(
-        mod_verified,
+        verified,
         producer=Producer(),
-        assurance=Assurance(),
         timestamp="2026-10-22T09:00:00Z",
     )
     assert statement["predicate"]["core_identity"] is None
     assert statement["predicate"]["verifier_observations"] == []
+
+
+def test_verified_record_dataclass_replace_raises_forged(tmp_path: Path, repo: Path) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
+    other_record = replace(verified.record, task_id="other-task")
+
+    with pytest.raises(AttestError) as exc_info:
+        replace(verified, record=other_record)
+    assert exc_info.value.code == "VERIFIED_RECORD_FORGED"
+
+
+def test_build_statement_swapped_inner_record_via_setattr_refused(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
+    other_record = replace(verified.record, task_id="swapped-task")
+
+    object.__setattr__(verified, "record", other_record)
+    with pytest.raises(StatementInputError) as exc_info:
+        build_statement(
+            verified,
+            producer=Producer(),
+            timestamp="2026-10-22T09:00:00Z",
+        )
+    assert exc_info.value.code == "VERIFIED_RECORD_TAMPERED"
+
+
+def test_build_statement_tampered_request_hash_via_setattr_refused(
+    tmp_path: Path, repo: Path
+) -> None:
+    db_path = tmp_path / "notary.sqlite"
+    _, verdict = setup_sample_notary(db_path, repo, "task-1", "a1")
+    verified = verify_record(db_path, "task-1", "a1", expected_candidate=verdict.candidate_commit)
+    tampered_record = replace(verified.record, request_hash="sha256:" + "0" * 64)
+
+    object.__setattr__(verified, "record", tampered_record)
+    with pytest.raises(StatementInputError) as exc_info:
+        build_statement(
+            verified,
+            producer=Producer(),
+            timestamp="2026-10-22T09:00:00Z",
+        )
+    assert exc_info.value.code == "VERIFIED_RECORD_TAMPERED"

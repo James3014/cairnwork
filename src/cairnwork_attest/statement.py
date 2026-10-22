@@ -7,8 +7,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from cairnwork_attest.assurance import Assurance
-from cairnwork_attest.record import AttestError, RecordNotVerified, VerifiedRecord
+from cairnwork_attest.assurance import assurance_from_record
+from cairnwork_attest.record import (
+    AttestError,
+    VerifiedRecord,
+    check_record_bindings,
+)
 from cairnwork_protocol import canonical_hash, canonical_json
 
 PREDICATE_TYPE = "https://cairnwork.github.io/attestation/verified-change/v0.1"
@@ -27,13 +31,7 @@ class Producer:
     git_commit: str = ""
 
 
-def build_statement(
-    verified: VerifiedRecord,
-    *,
-    producer: Producer,
-    assurance: Assurance,
-    timestamp: str,
-) -> dict[str, Any]:
+def _validate_verified_record(verified: VerifiedRecord) -> None:
     if not isinstance(verified, VerifiedRecord):
         raise StatementInputError(
             f"build_statement requires VerifiedRecord, got {type(verified).__name__}"
@@ -43,26 +41,45 @@ def build_statement(
 
     if not isinstance(record.candidate_commit, str) or not _OID.fullmatch(record.candidate_commit):
         raise StatementInputError(
-            f"candidate_commit must be a 40-hex commit hash, got {record.candidate_commit!r}"
+            f"candidate_commit must be a 40-hex commit hash, got {record.candidate_commit!r}",
+            code="VERIFIED_RECORD_TAMPERED",
         )
     if not isinstance(record.base_commit, str) or not _OID.fullmatch(record.base_commit):
         raise StatementInputError(
-            f"base_commit must be a 40-hex commit hash, got {record.base_commit!r}"
+            f"base_commit must be a 40-hex commit hash, got {record.base_commit!r}",
+            code="VERIFIED_RECORD_TAMPERED",
         )
-    if not verdict.verified:
-        reason = (
-            verdict.reason or f"verdict status={verdict.status!r}, integrity={verdict.integrity!r}"
-        )
-        raise RecordNotVerified(reason, code="RECORD_NOT_VERIFIED")
-    if (
-        verdict.task_id != record.task_id
-        or verdict.attempt_id != record.attempt_id
-        or verdict.candidate_commit != record.candidate_commit
+
+    try:
+        check_record_bindings(record)
+    except (AttestError, AttributeError, TypeError, ValueError) as exc:
+        raise StatementInputError(
+            f"record bindings verification failed: {exc}",
+            code="VERIFIED_RECORD_TAMPERED",
+        ) from exc
+
+    if not (
+        verdict.verified
+        and verdict.task_id == record.task_id
+        and verdict.attempt_id == record.attempt_id
+        and verdict.candidate_commit == record.candidate_commit
     ):
-        raise RecordNotVerified(
-            "verdict does not match record task_id, attempt_id, or candidate_commit",
-            code="RECORD_NOT_VERIFIED",
+        raise StatementInputError(
+            "verdict does not match record task_id, attempt_id, or candidate_commit, "
+            "or is not verified",
+            code="VERIFIED_RECORD_TAMPERED",
         )
+
+
+def build_statement(
+    verified: VerifiedRecord,
+    *,
+    producer: Producer,
+    timestamp: str,
+) -> dict[str, Any]:
+    _validate_verified_record(verified)
+    record = verified.record
+    assurance = assurance_from_record(verified)
 
     core_identity: dict[str, Any] | None = None
     if isinstance(record.response, dict):

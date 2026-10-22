@@ -14,6 +14,7 @@ from cairnwork_attest.record import (
     RecordNotVerified,
     VerdictRecord,
     VerifiedRecord,
+    check_record_bindings,
     read_record,
     verify_record,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "VerifiedRecord",
     "assurance_from_record",
     "build_statement",
+    "check_record_bindings",
     "read_record",
     "statement_bytes",
     "statement_hash",
