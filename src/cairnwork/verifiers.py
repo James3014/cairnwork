@@ -73,6 +73,7 @@ from cairnwork.verifier_spec import (  # re-exported for existing importers
 from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
 
 __all__ = [
+    "DEFAULT_TIMEOUT_SECONDS",
     "VerifierRejected",
     "VerifierRun",
     "VerifierSpec",
