@@ -269,40 +269,43 @@ def _home_cred_masks(real_home: str, owner: bool) -> list[tuple[str, bool]]:
 
 
 def _account_can_reach(real_home: str, rel: str) -> bool:
-    """True if a uid that is neither the owner nor in the path's group can resolve
-    ``real_home/rel`` to mount over it. The kernel resolves the bind target as that uid, so every
-    directory it must enter has to be other-traversable (``o+x``): the literal path's directories
-    within the home and, if the target is a symlink, the real target's. A realpath that escapes the
-    home, a symlinked or non-directory component, a missing target, or a stat error counts as not
-    reachable — skip the mask rather than risk an EPERM that would fail the run. (Directories above
-    the home are not checked: ``real_home`` itself being non-traversable — a private ``0700`` home —
-    already yields nothing, and a home whose parents deny the owner is pathological.)"""
+    """True if the verifier process can resolve ``real_home/rel`` to mount over it. bwrap runs the
+    mount as the verifier uid in a user namespace that maps only that uid/gid and drops the owner's
+    supplementary groups, so the owner's directories are reached as *other*, and the kernel must be
+    able to traverse (``o+x``) every directory from ``/`` down to the real target's parent. The
+    target is resolved with ``realpath`` (following symlinks) and must stay strictly inside the
+    home: one that resolves outside it, or behind a directory the verifier cannot enter, is not
+    masked —
+    binding over it would EPERM and fail the run, and it cannot leak either, being unreadable to
+    that uid. The target's own read bits are not consulted: a reachable path is masked whatever its
+    mode (a ``0711`` directory is unreadable yet still lets a known world-readable child leak).
+
+    Two fail-closed limits remain (defense-in-depth, not regressions — the account path masked
+    nothing before). A home deliberately given group ``cairnwork`` with group access is reached by
+    group, not other, so its credentials are not masked; the installer warns on a group/other-
+    accessible home. And ``lstat`` per component treats a symlinked *intermediate* as not
+    traversable, so a credential reached only through an in-home symlink is left unmasked."""
     literal = f"{real_home}/{rel}"
     try:
         real = os.path.realpath(literal)
+        if not real.startswith(f"{real_home}/"):  # outside the home, or home itself: never mask
+            return False
         if not os.path.exists(real):  # a broken symlink masks nothing and cannot be mounted
             return False
     except OSError:
         return False
-    return _within_home_traversable(real_home, literal) and _within_home_traversable(
-        real_home, real
-    )
+    return _other_can_traverse(os.path.dirname(real))
 
 
-def _within_home_traversable(real_home: str, path: str) -> bool:
-    """``real_home`` and every directory under it down to ``path``'s parent are real directories a
-    non-owner, no-shared-group uid can enter (``o+x``). A ``path`` outside the home is not reachable
-    (do not bind over a home path that resolves outside it). ``lstat`` so a symlinked component is a
-    link, not the directory it points at, and counts as not traversable (fail closed)."""
-    parent = os.path.dirname(path)
-    if parent != real_home and not parent.startswith(f"{real_home}/"):
-        return False
-    extra = "" if parent == real_home else parent[len(real_home) + 1 :]
-    directory = real_home
-    for name in ["", *(extra.split("/") if extra else [])]:
-        directory = f"{directory}/{name}" if name else directory
+def _other_can_traverse(directory: str) -> bool:
+    """Every directory from ``/`` down to ``directory`` is a real directory an *other* process can
+    enter (``o+x``). ``lstat`` so a symlinked component counts as a link, not a directory, and so as
+    not traversable (fail closed). A stat error also counts as not traversable."""
+    current = ""
+    for part in Path(directory).parts:
+        current = os.path.join(current, part) if current else part
         try:
-            info = os.lstat(directory)
+            info = os.lstat(current)
         except OSError:
             return False
         if not stat.S_ISDIR(info.st_mode) or not info.st_mode & 0o001:

@@ -2,13 +2,33 @@
 argv construction (pure functions) are checked on any host. The real confinement is witnessed
 by tests/test_sandbox.py on the test-linux-sandbox CI job."""
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from cairnwork_sandbox import bwrap, platform_backend
 from cairnwork_sandbox.backend import SandboxError
+
+
+@pytest.fixture
+def world_home():
+    """A home whose ancestors are world-traversable, so the account-path reachability walk (which
+    runs from ``/``) can pass. pytest's own tmp tree is 0700, which would block it; ``/tmp`` is
+    1777. The home itself is 0755 unless a test tightens it."""
+    base = Path(tempfile.mkdtemp(dir="/tmp", prefix="cw-home-"))  # noqa: S108 - needs world ancestors
+    os.chmod(base, 0o755)
+    try:
+        yield base
+    finally:
+        for root, dirs, _ in os.walk(base):  # some tests make 0700 subdirs; reopen them to delete
+            for d in dirs:
+                os.chmod(os.path.join(root, d), 0o700)
+        shutil.rmtree(base, ignore_errors=True)
+
 
 # Captured before the autouse fixture neutralises the module attribute, so a test can check the
 # real masked-socket list.
@@ -118,14 +138,14 @@ def test_home_credential_masks_are_skipped_under_a_private_home(tmp_path):
     assert str(work.resolve()) in lines  # the write bind is still there
 
 
-def test_reachable_credentials_are_masked_under_the_account(tmp_path):
-    # Issue #93: on a loosened (0755) owner home the account uid can resolve credential paths, so
-    # a world-readable one still leaks. mask_home_credentials=False masks every path the uid can
+def test_reachable_credentials_are_masked_under_the_account(world_home):
+    # Issue #93: on a loosened (0755) owner home the account can resolve credential paths, so a
+    # world-readable one still leaks. mask_home_credentials=False masks every path the account can
     # reach to mount over — read bits are not consulted: masking a reachable path is harmless, and
     # a 0711 directory is unreadable yet still lets a known world-readable child under it leak.
-    home, work = _home(tmp_path), tmp_path / "work"
+    home = world_home
+    work = home / "work"
     work.mkdir()
-    home.chmod(0o755)  # traversable by others — a misconfigured home
     (home / ".netrc").write_text("secret\n")
     (home / ".netrc").chmod(0o644)  # world-readable file
     (home / ".git-credentials").write_text("token\n")
@@ -142,13 +162,13 @@ def test_reachable_credentials_are_masked_under_the_account(tmp_path):
     assert lines[ssh - 1] == "--tmpfs"  # the 0711 directory is masked, not skipped
 
 
-def test_a_credential_behind_a_private_ancestor_is_not_masked(tmp_path):
-    # Reachability, not the target's own perms, decides masking: a path the account uid cannot
-    # resolve (an ancestor it cannot enter, or a symlink that lands behind one) must not be masked
-    # — binding over it would EPERM and fail the run. A reachable one alongside it is still masked.
-    home, work = _home(tmp_path), tmp_path / "work"
+def test_a_credential_behind_a_private_ancestor_is_not_masked(world_home):
+    # Reachability, not the target's own perms, decides masking: a path the account cannot resolve
+    # (an ancestor it cannot enter, or a symlink that lands behind one) must not be masked — binding
+    # over it would EPERM and fail the run. A reachable one alongside it is still masked.
+    home = world_home
+    work = home / "work"
     work.mkdir()
-    home.chmod(0o755)
     (home / ".local").mkdir()
     (home / ".local").chmod(0o700)  # private intermediate: the account cannot enter it
     (home / ".local" / "state").mkdir()  # a _CRED_DIRS path now unreachable through .local
@@ -164,6 +184,25 @@ def test_a_credential_behind_a_private_ancestor_is_not_masked(tmp_path):
     assert f"{real_home}/.local/state" not in lines  # blocked by the 0700 .local ancestor
     assert f"{real_home}/.netrc" not in lines  # symlink lands behind the 0700 priv dir
     assert f"{real_home}/.npmrc" in lines  # the reachable one is still masked
+
+
+def test_a_home_below_a_private_ancestor_masks_nothing(world_home):
+    # A home that is itself 0755 but sits under a directory the account cannot enter is unreachable,
+    # so nothing is masked — binding over its credentials would EPERM and fail the run (and they
+    # cannot leak either, being behind the private ancestor).
+    outer = world_home / "outer"
+    outer.mkdir()
+    home = outer / "home"
+    home.mkdir()
+    work = home / "work"
+    work.mkdir()
+    (home / ".netrc").write_text("secret\n")
+    (home / ".netrc").chmod(0o644)
+    outer.chmod(0o700)  # the account cannot traverse into outer to reach the home
+    lines = bwrap.BACKEND.policy((), (work,), home=home, mask_home_credentials=False).text
+    real_home = str(home.resolve())
+    assert f"{real_home}/.netrc" not in lines  # home unreachable from / → masked nothing
+    assert str(work.resolve()) in lines  # the write bind is unaffected
 
 
 def test_dangerous_sockets_are_masked_only_when_present(tmp_path, monkeypatch):
