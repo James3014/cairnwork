@@ -190,6 +190,7 @@ def test_payload_type_is_bound_by_signature(
     ("mutate", "reason"),
     [
         (lambda e: "not an envelope", dsse.ENVELOPE_NOT_OBJECT),
+        (lambda e: {**e, "extra_top_level": "forbidden"}, dsse.ENVELOPE_SHAPE),
         (lambda e: {**e, "payload": None}, dsse.PAYLOAD_MISSING),
         (lambda e: {**e, "payload": "@@not base64@@"}, dsse.PAYLOAD_NOT_BASE64),
         (lambda e: {**e, "payload": "ü"}, dsse.PAYLOAD_NOT_BASE64),
