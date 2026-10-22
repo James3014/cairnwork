@@ -53,6 +53,40 @@ DEFAULT_ROOT = Path(
 LOCK_TIMEOUT_SECONDS = 900.0
 _LOCK_POLL_SECONDS = 0.05
 
+# On a host with a full Xcode, running /usr/bin/git goes through xcrun/xcodebuild, and launchd
+# starts the account's own distnoted (ppid 1). It is harmless and killed with everything else, but
+# must not be mistaken for a process the candidate left behind (cairnwork#37). It is exempted only
+# its REAL executable path (proc_pidpath, never the forgeable argv[0]/ps-comm), its parent being
+# launchd (ppid 1), and an Apple code signature — so a candidate that renames itself to a daemon, or
+# re-parents to launchd while running another binary, keeps its own real path and is still counted.
+_SYSTEM_DAEMONS = frozenset({"/usr/sbin/distnoted"})
+# Printed, as the account, one "pid\treal-path" line per queried pid. proc_pidpath returns the
+# running image's vnode path from the kernel, which the target process cannot forge.
+_PIDPATH_HELPER = (
+    "import ctypes,sys\n"
+    "libc=ctypes.CDLL(None)\n"
+    "libc.proc_pidpath.restype=ctypes.c_int\n"
+    "b=ctypes.create_string_buffer(4096)\n"
+    "for a in sys.argv[1:]:\n"
+    "    n=libc.proc_pidpath(int(a),b,4096)\n"
+    "    if n>0: sys.stdout.write('%s\\t%s\\n'%(a,b.value[:n].decode('utf-8','replace')))\n"
+)
+
+
+def _apple_signed(path: str) -> bool:
+    """True only if ``path`` is a genuine Apple-OS binary (the 'anchor apple' requirement, which a
+    third-party Developer ID signature does not satisfy). Reads the file on disk, as the owner."""
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, path from proc_pidpath
+            ["/usr/bin/codesign", "--verify", "-R=anchor apple", "--", path],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
 
 class VerifierAccountError(Exception):
     code = "VERIFIER_ACCOUNT_ERROR"
@@ -130,40 +164,100 @@ class VerifierAccount:
         jailed = backend.wrap(inner, profile) if profile is not None else backend.unconfined(inner)
         return [SUDO, "-n", "-u", self.user, "--", *jailed]
 
-    def count(self) -> int:
-        """How many processes the account is running (-1: cannot tell)."""
+    def _list(self) -> list[tuple[int, int]] | None:
+        """(pid, ppid) for each process the account runs; None if it cannot be determined.
+        ppid is the kernel's parent pid, which the process cannot forge."""
         try:
             # BSD ps (macOS) needs -x to include processes with no controlling tty; Linux
             # procps selects all of a user's processes with -U alone and rejects -x.
             tty_flag = ["-x"] if sys.platform == "darwin" else []
             done = subprocess.run(  # noqa: S603 - fixed argv
-                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid="],
+                ["/bin/ps", *tty_flag, "-U", self.user, "-o", "pid=,ppid="],
                 capture_output=True,
                 text=True,
                 timeout=20,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            return -1
+            return None
         if done.returncode not in (0, 1) or done.stderr.strip():  # 1: nothing matched
-            return -1  # e.g. an unknown user, which ps also reports with exit 1
-        return len(done.stdout.split())
+            return None  # e.g. an unknown user, which ps also reports with exit 1
+        procs: list[tuple[int, int]] = []
+        for line in done.stdout.split("\n"):
+            parts = line.split()
+            if len(parts) == 2 and all(p.isdigit() for p in parts):
+                procs.append((int(parts[0]), int(parts[1])))
+        return procs
+
+    def count(self) -> int:
+        """How many processes the account is running, launchd system daemons included (-1: cannot
+        tell). ``_escaped_count`` is the one that decides whether a run left anything behind."""
+        procs = self._list()
+        return -1 if procs is None else len(procs)
+
+    def _real_paths(self, pids: list[int]) -> dict[int, str] | None:
+        """Map each pid to its real executable path (proc_pidpath), run AS THE ACCOUNT so it may
+        query its own processes. None if the helper could not run (treated as "cannot tell")."""
+        if not pids:
+            return {}
+        argv = self.wrap([self.python, "-P", "-c", _PIDPATH_HELPER, *map(str, pids)], None)
+        try:
+            done = subprocess.run(  # noqa: S603 - fixed argv, pids from ps
+                argv, capture_output=True, text=True, timeout=30, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode != 0:
+            return None
+        paths: dict[int, str] = {}
+        for line in done.stdout.split("\n"):
+            if "\t" in line:
+                pid_s, path = line.split("\t", 1)
+                if pid_s.isdigit():
+                    paths[int(pid_s)] = path
+        return paths
+
+    def _escaped_count(self) -> int:
+        """Processes the account runs that are NOT a launchd system daemon (-1: cannot tell).
+        A daemon is exempt only when its real executable is allow-listed, its parent is launchd
+        (ppid 1) and it is Apple-signed; anything else — a candidate's leftover process, however it
+        named itself — is counted. If the real paths cannot be read, the count is unknown (fail
+        closed), never zero."""
+        procs = self._list()
+        if procs is None:
+            return -1
+        if not procs or sys.platform != "darwin":
+            # launchd's on-demand distnoted is macOS-only; elsewhere every process is an escape
+            # (and proc_pidpath does not exist off Darwin), so skip the exemption entirely.
+            return len(procs)
+        real = self._real_paths([pid for pid, _ in procs])
+        if real is None:
+            return -1
+        escaped = 0
+        for pid, ppid in procs:
+            path = real.get(pid)
+            if ppid == 1 and path in _SYSTEM_DAEMONS and _apple_signed(path):
+                continue  # a launchd system daemon: killed like the rest, not an escape
+            escaped += 1
+        return escaped
 
     def reap(self) -> int:
-        """Kill everything the account runs; return how many were running.
+        """Kill everything the account runs; return how many escaped processes were running.
 
         Unknown counts, or a process that outlived the kill, count as one more, so a
         caller never mistakes "cannot tell" for "nothing escaped".
         """
         try:
-            before = self.count()
+            before = self._escaped_count()
             left = self.kill_all()
         except (OSError, subprocess.SubprocessError):
             return 1
         return max(before, 0) + (1 if before < 0 or left != 0 else 0)
 
     def kill_all(self, attempts: int = 5) -> int:
-        """SIGKILL every process of the account; return how many are left (-1: unknown).
+        """SIGKILL every process of the account; return how many escaped processes are left (-1:
+        unknown). A launchd system daemon is exempt from the count (``_escaped_count``), so a daemon
+        that launchd keeps restarting does not block termination.
 
         Repeated a few times: a process that forks while the signal is delivered
         can leave a child behind.
@@ -176,7 +270,7 @@ class VerifierAccount:
                 timeout=20,
                 check=False,
             )
-            left = self.count()
+            left = self._escaped_count()
             if left == 0:
                 break
         return left
