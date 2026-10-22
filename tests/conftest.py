@@ -1,3 +1,5 @@
+import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -9,6 +11,17 @@ def git(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+def tamper_stored_request(db, mutate):
+    """Rewrite the stored request of the only notary row (the append-only trigger is dropped)."""
+    conn = sqlite3.connect(db)
+    conn.execute("DROP TRIGGER core_verifications_no_update")
+    request = json.loads(conn.execute("SELECT request_json FROM core_verifications").fetchone()[0])
+    mutate(request)
+    conn.execute("UPDATE core_verifications SET request_json = ?", (json.dumps(request),))
+    conn.commit()
+    conn.close()
 
 
 @pytest.fixture

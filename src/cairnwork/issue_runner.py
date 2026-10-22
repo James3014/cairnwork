@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cairnwork.changeset import read_change_set
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.gitcmd import NETWORK_TIMEOUT_SECONDS, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
@@ -298,6 +299,10 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
                      request.test_commit).split()  # fmt: skip
     if not set(changed.split()) <= set(request.allowed_files) | set(tests):
         raise ValueError(f"candidate {commit} changes files outside the Issue's allowed_files")
+    if not intake.notary.bound_to(
+        task_id, attempt, read_change_set(clone, request.base_commit, commit)
+    ):
+        raise ValueError(f"RECEIPT_BINDING_MISMATCH: candidate {commit} is not what was notarized")
     branch = f"cairnwork/{number}-{attempt}"
     existing = github.find_pr(branch)
     if existing:  # a previous pass opened it; only the labels were left to do

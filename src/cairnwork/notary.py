@@ -36,9 +36,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cairnwork.changeset import read_change_set
-from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
+from cairnwork.changeset import GitChangeSet, read_change_set
+from cairnwork.core_request import (
+    AcceptanceSpec,
+    VerifierObservation,
+    build_core_request,
+)
 from cairnwork.notary_schema import SCHEMA, SCHEMA_VERSION
+from cairnwork.receipt_binding import request_matches
 from cairnwork_protocol import (
     IDENTITY_MISMATCH,
     acceptance_contract_hash,
@@ -249,6 +254,16 @@ class Notary:
         if not isinstance(expected_candidate, str) or not _OID.fullmatch(expected_candidate):
             raise NotaryInputError("expected_candidate must be a 40-hex commit id")
         return self._read(task_id, attempt_id, expected_candidate)
+
+    def bound_to(self, task_id: str, attempt_id: str, change: GitChangeSet) -> bool:
+        """Whether this attempt's stored request is for exactly this git change set (#61)."""
+        conn = self._connect()
+        try:
+            sql = "SELECT request_json FROM core_verifications WHERE task_id = ? AND attempt_id = ?"
+            row = conn.execute(sql, (task_id, attempt_id)).fetchone()
+        finally:
+            conn.close()
+        return row is not None and request_matches(json.loads(row[0]), change)
 
     def _read(
         self, task_id: str, attempt_id: str, expected_candidate: str | None
