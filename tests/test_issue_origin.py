@@ -90,7 +90,7 @@ def test_main_refuses_a_foreign_origin_before_touching_state(setup, capsys, monk
     runner._verify_origin = REAL_VERIFY
     try:
         code = runner.main(
-            [*argv, "--clone", str(setup["clone"]), "--gh", "/bin/false", "run-once"]
+            [*argv, "--clone", str(setup["clone"]), "--gh", "/bin/nexus-agent-gh", "run-once"]
         )
     finally:
         runner._verify_origin = lambda clone, repo: None

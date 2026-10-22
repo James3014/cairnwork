@@ -120,6 +120,11 @@ def test_cancel_refuses_a_task_another_owner_holds_and_leaves_it_bound(intake):
     assert intake.status(task_id=task)["status"] == "BOUND"
 
 
+def test_in_flight_ignores_a_task_another_owner_holds(intake):
+    intake.ledger.bind("k", {"a": 1}, "nexus-new", "c" * 8)
+    assert intake.in_flight()["count"] == 0
+
+
 def test_cancel_loses_to_a_runner_that_dispatched_first(intake, repo):
     out = intake.submit(payload(repo))
     intake.ledger.set_status(out["task_id"], "DISPATCHED")  # the runner got there first
@@ -209,6 +214,27 @@ def test_a_bad_config_refuses_the_submit_before_binding(intake, repo):
     ],
 )
 def test_bad_agy_dispatch_settings_are_refused(intake, config):
+    (intake.state / "config.json").write_text(json.dumps(config))
+    with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
+        intake.config()
+
+
+def test_p2p_defaults_and_valid_overrides(intake):
+    assert intake.config()["p2p_selection"] == "whole-suite"
+    assert intake.config()["p2p_time_budget_seconds"] == 300
+    (intake.state / "config.json").write_text(
+        json.dumps({"p2p_selection": "off", "p2p_time_budget_seconds": 120})
+    )
+    assert intake.config()["p2p_selection"] == "off"
+    assert intake.config()["p2p_time_budget_seconds"] == 120
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{"p2p_selection": "bogus"}, {"p2p_selection": None}, {"p2p_time_budget_seconds": 0},
+     {"p2p_time_budget_seconds": "300"}, {"p2p_time_budget_seconds": 86401}],
+)  # fmt: skip
+def test_bad_p2p_settings_are_refused(intake, config):
     (intake.state / "config.json").write_text(json.dumps(config))
     with pytest.raises(IntakeRefused, match="BAD_CONFIG"):
         intake.config()

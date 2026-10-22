@@ -207,6 +207,13 @@ def test_a_symlinked_root_or_parent_is_refused_on_the_base(pkg_project, links):
         check_roots_on_base(pkg_project, base, PKG)
 
 
+def test_a_case_variant_parent_with_a_symlinked_child_is_refused(pkg_project):
+    git(pkg_project, "rm", "-rq", "pkg")
+    base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"PKG/tests": "../src"})
+    with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
+        check_roots_on_base(pkg_project, base, PKG)
+
+
 def test_a_root_that_is_a_file_is_refused_and_a_missing_or_real_one_passes(pkg_project):
     base = _base_with(pkg_project, {"flat/tests": "not a directory\n"})
     with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):

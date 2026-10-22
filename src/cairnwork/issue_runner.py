@@ -13,11 +13,10 @@ One pass does two things:
   gets ``cairnwork:running`` and a comment with the task id.
 * **settle**: for every ``cairnwork:running`` Issue, a COMPLETED, Core-verified task is
   pushed as branch ``cairnwork/<issue>-<attempt>`` and opened as a **draft** PR (it is
-  reviewed and merged like any other PR; Cairnwork never merges). A FAILED task gets a
-  comment with its reason and ``cairnwork:failed``.
+  reviewed and merged like any other PR; Cairnwork never merges). A FAILED task gets
+  a fixed-vocabulary comment (issue_publish) and ``cairnwork:failed``.
 
-GitHub calls go through ``--gh`` (the bot's gh wrapper). Any GitHub or git error leaves
-the Issue as it is for the next pass; nothing is guessed.
+GitHub calls use ``--gh`` (the bot's wrapper, checked); an error leaves the Issue for next pass.
 """
 
 from __future__ import annotations
@@ -36,6 +35,14 @@ from typing import Any
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
+from cairnwork.issue_publish import (
+    TASK_ID,
+    done_text,
+    failure_text,
+    pr_body,
+    refusal_text,
+    require_bot_gh,
+)
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block, queue_trusted
 from cairnwork.lineage import require_on_main
 from cairnwork.lineage import verify_origin as _verify_origin
@@ -242,11 +249,7 @@ def _needs_fix(github: GitHub, number: int, exc: Exception) -> dict[str, str]:
     """A block Cairnwork cannot take: say why once and take it out of the queue."""
     try:
         github.relabel(number, NEEDS_FIX, QUEUE)
-        github.comment(
-            number,
-            f"Cairnwork 不能接這張：`{exc}`。修正 ```eia-task 區塊後，移除 `{NEEDS_FIX}` 並重新"
-            f"加上 `{QUEUE}`。注意：驗證用的測試檔不能列在 allowed_files，要先放在 main 上。",
-        )
+        github.comment(number, refusal_text(exc, NEEDS_FIX, QUEUE))
     except (RuntimeError, OSError) as gh_error:  # retried on the next pass
         return {"refused": str(exc), "error": f"{type(gh_error).__name__}: {gh_error}"}
     return {"refused": str(exc)}
@@ -266,12 +269,11 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
             if status["status"] == "COMPLETED" and status["core_verified"]:
                 url = _open_pr(intake, github, clone, number, status)
                 github.relabel(number, DONE, RUNNING)
-                github.comment(number, f"Cairnwork 修好並通過 Core 驗證，draft PR：{url}")
+                github.comment(number, done_text(url, github.repo))
                 results.append({"issue": number, "pr": url})
             else:
-                detail = status.get("detail") or status["status"]
                 github.relabel(number, FAILED_LABEL, RUNNING)
-                github.comment(number, f"Cairnwork 沒有完成：`{status['status']}`（{detail}）。")
+                github.comment(number, failure_text(status))
                 results.append({"issue": number, "status": status["status"]})
         except (OwnershipUnknown, RuntimeError, OSError, ValueError, KeyError) as exc:
             results.append({"issue": number, "error": f"{type(exc).__name__}: {exc}"})
@@ -282,7 +284,10 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     attempt, commit = str(status["attempt_id"]), str(status["candidate_commit"])
     if not ATTEMPT_ID.fullmatch(attempt) or not COMMIT.fullmatch(commit):
         raise ValueError(f"unexpected attempt or commit: {attempt!r} {commit!r}")
-    request = intake.load_request(str(status["task_id"]))
+    task_id = str(status["task_id"])
+    if not TASK_ID.fullmatch(task_id):
+        raise ValueError(f"unexpected task id: {task_id!r}")
+    request = intake.load_request(task_id)
     # take() fetched main this pass; a stale ref can only refuse, never admit
     require_on_main(clone, request.base_commit, fetch=False)
     _git(clone, "merge-base", "--is-ancestor", request.base_commit, commit)
@@ -301,15 +306,7 @@ def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -
     helper = f"!{shlex.quote(github.gh)} auth git-credential"
     _git(clone, "-c", "credential.helper=", "-c", f"credential.helper={helper}", "push",
          "origin", f"{commit}:refs/heads/{branch}")  # fmt: skip
-    body = (
-        f"Refs #{number}\n\nCairnwork: 受影響（Cairnwork 試點：Issue 直接送 Cairnwork 修）\n\n"
-        f"- Cairnwork task `{status['task_id']}`，attempt `{attempt}`\n"
-        f"- 候選 commit `{commit}`，Core 判定 VERIFIED（Cairnwork notary）\n"
-        "- 這是 draft：照一般規則審查、檢查全綠後再由審查者合併；Cairnwork 不合併。\n\n"
-        f"<!-- NEXUS_CORE_ISSUE: {number} -->\n<!-- NEXUS_ISSUE_INTENT_V1\n"
-        f'[{{"issue": {number}, "on_merge": "KEEP_OPEN"}}]\nNEXUS_ISSUE_INTENT_V1 -->\n\n'
-        "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
-    )
+    body = pr_body(number, task_id, attempt, commit)
     return github.draft_pr(branch, f"Cairnwork: fix for #{number} (Refs #{number})", body)
 
 
@@ -361,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     github = GitHub(args.gh, args.repo)
     clone = Path(args.clone).resolve()
     try:
+        require_bot_gh(args.gh)
         _verify_origin(clone, github.repo)
     except RuntimeError as exc:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))

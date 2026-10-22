@@ -31,13 +31,14 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from cairnwork import runlock
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.gitcmd import GitCommandError, run_git
+from cairnwork.intake_request import IntakeRefused, task_from_payload
 from cairnwork.issue_task import check_test_roots
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
@@ -47,22 +48,11 @@ from cairnwork.ownership import (
     OwnershipLedger,
     OwnershipUnknown,
 )
+from cairnwork.p2p_selection import check_p2p_config
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
 
-FIELDS = frozenset(
-    {
-        "idempotency_key",
-        "card_hash",
-        "title",
-        "instructions",
-        "repo",
-        "base_commit",
-        "allowed_files",
-        "verifiers",
-    }
-)
 _spawn = subprocess.Popen  # replaced in tests
 # verifier_python: the target repository's own interpreter (scripts/setup_target_venv.sh),
 # an absolute path; None runs verifiers with the account's (or Cairnwork's) Python.
@@ -92,64 +82,14 @@ DEFAULT_CONFIG = {
     # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
     "test_roots": ["tests"],
     "test_source": "auto",
+    # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
+    "p2p_selection": "whole-suite",
+    "p2p_time_budget_seconds": 300,
 }
-
-
-class IntakeRefused(Exception):
-    def __init__(self, code: str, detail: str = "") -> None:
-        super().__init__(f"{code}: {detail}")
-        self.code = code
-        self.detail = detail
-
-
-def task_from_payload(
-    payload: Any, test_roots: tuple[str, ...] = ("tests",), test_store=None
-) -> TaskSpec:
-    """A closed schema: unknown or missing fields are refused, never ignored."""
-    if not isinstance(payload, dict) or not FIELDS <= set(payload) <= FIELDS | {"test_commit"}:
-        got = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
-        raise IntakeRefused(
-            "BAD_REQUEST", f"fields must be {sorted(FIELDS)} (+test_commit), got {got}"
-        )
-    if not isinstance(payload.get("test_commit", ""), str):
-        raise IntakeRefused("BAD_REQUEST", "test_commit must be a string")
-    texts = ("idempotency_key", "card_hash", "title", "instructions", "repo", "base_commit")
-    if not all(isinstance(payload[name], str) for name in texts):
-        raise IntakeRefused("BAD_REQUEST", "text fields must be strings")
-    files, verifiers = payload["allowed_files"], payload["verifiers"]
-    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-        raise IntakeRefused("BAD_REQUEST", "allowed_files must be a list of strings")
-    if not isinstance(verifiers, list) or not all(_verifier_shape(v) for v in verifiers):
-        raise IntakeRefused("BAD_REQUEST", "verifiers must be [[id, [argv...]], ...]")
-    if not os.path.isabs(payload["repo"]):
-        raise IntakeRefused("BAD_REQUEST", "repo must be an absolute path")
-    return TaskSpec(
-        idempotency_key=payload["idempotency_key"],
-        card_hash=payload["card_hash"],
-        title=payload["title"],
-        instructions=payload["instructions"],
-        repo=Path(payload["repo"]),
-        base_commit=payload["base_commit"],
-        allowed_files=tuple(files),
-        verifiers=tuple((v[0], tuple(v[1])) for v in verifiers),
-        test_commit=payload.get("test_commit", ""),
-        test_roots=test_roots,
-        test_store=test_store,
-    )
 
 
 def _seconds(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 86400
-
-
-def _verifier_shape(value: Any) -> bool:
-    return (
-        isinstance(value, list)
-        and len(value) == 2
-        and isinstance(value[0], str)
-        and isinstance(value[1], list)
-        and all(isinstance(a, str) for a in value[1])
-    )
 
 
 def _has_token(token_file: Any) -> bool:
@@ -217,6 +157,7 @@ class Intake:
             raise IntakeRefused("BAD_CONFIG", 'test_source must be "auto" or "bundle"')
         try:
             check_test_roots(loaded.get("test_roots", ["tests"]))
+            check_p2p_config(loaded)
         except ValueError as exc:
             raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
         return {**DEFAULT_CONFIG, **loaded}
@@ -308,8 +249,10 @@ class Intake:
 
     def load_request(self, task_id: str) -> TaskSpec:
         path = self.state / "requests" / f"{task_id}.json"
-        raw = json.loads(path.read_text())
-        return task_from_payload(raw, tuple(self.config()["test_roots"]), self.test_store())
+        raw, config = json.loads(path.read_text()), self.config()
+        task = task_from_payload(raw, tuple(config["test_roots"]), self.test_store())
+        p2p = {"p2p_mode": config["p2p_selection"], "p2p_budget": config["p2p_time_budget_seconds"]}
+        return replace(task, **p2p)
 
     def _start_runner(self, task_id: str, lock_fd: int) -> None:
         log = self.run_root / f"{task_id}.runner.log"

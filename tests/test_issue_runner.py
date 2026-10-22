@@ -48,7 +48,7 @@ class FakeGitHub(runner.GitHub):
     def find_pr(self, branch):
         return next(
             (
-                f"https://example.invalid/pr/{i + 1}"
+                f"https://github.com/James3014/demo/pull/{i + 1}"
                 for i, pr in enumerate(self.prs)
                 if pr[0] == branch
             ),
@@ -57,7 +57,7 @@ class FakeGitHub(runner.GitHub):
 
     def draft_pr(self, branch, title, body):
         self.prs.append((branch, title, body))
-        return f"https://example.invalid/pr/{len(self.prs)}"
+        return f"https://github.com/James3014/demo/pull/{len(self.prs)}"
 
 
 @pytest.fixture
@@ -171,12 +171,13 @@ def test_a_failed_task_is_reported_not_retried(setup, monkeypatch):
         lambda self, **kw: {
             "status": "FAILED",
             "core_verified": False,
-            "detail": "CORE_FAILED_VERIFICATION",
+            "phase": "FINISHED",
+            "detail": "FAILED",
         },
     )
     runner.settle(setup["intake"], github, setup["clone"])
     assert github.labels[7] == {runner.FAILED_LABEL} and github.prs == []
-    assert "CORE_FAILED_VERIFICATION" in github.comments[-1][1]
+    assert "`FAILED`" in github.comments[-1][1] and "`FINISHED`" in github.comments[-1][1]
 
 
 def test_a_running_task_is_left_alone(setup, monkeypatch):
@@ -242,7 +243,7 @@ def test_settle_after_a_partial_failure_reuses_the_pr(setup, monkeypatch):
     monkeypatch.setattr(runner, "_git", _git_without_credentials)
     github.prs.append((f"cairnwork/7-a{'1' * 16}", "t", "b"))  # opened by a pass that then died
     out = runner.settle(setup["intake"], github, setup["clone"])
-    assert out[0]["pr"] == "https://example.invalid/pr/1" and len(github.prs) == 1
+    assert out[0]["pr"] == "https://github.com/James3014/demo/pull/1" and len(github.prs) == 1
 
 
 def test_a_strange_attempt_id_is_never_pushed(setup, monkeypatch):
@@ -289,7 +290,7 @@ def test_only_one_pass_runs_at_a_time(setup, capsys):
                 "--clone",
                 str(setup["clone"]),
                 "--gh",
-                "/bin/false",
+                "/bin/nexus-agent-gh",
                 "run-once",
             ]
         )

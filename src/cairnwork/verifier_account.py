@@ -30,6 +30,7 @@ import pwd
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,6 +46,12 @@ DEFAULT_USER = "cairnwork-verifier"
 DEFAULT_ROOT = Path(
     "/var/lib/cairnwork" if sys.platform.startswith("linux") else "/Users/Shared/cairnwork"
 )
+
+
+# A verifier run is bounded by its own timeout (verifiers.DEFAULT_TIMEOUT_SECONDS, 600 s);
+# a waiter gives up a little later than that instead of queueing behind a stuck holder.
+LOCK_TIMEOUT_SECONDS = 900.0
+_LOCK_POLL_SECONDS = 0.05
 
 
 class VerifierAccountError(Exception):
@@ -233,14 +240,27 @@ class VerifierAccount:
         os.chmod(root, os.stat(root).st_mode | 0o055)
 
     @contextmanager
-    def exclusive(self) -> Iterator[None]:
+    def exclusive(self, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
         """One verifier at a time: kill_all() would otherwise end another run's processes.
 
-        Not reentrant: flock locks per open file, so a nested call blocks forever.
+        Waits at most ``timeout`` seconds, then raises RESOURCE_LEASE_TIMEOUT so a stuck but
+        live holder turns into a recorded failure, not an endless queue (a dead holder's lock
+        is released by the kernel). Not reentrant: flock locks per open file, so a nested call
+        waits until the timeout.
         """
         fd = os.open(self.root / ".verifier.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise VerifierAccountError(
+                            f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
+                        ) from None
+                    time.sleep(_LOCK_POLL_SECONDS)
             yield
         finally:
             os.close(fd)

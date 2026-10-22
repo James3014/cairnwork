@@ -42,6 +42,7 @@ from cairnwork.gitcmd import OID
 from cairnwork.journal import AlreadyDispatched, Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
+from cairnwork.p2p import P2PPlan, p2p_for, run_plan
 from cairnwork.protected_paths import path_refusal
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
@@ -82,6 +83,8 @@ class TaskSpec:
     test_commit: str = ""  # deferred tests (deferred_tests.py); "" when none
     test_roots: tuple[str, ...] = ("tests",)  # state config: where verifiers and tests live
     test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
+    p2p_mode: str = "off"  # state config p2p_selection (p2p.py); only used with a test_commit
+    p2p_budget: int = 300  # state config p2p_time_budget_seconds
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -116,6 +119,7 @@ class TaskResult:
     candidate_commit: str | None = None
     verified: bool = False
     logs: list[str] = field(default_factory=list)
+    p2p: dict = field(default_factory=dict)  # the P2P selection rule used (p2p.py)
 
 
 def check_task(task: TaskSpec, *, verifier_python: str | None = None) -> tuple[VerifierSpec, ...]:
@@ -298,8 +302,9 @@ def _verdict_reason(verified: bool, verdict, recorded) -> str:
 
 
 def judge_candidate(
-    task, specs, digest, notary, run_root, result, test_files, verifying, reach
-) -> None:
+    task, specs, digest, notary, run_root, result, test_files, verifying, reach,
+    p2p: P2PPlan | None = None,
+) -> None:  # fmt: skip
     """Verify result.candidate_commit and have Core notarise it; sets result.verified,
     result.reason and result.logs. Shared by the worker pipeline and ``verify_candidate``;
     reach(phase) records progress."""
@@ -317,11 +322,14 @@ def judge_candidate(
         python=verifying[1],
         base_commit=task.base_commit,
     )
+    if p2p is not None:
+        p2p_runs, result.p2p = run_plan(p2p, task, judged, run_root, result, verifying)
+        runs += p2p_runs
     result.logs = [str(run.log_path) for run in runs]
     spec = AcceptanceSpec(
         task_id,
         digest,
-        tuple(s.verifier_id for s in specs),
+        tuple(run.spec.verifier_id for run in runs),
         tuple(task.allowed_files) + test_files,
         task.allow_deletions,
     )
@@ -368,20 +376,21 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
         except CandidateRejected as exc:
             result.reason = str(exc)
             return
-        judged, test_files = candidate.candidate_commit, ()
-        if task.test_commit:  # only now: the worker is done (deferred_tests.py)
+        judged, test_files, plan = candidate.candidate_commit, (), None
+        if task.test_commit:  # only now: the worker is done (deferred_tests.py, p2p.py)
             try:
                 test_files = tests_with_teeth(task, specs, run_root, result, verifying)
                 judged = lay_tests_over(
                     task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
                 )
+                plan = p2p_for(task, specs, test_files, run_root, result, verifying)
             except TestCommitRejected as exc:
                 result.reason = str(exc)
                 return
         result.candidate_commit = judged
         steps.reach("CANDIDATE", judged)
         judge_candidate(
-            task, specs, digest, notary, run_root, result, test_files, verifying, steps.reach
+            task, specs, digest, notary, run_root, result, test_files, verifying, steps.reach, plan
         )
     finally:
         try:
