@@ -34,8 +34,10 @@ _SAFE_OPTIONS = (
 )
 
 
-_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
-_CONTROL = re.compile(r"[^\x20-\x7e\n\u00a0-\U0010ffff]")
+# Greedy to the last '@' in the whitespace-free token: a password may itself hold '@' or '/'.
+# Fail-closed: an '@' later in a path also removes the text before it.
+_URL_USERINFO = re.compile(r"(?<=://)\S*@")
+_CONTROL = re.compile(r"[^\x20-\x7e\n\u00a0-\U0010ffff]|[\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
 
 def stderr_tail(raw: str | bytes | None) -> str:
@@ -75,6 +77,8 @@ def run_git(
     timeout is in seconds; pass NETWORK_TIMEOUT_SECONDS for a fetch or push over a network.
     A failure carries a bounded, sanitised tail of git's stderr (see stderr_tail).
     """
+    if not timeout or timeout <= 0:
+        raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if index_file is not None:
         env["GIT_INDEX_FILE"] = str(index_file)

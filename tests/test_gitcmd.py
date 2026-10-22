@@ -39,6 +39,29 @@ def test_stderr_tail_is_bounded_and_drops_credentials_and_control_characters():
     assert stderr_tail(None) == ""
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("fatal: https://user:p@ss@host/x failed", "fatal: https://host/x failed"),
+        ("fatal: https://tok:ab/cd@host/x failed", "fatal: https://host/x failed"),
+        ("fatal: https://github.com/o/r.git failed", "fatal: https://github.com/o/r.git failed"),
+    ],
+)
+def test_stderr_tail_strips_the_whole_userinfo_and_keeps_plain_urls(raw, expected):
+    assert stderr_tail(raw) == expected
+
+
+def test_stderr_tail_drops_bidi_and_line_separator_characters():
+    raw = "a\u202eb\u202ac\u2066d\u2069e\u2028f\u2029g"
+    assert stderr_tail(raw) == "abcdefg"
+
+
+@pytest.mark.parametrize("bad", [None, 0, -1, -0.5])
+def test_run_git_rejects_a_missing_or_non_positive_timeout(repo, bad):
+    with pytest.raises(ValueError, match="timeout"):
+        run_git(repo, "rev-parse", "HEAD", timeout=bad)
+
+
 def _record_timeouts(monkeypatch):
     seen = []
     real = subprocess.run
