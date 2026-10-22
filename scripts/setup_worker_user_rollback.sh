@@ -29,7 +29,7 @@ for arg in "$@"; do
   esac
 done
 
-die() { echo "ROLLBACK FAILED: $*" >&2; echo "nothing further was changed; fix the cause and run again." >&2; exit 1; }
+die() { echo "ROLLBACK FAILED: $*" >&2; echo "rollback stopped before any later step; fix the cause and run it again." >&2; exit 1; }
 
 # Path guard: ROOT's ancestors and ROOT itself must be real directories, and ROOT must be root-owned
 # (setup creates it that way). A symlinked or attacker-owned ROOT could redirect chown/chmod below.
