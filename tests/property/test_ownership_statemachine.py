@@ -12,7 +12,7 @@ Invariants asserted after every step:
   I3  status only ever moves along TRANSITIONS;
   I4  an identical resend returns the same record and never re-runs (FAILED stays FAILED);
   I5  get/route never guesses — unknown ids raise OwnershipUnknown;
-  I6  in_flight() is exactly the BOUND/DISPATCHED records;
+  I6  in_flight() is exactly our BOUND/DISPATCHED records (include_foreign: all of them);
   I7  an identical request under a new key and another card is refused while one is active
       (REPLAY_FORBIDDEN if COMPLETED/FAILED, else RECONCILIATION_REQUIRED).
 
@@ -26,6 +26,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 from hypothesis.strategies import sampled_from
 
 from cairnwork.ownership import (
+    OWNER,
     OWNERS,
     DuplicateLogicalTask,
     InvalidOwnershipValue,
@@ -222,8 +223,10 @@ class OwnershipModel(RuleBasedStateMachine):
         expected = {
             r["task_id"] for r in self.by_key.values() if r["status"] in {"BOUND", "DISPATCHED"}
         }
-        got = {rec.task_id for rec in self.ledger.in_flight()}
+        got = {rec.task_id for rec in self.ledger.in_flight(include_foreign=True)}
         assert got == expected, "I6: in_flight() diverged from model"
+        ours = {r["task_id"] for r in self.by_key.values() if r["owner"] == OWNER} & expected
+        assert {rec.task_id for rec in self.ledger.in_flight()} == ours, "I6: foreign row counted"
 
     def teardown(self) -> None:
         import shutil

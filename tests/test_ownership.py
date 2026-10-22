@@ -259,3 +259,17 @@ def test_resend_of_a_failed_task_returns_it_without_reopening_it(ledger):
     assert again.duplicate and again.record.status == "FAILED"
     with pytest.raises(InvalidStatusTransition):
         ledger.set_status(record.task_id, "DISPATCHED")
+
+
+def test_in_flight_counts_only_our_rows_and_foreign_ones_are_reported_apart(ledger):
+    ours = ledger.bind("key-1", REQUEST, "cairnwork", "card-1").record.task_id
+    theirs = ledger.bind("key-2", {**REQUEST, "title": "x"}, "nexus-new", "card-2").record.task_id
+    ledger.set_status(theirs, "DISPATCHED")
+    assert [r.task_id for r in ledger.in_flight()] == [ours]
+    assert [r.task_id for r in ledger.foreign_in_flight()] == [theirs]
+    assert {r.task_id for r in ledger.in_flight(include_foreign=True)} == {ours, theirs}
+
+
+def test_in_flight_with_only_foreign_rows_is_quiescent(ledger):
+    ledger.bind("key-2", REQUEST, "nexus-new", "card-2")
+    assert ledger.in_flight() == []

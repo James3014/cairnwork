@@ -213,8 +213,12 @@ class OwnershipLedger:
     def path(self) -> Path:
         return self._path
 
-    def in_flight(self) -> list[OwnershipRecord]:
-        """Tasks bound or dispatched but not finished (what a crash can leave behind)."""
+    def in_flight(self, *, include_foreign: bool = False) -> list[OwnershipRecord]:
+        """Our tasks bound or dispatched but not finished (what a crash can leave behind).
+
+        Rows another system owns are not ours to wait on or settle, so quiescence counts
+        only OWNER rows; include_foreign=True returns every row (recovery reports them).
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -223,7 +227,12 @@ class OwnershipLedger:
             ).fetchall()
         finally:
             conn.close()
-        return [OwnershipRecord(*row) for row in rows]
+        records = [OwnershipRecord(*row) for row in rows]
+        return records if include_foreign else [r for r in records if r.owner == OWNER]
+
+    def foreign_in_flight(self) -> list[OwnershipRecord]:
+        """Bound or dispatched rows another system owns (reported, never counted)."""
+        return [r for r in self.in_flight(include_foreign=True) if r.owner != OWNER]
 
     def set_status(
         self, task_id: str, status: str, *, expected_from: str | None = None
