@@ -23,11 +23,13 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from cairnwork.attempt_gate import attempt_gate
 from cairnwork.intake import Intake, IntakeRefused, task_from_payload
-from cairnwork.issue_runner import DEFAULT_GH, TRUST_CHANGED, GitHub, attempt_gate
+from cairnwork.issue_runner import DEFAULT_GH, TRUST_CHANGED, GitHub
 from cairnwork.journal import JournalIntegrityViolation
 from cairnwork.ownership import (
     DuplicateLogicalTask,
@@ -134,7 +136,7 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
             roots = tuple(config["test_roots"])
             gate = attempt_gate(GitHub(DEFAULT_GH, repo), int(number), block, roots)
     result = run_bound_task(
-        task,
+        replace(task, before_attempt=gate),
         task_id,
         ledger=intake.ledger,
         notary=intake.notary,
@@ -143,7 +145,6 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         run_root=intake.run_root,
         verifier_account=intake.verifier_account(),
         verifier_python=config["verifier_python"],
-        before_attempt=gate,
     )
     return {k: v for k, v in result.__dict__.items() if k != "logs"}
 

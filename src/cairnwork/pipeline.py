@@ -1,19 +1,16 @@
 """One governed task, end to end: bind → isolated attempt → candidate → verify → Core.
 
-``run_task`` is the bare core's main path. It owns no policy beyond the
-preserved behaviors: every step that fails leaves the task FAILED (or not
-COMPLETED) with a reason, and only a Core verdict that is verified for the
-exact candidate commit makes it COMPLETED.
+``run_task`` is the bare core's main path. It owns no policy beyond the preserved behaviors: every
+step that fails leaves the task FAILED (or not COMPLETED) with a reason, and only a Core verdict
+that is verified for the exact candidate commit makes it COMPLETED.
 
-Any exception after binding is recorded as FAILED with an ``INFRA_ERROR``
-reason; a crash of this process itself leaves the task DISPATCHED until restart
-recovery (preserved behavior #21) exists. A FAILED task keeps its card: to try
-again, move it to SUPERSEDED (``OwnershipLedger.set_status``) and submit with a
-new idempotency key.
+Any exception after binding is recorded as FAILED with an ``INFRA_ERROR`` reason; a crash of this
+process itself leaves the task DISPATCHED until restart recovery (preserved behavior #21) exists.
+A FAILED task keeps its card: to try again, move it to SUPERSEDED (``OwnershipLedger.set_status``)
+and submit with a new idempotency key.
 
-Workers are pluggable (``Worker``). A worker edits files in the clone it is
-given; Cairnwork snapshots the allowed files into a commit itself (see
-snapshot.py). The worker must have exited when ``run`` returns.
+Workers are pluggable (``Worker``): one edits files in its clone and must have exited when ``run``
+returns; Cairnwork snapshots the allowed files into a commit itself (see snapshot.py).
 """
 
 from __future__ import annotations
@@ -86,6 +83,7 @@ class TaskSpec:
     test_store: DeferredStore | None = None  # private bundle store for test_commit (#119)
     p2p_mode: str = "off"  # state config p2p_selection (p2p.py); only used with a test_commit
     p2p_budget: int = 300  # state config p2p_time_budget_seconds
+    before_attempt: Callable[[], str] | None = None  # refusal code or ""; asked per attempt
 
     def request(self) -> dict:
         extra = {"test_commit": self.test_commit} if self.test_commit else {}
@@ -104,9 +102,8 @@ class Worker(Protocol):
     """Edits the clone at workdir and returns when done.
 
     A worker that starts processes must give each one the environment variable
-    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so that restart
-    recovery can find and stop them if Cairnwork dies mid-run (AgyWorker does).
-    """
+    CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so restart recovery can find and
+    stop them if Cairnwork dies mid-run (AgyWorker does)."""
 
     def run(self, workdir: Path, task: TaskSpec) -> None: ...
 
@@ -194,7 +191,6 @@ def run_bound_task(
     run_root: Path,
     verifier_account: VerifierAccount | None = None,
     verifier_python: str | None = None,
-    before_attempt: Callable[[], str] | None = None,
 ) -> TaskResult:
     """Run a task bound earlier (intake.submit). Its request must be the one bound;
     a task that is no longer BOUND (cancelled, or already run) is not run again."""
@@ -211,23 +207,10 @@ def run_bound_task(
             raise TaskRejected("REQUEST_MISMATCH", f"{task_id} was bound to another request")
         if record.status != "BOUND":
             return TaskResult(task_id, "", record.status, reason="NOT_BOUND")
-        return _execute(
-            task,
-            specs,
-            record,
-            ledger,
-            notary,
-            journal,
-            worker,
-            run_root,
-            verifying,
-            before_attempt,
-        )
+        return _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying)
 
 
-def _execute(
-    task, specs, record, ledger, notary, journal, worker, run_root, verifying, before_attempt=None
-):
+def _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying):
     """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
     attempt_id = f"a{secrets.token_hex(8)}"
     steps = _Steps(journal, record.task_id, attempt_id)
@@ -249,7 +232,6 @@ def _execute(
             result,
             steps,
             verifying,
-            before_attempt,
         )
     except Exception as exc:  # noqa: BLE001 - an infrastructure failure, never success
         result.verified = False
@@ -364,12 +346,9 @@ def judge_candidate(
     result.reason = _verdict_reason(result.verified, verdict, recorded)
 
 
-def _attempt(
-    task, specs, digest, notary, worker, run_root, result, steps, verifying, before_attempt=None
-) -> None:
-    """verifying = (verifier account or None, verifier Python or None). before_attempt returns
-    a refusal code (or "") and runs before every attempt; a refusal fails the attempt closed."""
-    if before_attempt is not None and (refusal := before_attempt()):
+def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
+    """verifying = (verifier account or None, verifier Python or None)."""
+    if task.before_attempt and (refusal := task.before_attempt()):  # trust re-check, every attempt
         result.reason = refusal
         return
     if task.test_commit:

@@ -237,21 +237,6 @@ def _take_one(intake, github, clone, base, issue) -> dict[str, Any]:
     return out
 
 
-def attempt_gate(github: GitHub, number: int, block_sha256: str, roots: tuple[str, ...]):
-    """Run before every attempt: the Issue's task block and queueing must still be trusted."""
-
-    def gate() -> str:
-        try:
-            body = github.current(number).get("body") or ""
-            if parse_task_block(body, roots).block_sha256 != block_sha256:
-                return TRUST_CHANGED
-            return TRUST_CHANGED if github.trust(number, QUEUE) else ""
-        except Exception:  # noqa: BLE001 - anything unreadable is a refusal
-            return TRUST_CHANGED
-
-    return gate
-
-
 def _test_base(github: GitHub, clone: Path, test_commit: str, store) -> str:
     """The test commit's only parent (private store #119, else GitHub API); must be on main."""
     try:
