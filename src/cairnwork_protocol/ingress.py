@@ -65,6 +65,10 @@ def authorized(header: str | None, token: str) -> bool:
 
 
 def read_body(headers: Any, rfile: BufferedIOBase, limit: int = MAX_BODY_BYTES) -> bytes:
+    # No chunked (or any) transfer coding: we frame by Content-Length only, so a
+    # Transfer-Encoding header, alone or beside Content-Length, is request smuggling bait.
+    if headers.get("Transfer-Encoding") is not None:
+        raise IngressError("INGRESS_TRANSFER_ENCODING_UNSUPPORTED")
     values = headers.get_all("Content-Length") if hasattr(headers, "get_all") else None
     if values is None:
         value = headers.get("Content-Length")
@@ -97,6 +101,8 @@ _HTTP_CODES = {
 
 
 def _host_allowed(header: str | None, port: int) -> bool:
+    # The explicit bound port is required on purpose: a bare host would mean port 80,
+    # and this service never binds 80, so a bare-host request is not for us.
     if not isinstance(header, str):
         return False
     return header.lower() in {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
@@ -122,6 +128,8 @@ def _make_handler(
             self.send_header("Content-Length", str(len(data)))
             if allow:
                 self.send_header("Allow", allow)
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
@@ -136,6 +144,8 @@ def _make_handler(
 
         def do_POST(self) -> None:
             try:
+                if len(self.headers.get_all("Host", [])) > 1:
+                    raise IngressError("INGRESS_HOST_DUPLICATE")
                 if not _host_allowed(self.headers.get("Host"), self.server.server_address[1]):
                     raise IngressError("INGRESS_HOST_NOT_ALLOWED", 421)
                 if len(self.headers.get_all("Authorization", [])) > 1 or not authorized(

@@ -346,3 +346,53 @@ def test_host_header_allow_list(server, host):
 def test_host_header_allowed_names(server, name):
     headers = {"Authorization": f"Bearer {TOKEN}", "Host": f"{name}:{server}"}
     assert _post(server, headers=headers)[0] == 200
+
+
+def _head_of(data: bytes) -> str:
+    return data.split(b"\r\n\r\n", 1)[0].decode("latin-1").lower()
+
+
+@pytest.mark.parametrize("extra", ["", "Content-Length: 2\r\n"])
+def test_transfer_encoding_is_refused_before_the_body_is_read(server, extra):
+    data = _raw(
+        server,
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nTransfer-Encoding: chunked\r\n{extra}\r\n"
+        "2\r\n{}\r\n0\r\n\r\n".encode(),
+    )
+    assert data.startswith(b"HTTP/1.0 400") or data.startswith(b"HTTP/1.1 400")
+    assert b"INGRESS_TRANSFER_ENCODING_UNSUPPORTED" in data
+    assert "connection: close" in _head_of(data)
+
+
+def test_transfer_encoding_refused_by_read_body():
+    headers = Message()
+    headers["Transfer-Encoding"] = "identity"
+    with pytest.raises(IngressError) as err:
+        read_body(headers, io.BytesIO(b""))
+    assert err.value.code == "INGRESS_TRANSFER_ENCODING_UNSUPPORTED"
+
+
+def test_duplicate_host_headers_are_refused(server):
+    data = _raw(
+        server,
+        f"POST /echo HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\nHost: localhost:{server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}".encode(),
+    )
+    assert b" 400 " in data.split(b"\r\n", 1)[0]
+    assert b"INGRESS_HOST_DUPLICATE" in data
+
+
+def test_bare_host_is_not_accepted_as_port_80(server):
+    status, _ = _post(server, headers={"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1"})
+    assert status == 421
+
+
+def test_error_responses_that_close_say_connection_close(server):
+    data = _raw(
+        server,
+        f"POST /nope HTTP/1.1\r\nHost: 127.0.0.1:{server}\r\n"
+        f"Authorization: Bearer {TOKEN}\r\nContent-Length: 2\r\n\r\n{{}}".encode(),
+    )
+    assert b" 404 " in data.split(b"\r\n", 1)[0]
+    assert "connection: close" in _head_of(data)
