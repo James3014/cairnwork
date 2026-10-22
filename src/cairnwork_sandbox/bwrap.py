@@ -252,13 +252,10 @@ def build_policy(
     # Empty the socket trees that exist with a tmpfs (whole tree, uid-independent).
     for socket_dir in _socket_dirs_to_empty():
         flags += ["--tmpfs", _safe(socket_dir)]
-    # A note, not a flag (wrap() skips "#" lines): the policy file is recorded per run and its
-    # sha256 is bound into the verifier record, so a host that withholds /dev/shm (and so cannot
-    # verify multiprocessing targets) shows why in the run, not only as a PermissionError.
+    # Surfaced by the verifier run (Policy.notes), not written into the hashed policy text.
     reason = shm_unavailable_reason(bwrap_path() or "")
-    if reason:
-        flags.append(f"# {SHM_NOTE_PREFIX}{reason}")
-    return Policy("\n".join(flags) + "\n")
+    notes = (f"{SHM_NOTE_PREFIX}{reason}",) if reason else ()
+    return Policy("\n".join(flags) + "\n", notes)
 
 
 def _home_cred_masks(real_home: str, owner: bool) -> list[tuple[str, bool]]:
@@ -356,8 +353,7 @@ def _binary() -> str:
 
 def wrap(argv: list[str], policy_path: Path) -> list[str]:
     binary = _binary()
-    lines = Path(policy_path).read_text().splitlines()
-    flags = [line for line in lines if line and not line.startswith("#")]
+    flags = [line for line in Path(policy_path).read_text().splitlines() if line]
     return [binary, *flags, "--", *argv]
 
 

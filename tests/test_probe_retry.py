@@ -186,10 +186,10 @@ def test_every_cause_is_named():
     assert "no test run" in why_not_passed(**{**base, "tests_ran": False})
 
 
-def _run(verifier_id, passed, why):
+def _run(verifier_id, passed, why, notes=()):
     observation = VerifierObservation(verifier_id, "a", "h", passed)
     return SimpleNamespace(
-        spec=SimpleNamespace(verifier_id=verifier_id), observation=observation, why=why
+        spec=SimpleNamespace(verifier_id=verifier_id), observation=observation, why=why, notes=notes
     )
 
 
@@ -197,6 +197,12 @@ def test_explain_names_only_the_failed_verifiers():
     runs = [_run("v1", True, ""), _run("v2", False, "timed out"), _run("v3", False, "")]
     assert explain(runs) == " [v2: timed out; v3: no cause recorded]"
     assert explain([_run("v1", True, "")]) == ""
+
+
+def test_explain_shows_the_backend_notes_of_a_failed_run_only():
+    note = "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"
+    runs = [_run("v1", True, "", (note,)), _run("v2", False, "pytest exit code 1", (note,))]
+    assert explain(runs) == f" [v2: pytest exit code 1 ({note})]"
 
 
 @pytest.mark.parametrize("attempts", [confined.PS_ATTEMPTS])

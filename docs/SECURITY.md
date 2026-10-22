@@ -36,8 +36,8 @@ Candidate code runs confined by an OS sandbox; when no working backend exists no
   and semaphores stay denied. Linux: `/dev/shm` is a fresh private tmpfs (writable, so in-sandbox
   shared-memory objects work but never reach the host) capped at 64 MiB, and it is mounted ONLY
   when the installed bwrap supports `--size`; without that support `/dev/shm` is not mounted at all
-  (reason `BWRAP_TMPFS_SIZE_UNSUPPORTED`, recorded as a trailing `# shm withheld: <reason>` line in the
-  run's `profile.sb`, whose sha256 is bound into the verifier record) and multiprocessing targets stay unverifiable (fail
+  (reason `BWRAP_TMPFS_SIZE_UNSUPPORTED`, carried as `Policy.notes` and shown in the run reason as
+  `(shm withheld: ...)`; not part of `profile.sb`, so no bound digest changes) and multiprocessing targets stay unverifiable (fail
   closed) rather than getting an uncapped tmpfs. Mach IPC and host shared memory remain denied.
 
   **Deployment note:** a verifier write root or state directory must not live under a masked path
