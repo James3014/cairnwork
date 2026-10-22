@@ -124,6 +124,8 @@ jobs:
           zsh scripts/setup_verifier_python.sh
       - name: Account witnesses on real bwrap, as the dedicated account
         run: uv run pytest -q -m verifier_account
+      - name: Diagnose Issue #91 (strict umask) — TEMPORARY
+        run: uv run python scripts/diag_umask91.py
 
   # Launch witness (fe56's launch gate ③): the real one-line-install UX end to end on Linux.
   # The test/sandbox jobs run pytest, but nothing otherwise proves the *installed* console script
