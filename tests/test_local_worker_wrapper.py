@@ -211,3 +211,32 @@ def test_probe_source_compiles_and_signal_rows_never_use_pid_zero():
     src = canary.probe.source({}, {}, "ab", victims, {"launchctl_submit": "/m"})
     compile(src, "probe", "exec")
     assert "pid < 2" in src and "def launchctl_job" in src
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("tamper", ["os.lseek(2, 0, 0); os.ftruncate(2, 0)", "os.ftruncate(1, 0)"])
+def test_test_code_cannot_erase_the_start_marker(runs, tmp_path, tamper):
+    """Code run by pytest that rewinds/truncates fd 2 (or 1) must not make the call look like a
+    wrapper that never started: the sandboxed child does not hold the marker's file."""
+    from experimental.local_worker.tools import WorkerTools, subprocess_invoker
+
+    base = os.path.realpath(getattr(sys, "_base_executable", sys.executable))
+    py = runs / TAG / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nexec {base} -c "import os; {tamper}; print(1)"\n')
+    py.chmod(0o755)
+    env = dict(
+        os.environ,
+        CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
+        CAIRNWORK_LOCAL_WORKER_PYROOT=sys.base_prefix,
+    )
+    tools = WorkerTools(
+        runs / TAG,
+        tmp_path / "calls.jsonl",
+        mode="direct",
+        wrapper=WRAPPER,
+        invoker=subprocess_invoker(env),
+        timeout_seconds=60,
+    )
+    call = tools.run_tests(["-q"])  # raises WorkerIsolationError if the marker was lost
+    assert call.exit_code == 0

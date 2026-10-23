@@ -258,8 +258,16 @@ class WorkerTools:
         if not err.startswith(marker):
             # No rule, missing binary, refused sudo: the wrapper never ran. Fail closed.
             detail = err[:4096].decode("utf-8", errors="replace").strip()
+            if action != "sweep":
+                self._sweep_quietly()  # a run that did start may have left processes behind
             raise WorkerIsolationError(f"wrapper did not start (exit {rc}): {detail}")
         return rc, out, err[len(marker) :]
+
+    def _sweep_quietly(self) -> None:
+        try:
+            self.sweep()
+        except WorkerIsolationError:
+            pass
 
     def _call(
         self,

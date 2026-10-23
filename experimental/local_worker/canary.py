@@ -14,7 +14,10 @@ tools still work. The JSON report and its sha256 go into the addendum's §10 fre
 ``worker`` mode report with overall PASS counts there (``direct`` mode exercises Seatbelt only).
 A signal to an unsandboxed process of the worker uid cannot be set up without a second sudoers
 rule: that case (Owner process, same uid) runs in the ``direct`` report, so the §10 table also
-cites a ``direct`` report whose ``wrapper_sha256`` equals the installed wrapper's.
+cites a ``direct`` report whose ``wrapper_sha256`` equals the installed wrapper's. Likewise the
+worker account may have no launchd domain at all, so in worker mode a failed launchctl cannot
+tell a missing domain from a Seatbelt denial; the direct report (Owner has the domain) shows the
+Seatbelt cause, the worker report shows that no job ran.
 
     python -m experimental.local_worker.canary --mode worker --out <dir>
 """
@@ -78,7 +81,7 @@ class Fixture:
             shutil.rmtree(path, ignore_errors=True)
         for marker in self.escape_markers.values():
             for path in (marker, marker + OWNER_SUFFIX):
-                Path(path).unlink(missing_ok=True)
+                _unlink_quiet(path)
 
 
 def _mkdir(path: Path, mode: int) -> Path:
@@ -240,7 +243,10 @@ def _stop_sibling_victim(tools: WorkerTools, fx: Fixture, proc: subprocess.Popen
             proc.kill()
         except (PermissionError, ProcessLookupError):
             pass
-        proc.wait(timeout=5)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # a refused signal; the sweep above already killed the worker side
     if proc.stdout:
         proc.stdout.close()
 
@@ -302,6 +308,14 @@ def _owner_launchctl_control(fx: Fixture, name: str) -> dict:
     return {"rc": proc.returncode, "marker_seen": seen}
 
 
+def _unlink_quiet(path: str) -> None:
+    """A marker an escaped job made belongs to the worker in sticky /private/tmp: not removable."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except PermissionError:
+        pass
+
+
 def _launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
     """Pass only if the sandboxed launchctl failed, its job never ran, and the Owner's control
     job did run. (launchctl prints nothing when sandboxed, so the denial is shown by outcome.)"""
@@ -314,7 +328,7 @@ def _launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
         control = _owner_launchctl_control(fx, name)
         marker = fx.escape_markers[name]
         ran = os.path.lexists(marker)
-        Path(marker).unlink(missing_ok=True)
+        _unlink_quiet(marker)
         r = dict(r, owner_control=control, job_ran_in_sandbox_attempt=ran)
         if not control["marker_seen"]:
             r.update({"pass": False, "result": "INCONCLUSIVE_OWNER_CONTROL_FAILED"})

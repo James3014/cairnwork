@@ -313,3 +313,14 @@ def test_timeout_does_not_hang_when_the_signal_is_refused(monkeypatch):
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_no_start_marker_still_sweeps_the_run(tmp_path):
+    t, inv = make(tmp_path, bare(0, b"", b""))
+    with pytest.raises(WorkerIsolationError):
+        t.run_tests(["-q"])
+    assert [action_of_any(c[0]) for c in inv.calls] == ["pytest", "sweep"]
+
+
+def action_of_any(argv):
+    return argv[argv.index("--start-nonce") + 2]
