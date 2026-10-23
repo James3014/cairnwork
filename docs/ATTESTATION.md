@@ -229,7 +229,7 @@ CAIRNWORK_GITHUB_TOKEN=... cairnwork-attest check-run \
 
 The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, test source, key id and the offline verification result (with `--public-key` the signature is checked, reported as `VERIFIED, signature only`; add `--repo` to run the full `verify`; `--repo` needs `--public-key`; without a key the title is marked `UNVERIFIED` and the summary says the signature was not checked). A missing or malformed key file fails before anything is posted (`KEY_UNREADABLE` / `KEY_MALFORMED`), so an operator mistake never reads as a forged bundle. Its conclusion is always `neutral`: it is informational and never the enforcing gate. Enforcement stays with `cairnwork/verify-action`, which verifies the published note itself.
 
-The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
+The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Alternatively pass `--gh /abs/path/to/gh` (any `gh`-compatible CLI that authenticates by itself, such as a GitHub App helper): the request then goes through `<gh> api --method POST --include repos/OWNER/NAME/check-runs --input -`, no token is read from the environment, `CAIRNWORK_GITHUB_TOKEN` is removed from the `gh` child's environment, and `gh` authenticates with its own credentials (note that `gh` honours its own variables such as `GH_HOST` and `GH_TOKEN`, so the identity and host are whatever that `gh` is configured for). The path must be absolute and executable, otherwise the result is `USAGE`; a `gh` that prints no HTTP response (auth or network failure) reports `NETWORK_ERROR`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
 
 ## On Verified (runner hook)
 
@@ -241,7 +241,7 @@ cairnwork-attest on-verified --state /abs/state --task-id T --attempt-id A \
   [--remote origin] [--notes-ref refs/notes/cairnwork] [--out-dir /abs/dir] [--no-check-run]
 ```
 
-The bundle is written to `<out-dir or STATE/attestations>/<task>-<attempt>.bundle.json` with mode 0600. Task and attempt ids must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; paths must be absolute. A bundle already at that path is reused only if it fully verifies for this candidate (so a re-run publishes `NOOP`); any other file there fails with `BUNDLE_EXISTS`. The Check Run signature check uses the state's own public key. The token comes from `CAIRNWORK_GITHUB_TOKEN`; without it the `check_run` step is `USAGE` (the note is still published).
+The bundle is written to `<out-dir or STATE/attestations>/<task>-<attempt>.bundle.json` with mode 0600. Task and attempt ids must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; paths must be absolute. A bundle already at that path is reused only if it fully verifies for this candidate (so a re-run publishes `NOOP`); any other file there fails with `BUNDLE_EXISTS`. The Check Run signature check uses the state's own public key. The token comes from `CAIRNWORK_GITHUB_TOKEN`; without it the `check_run` step is `USAGE` (the note is still published). `--gh /abs/path/to/gh` is passed through to the Check Run step, which then needs no token.
 
 It prints one JSON line (sorted keys): `ok`, `task_id`, `attempt_id`, `candidate`, `bundle` and `steps` (`step`, `code`, `detail`). Exit 0 when every step that ran succeeded (statement `OK`, publish `PUBLISHED` or `NOOP`, check run `CREATED` or skipped by `--no-check-run`), 1 when publish returned `NOTE_CONFLICT`, 2 for any other failure. The token never appears in the output.
 
@@ -252,6 +252,8 @@ The Issue runner can call an executable after a task's PR is open: set the state
 ```sh
 #!/bin/sh
 exec /abs/path/to/cairnwork-attest on-verified "$@"
+# or, with a gh wrapper that authenticates by itself (no token in the hook):
+# exec /abs/path/to/cairnwork-attest on-verified --gh /abs/path/to/gh "$@"
 ```
 
 Make the wrapper executable (`chmod 700`) and keep it owned by the runner account.
