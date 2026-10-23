@@ -213,7 +213,7 @@ cairnwork-attest publish \
   --notes-ref refs/notes/cairnwork
 ```
 
-The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used.
+The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used. The local notes ref is treated as a mirror of the remote: each attempt force-fetches it, so notes that exist only locally on that ref are discarded. `--remote` must be a configured remote name and `--notes-ref` must be under `refs/notes/`; anything else is rejected as `USAGE` before git runs.
 
 ## Planned Follow-ups (Phase 2+)
 

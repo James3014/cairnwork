@@ -6,17 +6,29 @@ import base64
 import binascii
 import json
 import os
+import random
 import re
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from cairnwork_attest.bundle import BundleError, read_bundle
-from cairnwork_attest.record import AttestError
+from cairnwork_attest.record import AttestError, parse_strict_json
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
+_REMOTE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+_NO_NOTE = "no note found"
+_RETRYABLE = (
+    "fetch first",
+    "non-fast-forward",
+    "cannot lock ref",
+    "failed to update ref",
+    "lock failure",
+)
 _RETRY = object()
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 @dataclass(frozen=True)
@@ -34,18 +46,25 @@ class PublishResult:
     notes_tip: str | None
 
 
-def _git(repo: Path, *args: str, input: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a git command with prompts disabled."""
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        input=input,
+def _git(repo: Path, *args: str, input: bytes | None = None) -> subprocess.CompletedProcess[str]:
+    """Run git with prompts disabled and C-locale messages (stderr is matched)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "LANGUAGE": "C"}
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, env=env, capture_output=True, check=False, input=input
     )
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        proc.stdout.decode("utf-8", "replace"),
+        proc.stderr.decode("utf-8", "replace"),
+    )
+
+
+class _GitFailure(Exception):
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
 
 
 def _fail(
@@ -71,132 +90,117 @@ def _fail(
     )
 
 
-def _read_and_check_bundle(bundle: Path, candidate: str) -> dict[str, Any]:
-    """Read and validate the bundle; its statement subject must name the candidate."""
+def _check_args(
+    repo: Path, candidate: str, remote: str, notes_ref: str, attempts: int
+) -> str | None:
+    """Return a USAGE detail for unsafe or malformed arguments, else None."""
+    if not _OID.fullmatch(candidate):
+        return f"malformed candidate: {candidate!r} (must be 40-hex)"
+    if not _REMOTE.fullmatch(remote):
+        return f"remote must be a configured remote name: {remote!r}"
+    if not notes_ref.startswith("refs/notes/") or notes_ref == "refs/notes/":
+        return f"notes ref must be under refs/notes/: {notes_ref!r}"
+    if _git(repo, "check-ref-format", notes_ref).returncode != 0:
+        return f"invalid notes ref: {notes_ref!r}"
+    if attempts < 1:
+        return f"max attempts must be >= 1: {attempts}"
+    return None
+
+
+def _read_and_check_bundle(bundle: Path, candidate: str) -> bytes:
+    """Validate the bundle and return the exact bytes that were validated."""
     envelope = read_bundle(bundle)
     try:
+        raw = bundle.read_bytes()
+        again = parse_strict_json(
+            raw.decode("utf-8"),
+            error_cls=BundleError,
+            malformed_code="BUNDLE_MALFORMED",
+            constant_code="BUNDLE_MALFORMED",
+        )
         raw_payload = base64.b64decode(envelope["payload"], validate=True)
         statement = json.loads(raw_payload)
         subject = statement["subject"][0]["digest"]["gitCommit"]
-    except (KeyError, IndexError, TypeError, ValueError, binascii.Error) as exc:
+    except (OSError, KeyError, IndexError, TypeError, ValueError, binascii.Error) as exc:
         raise BundleError(f"statement shape: {exc}", code="STATEMENT_SHAPE") from exc
+    if again != envelope:
+        raise BundleError("bundle changed while being read", code="BUNDLE_CHANGED")
     if subject != candidate:
         raise BundleError(
             f"bundle subject gitCommit does not match candidate {candidate}",
             code="CANDIDATE_MISMATCH",
         )
-    return envelope
+    return raw
 
 
-def _store_blob(run: Any, repo: Path, bundle: Path) -> str:
-    """Store the bundle file's exact bytes as a git blob and return the oid.
-
-    The file is hashed by path with ``--no-filters`` so no clean filter or
-    end-of-line conversion touches it; the note is byte-identical to the file.
-    """
-    proc = run(repo, "hash-object", "-w", "--no-filters", "--", str(bundle.resolve()))
+def _store_blob(run: Runner, repo: Path, raw: bytes) -> str:
+    """Store the validated bytes as a git blob (no filters) and return the oid."""
+    proc = run(repo, "hash-object", "-w", "--no-filters", "--stdin", input=raw)
     if proc.returncode != 0:
-        detail = f"git hash-object failed: {proc.stderr.strip()}"
-        raise BundleError(detail, code="BLOB_STORE_FAILED")
+        raise _GitFailure("BLOB_STORE_FAILED", proc.stderr.strip())
     return proc.stdout.strip()
 
 
-def _fetch_notes(
-    run: Any,
-    repo: Path,
-    remote: str,
-    notes_ref: str,
-) -> str | None:
-    """Fetch remote notes ref. Return None on success, or error detail."""
-    proc = run(repo, "fetch", remote, f"+{notes_ref}:{notes_ref}")
+def _rev_parse(run: Runner, repo: Path, ref: str) -> str:
+    proc = run(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if proc.returncode != 0 or not _OID.fullmatch(proc.stdout.strip()):
+        raise _GitFailure("REV_PARSE_FAILED", proc.stderr.strip() or f"cannot resolve {ref}")
+    return proc.stdout.strip()
+
+
+def _fetch_notes(run: Runner, repo: Path, remote: str, notes_ref: str) -> None:
+    """Mirror the remote notes ref locally (local-only notes on it are discarded)."""
+    proc = run(repo, "fetch", "--no-tags", "--", remote, f"+{notes_ref}:{notes_ref}")
     if proc.returncode == 0:
+        return
+    if "couldn't find remote ref" not in proc.stderr:
+        raise _GitFailure("FETCH_FAILED", proc.stderr.strip())
+    exists = run(repo, "rev-parse", "--verify", "--quiet", notes_ref).returncode == 0
+    if exists:
+        deleted = run(repo, "update-ref", "-d", notes_ref)
+        if deleted.returncode != 0:
+            raise _GitFailure("LOCAL_REF_RESET_FAILED", deleted.stderr.strip())
+
+
+def _existing_note(run: Runner, repo: Path, notes_ref: str, candidate: str) -> str | None:
+    """Return the blob oid of the candidate's note, None if it has none."""
+    proc = run(repo, "notes", f"--ref={notes_ref}", "list", candidate)
+    if proc.returncode == 0:
+        return proc.stdout.strip()
+    if _NO_NOTE in proc.stderr.lower():
         return None
-    if "couldn't find remote ref" in proc.stderr:
+    raise _GitFailure("NOTES_LIST_FAILED", proc.stderr.strip())
+
+
+def _restore_ref(run: Runner, repo: Path, notes_ref: str, old_tip: str | None) -> None:
+    """Undo our local note commit so the local ref never shows an unpublished note."""
+    if old_tip is None:
         run(repo, "update-ref", "-d", notes_ref)
-        return None
-    return proc.stderr.strip()
-
-
-def _check_existing_note(
-    run: Any,
-    repo: Path,
-    notes_ref: str,
-    candidate: str,
-    blob_oid: str,
-) -> PublishResult | None:
-    """Check for an existing note. Return a result for NOOP/CONFLICT, or None."""
-    proc = run(repo, "notes", "--ref", notes_ref, "list", candidate)
-    if proc.returncode != 0:
-        return None
-    existing_oid = proc.stdout.strip()
-    if existing_oid == blob_oid:
-        tip = run(repo, "rev-parse", notes_ref).stdout.strip()
-        return PublishResult(
-            ok=True,
-            code="NOOP",
-            detail=None,
-            candidate=candidate,
-            notes_ref=notes_ref,
-            remote="",
-            attempts=0,
-            blob=blob_oid,
-            notes_tip=tip,
-        )
-    return PublishResult(
-        ok=False,
-        code="NOTE_CONFLICT",
-        detail=f"existing note {existing_oid} differs from {blob_oid}",
-        candidate=candidate,
-        notes_ref=notes_ref,
-        remote="",
-        attempts=0,
-        blob=blob_oid,
-        notes_tip=None,
-    )
+    else:
+        run(repo, "update-ref", notes_ref, old_tip)
 
 
 def _try_push(
-    run: Any,
-    repo: Path,
-    remote: str,
-    notes_ref: str,
-    candidate: str,
-    blob_oid: str,
-) -> PublishResult | object:
-    """Attempt add + push. Return PublishResult, _RETRY, or a failure result."""
-    added = run(repo, "notes", "--ref", notes_ref, "add", "-C", blob_oid, candidate)
+    run: Runner, repo: Path, remote: str, notes_ref: str, candidate: str, blob: str
+) -> str | object:
+    """Add the note and push. Return the new notes tip, or _RETRY when another push won."""
+    probe = run(repo, "rev-parse", "--verify", "--quiet", notes_ref)
+    old_tip = probe.stdout.strip() if probe.returncode == 0 else None
+    added = run(repo, "notes", f"--ref={notes_ref}", "add", "-C", blob, candidate)
     if added.returncode != 0:
-        return _fail(
-            "NOTE_ADD_FAILED", added.stderr.strip(), candidate, notes_ref, remote, 0, blob_oid
-        )
-    proc = run(repo, "push", remote, f"{notes_ref}:{notes_ref}")
+        raise _GitFailure("NOTE_ADD_FAILED", added.stderr.strip())
+    proc = run(repo, "push", "--", remote, f"{notes_ref}:{notes_ref}")
     if proc.returncode == 0:
-        tip = run(repo, "rev-parse", notes_ref).stdout.strip()
-        return PublishResult(
-            ok=True,
-            code="PUBLISHED",
-            detail=None,
-            candidate=candidate,
-            notes_ref=notes_ref,
-            remote=remote,
-            attempts=0,
-            blob=blob_oid,
-            notes_tip=tip,
-        )
-    stderr = proc.stderr
-    if "rejected" in stderr and ("fetch first" in stderr or "non-fast-forward" in stderr):
+        return _rev_parse(run, repo, notes_ref)
+    _restore_ref(run, repo, notes_ref, old_tip)
+    if "rejected" in proc.stderr and any(m in proc.stderr for m in _RETRYABLE):
         return _RETRY
-    return PublishResult(
-        ok=False,
-        code="PUSH_FAILED",
-        detail=stderr.strip(),
-        candidate=candidate,
-        notes_ref=notes_ref,
-        remote=remote,
-        attempts=0,
-        blob=blob_oid,
-        notes_tip=None,
-    )
+    raise _GitFailure("PUSH_FAILED", proc.stderr.strip())
+
+
+def _backoff(attempt: int) -> None:
+    """Jittered wait so racing publishers do not retry in lockstep."""
+    time.sleep(random.uniform(0.05, 0.25) * attempt)  # noqa: S311 - jitter, not crypto
 
 
 def publish_bundle(
@@ -207,72 +211,55 @@ def publish_bundle(
     remote: str = "origin",
     notes_ref: str = "refs/notes/cairnwork",
     max_attempts: int = 5,
-    run: Any = None,
+    run: Runner | None = None,
 ) -> PublishResult:
-    """Publish a signed bundle as a git note and push to the remote."""
-    if run is None:
-        run = _git
-    if not _OID.fullmatch(candidate):
-        return _fail(
-            "USAGE", f"malformed candidate: {candidate!r}", candidate, notes_ref, remote, 0
-        )
+    """Publish a signed bundle as a git note on ``notes_ref`` and push it to ``remote``."""
+    git = run or _git
+    usage = _check_args(repo, candidate, remote, notes_ref, max_attempts)
+    if usage is not None:
+        return _fail("USAGE", usage, candidate, notes_ref, remote, 0)
     try:
-        _read_and_check_bundle(bundle, candidate)
+        raw = _read_and_check_bundle(bundle, candidate)
     except AttestError as exc:
         return _fail(exc.code, exc.message, candidate, notes_ref, remote, 0)
-    proc = run(repo, "cat-file", "-e", f"{candidate}^{{commit}}")
-    if proc.returncode != 0:
-        return _fail(
-            "CANDIDATE_NOT_FOUND",
-            f"commit {candidate} not in repo",
-            candidate,
-            notes_ref,
-            remote,
-            0,
-        )
+    if git(repo, "cat-file", "-e", f"{candidate}^{{commit}}").returncode != 0:
+        detail = f"commit {candidate} not in repo"
+        return _fail("CANDIDATE_NOT_FOUND", detail, candidate, notes_ref, remote, 0)
+    blob: str | None = None
+    attempt = 0
     try:
-        blob_oid = _store_blob(run, repo, bundle)
-    except AttestError as exc:
-        return _fail(exc.code, exc.message, candidate, notes_ref, remote, 0)
-    for attempt in range(1, max_attempts + 1):
-        err = _fetch_notes(run, repo, remote, notes_ref)
-        if err is not None:
-            return _fail("FETCH_FAILED", err, candidate, notes_ref, remote, attempt, blob_oid)
-        existing = _check_existing_note(run, repo, notes_ref, candidate, blob_oid)
-        if existing is not None:
-            r = existing
-            return PublishResult(
-                ok=r.ok,
-                code=r.code,
-                detail=r.detail,
-                candidate=candidate,
-                notes_ref=notes_ref,
-                remote=remote,
-                attempts=attempt,
-                blob=r.blob,
-                notes_tip=r.notes_tip,
-            )
-        result = _try_push(run, repo, remote, notes_ref, candidate, blob_oid)
-        if result is _RETRY:
-            continue
-        r = result  # type: ignore[assignment]
-        return PublishResult(
-            ok=r.ok,
-            code=r.code,
-            detail=r.detail,
-            candidate=candidate,
-            notes_ref=notes_ref,
-            remote=remote,
-            attempts=attempt,
-            blob=r.blob,
-            notes_tip=r.notes_tip,
-        )
-    return _fail(
-        "PUSH_RETRIES_EXHAUSTED",
-        f"failed after {max_attempts} attempts",
-        candidate,
-        notes_ref,
-        remote,
-        max_attempts,
-        blob_oid,
+        blob = _store_blob(git, repo, raw)
+        for attempt in range(1, max_attempts + 1):
+            _fetch_notes(git, repo, remote, notes_ref)
+            existing = _existing_note(git, repo, notes_ref, candidate)
+            if existing is not None and existing != blob:
+                detail = f"existing note {existing} differs from {blob}"
+                return _fail("NOTE_CONFLICT", detail, candidate, notes_ref, remote, attempt, blob)
+            if existing == blob:
+                tip = _rev_parse(git, repo, notes_ref)
+                return _ok("NOOP", candidate, notes_ref, remote, attempt, blob, tip)
+            tip = _try_push(git, repo, remote, notes_ref, candidate, blob)
+            if isinstance(tip, str):
+                return _ok("PUBLISHED", candidate, notes_ref, remote, attempt, blob, tip)
+            if attempt < max_attempts:
+                _backoff(attempt)
+    except _GitFailure as exc:
+        return _fail(exc.code, exc.detail, candidate, notes_ref, remote, attempt, blob)
+    detail = f"failed after {max_attempts} attempts"
+    return _fail("PUSH_RETRIES_EXHAUSTED", detail, candidate, notes_ref, remote, max_attempts, blob)
+
+
+def _ok(
+    code: str, candidate: str, notes_ref: str, remote: str, attempts: int, blob: str, tip: str
+) -> PublishResult:
+    return PublishResult(
+        ok=True,
+        code=code,
+        detail=None,
+        candidate=candidate,
+        notes_ref=notes_ref,
+        remote=remote,
+        attempts=attempts,
+        blob=blob,
+        notes_tip=tip,
     )

@@ -1,4 +1,4 @@
-"""Tests for cairnwork_attest.publish (git-notes delivery of a signed bundle)."""
+"""Tests for cairnwork_attest.publish: core behaviour."""
 
 from __future__ import annotations
 
@@ -9,48 +9,19 @@ from pathlib import Path
 import pytest
 from conftest import git
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from publish_helpers import (
+    _NOTES_REF,
+    _clone_bare,
+    _make_bundle_bytes,
+    _make_bundle_bytes_alt,
+    _notes_tip,
+    _read_note_from_bare,
+    _write_bundle,
+    make_publish_env,
+)
 
 from cairnwork_attest.cli import main
-from cairnwork_attest.dsse import _sign_bytes
 from cairnwork_attest.publish import _git, publish_bundle
-
-_NOTES_REF = "refs/notes/cairnwork"
-
-
-def _make_bundle_bytes(candidate: str, key: Ed25519PrivateKey) -> bytes:
-    """Create a minimal valid signed DSSE bundle for the given candidate."""
-    statement = {
-        "_type": "https://in-toto.io/Statement/v1",
-        "predicateType": "https://cairnwork.github.io/attestation/verified-change/v0.1",
-        "predicate": {},
-        "subject": [
-            {
-                "digest": {"gitCommit": candidate},
-                "name": f"git-commit:{candidate}",
-            }
-        ],
-    }
-    payload = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    envelope = _sign_bytes(payload, key)
-    return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _make_bundle_bytes_alt(candidate: str, key: Ed25519PrivateKey) -> bytes:
-    """Create a different valid bundle for the same candidate (different predicate)."""
-    statement = {
-        "_type": "https://in-toto.io/Statement/v1",
-        "predicateType": "https://cairnwork.github.io/attestation/verified-change/v0.1",
-        "predicate": {"extra": "data"},
-        "subject": [
-            {
-                "digest": {"gitCommit": candidate},
-                "name": f"git-commit:{candidate}",
-            }
-        ],
-    }
-    payload = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    envelope = _sign_bytes(payload, key)
-    return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 @pytest.fixture
@@ -60,52 +31,7 @@ def key() -> Ed25519PrivateKey:
 
 @pytest.fixture
 def publish_env(tmp_path: Path) -> tuple[Path, Path, str]:
-    """Set up a repo with one commit and a bare remote."""
-    src = tmp_path / "src"
-    src.mkdir()
-    git(src, "init")
-    git(src, "config", "user.email", "test@test.com")
-    git(src, "config", "user.name", "Test")
-    (src / "f.txt").write_text("hello\n")
-    git(src, "add", "f.txt")
-    git(src, "commit", "-m", "init")
-    candidate = git(src, "rev-parse", "HEAD")
-
-    bare = tmp_path / "bare.git"
-    git(tmp_path, "clone", "--bare", str(src), str(bare))
-    git(src, "remote", "add", "origin", str(bare))
-
-    return src, bare, candidate
-
-
-def _write_bundle(tmp_path: Path, data: bytes, name: str = "bundle.json") -> Path:
-    p = tmp_path / name
-    p.write_bytes(data)
-    return p
-
-
-def _clone_bare(tmp_path: Path, bare: Path, name: str = "clone2") -> Path:
-    clone = tmp_path / name
-    git(tmp_path, "clone", str(bare), str(clone))
-    git(clone, "config", "user.email", "test@test.com")
-    git(clone, "config", "user.name", "Test")
-    return clone
-
-
-def _read_note_from_bare(bare: Path, candidate: str) -> str:
-    """Read a note for a candidate from a bare repo via a temp clone."""
-    proc = subprocess.run(
-        ["git", "notes", "--ref", _NOTES_REF, "show", candidate],
-        cwd=bare,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return proc.stdout
-
-
-def _notes_tip(repo: Path) -> str:
-    return git(repo, "rev-parse", _NOTES_REF)
+    return make_publish_env(tmp_path)
 
 
 def test_first_publish(
@@ -183,13 +109,14 @@ def test_coexist_with_other_notes(
     assert r_other.code == "PUBLISHED"
 
     # Now publish ours from src
-    bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
+    bundle_bytes = _make_bundle_bytes(candidate, key)
+    bundle_file = _write_bundle(tmp_path, bundle_bytes)
     r_ours = publish_bundle(bundle_file, src, candidate)
     assert r_ours.code == "PUBLISHED"
 
     # Both notes readable
-    assert _read_note_from_bare(bare, candidate).strip() != ""
-    assert _read_note_from_bare(bare, other_sha).strip() != ""
+    assert _read_note_from_bare(bare, candidate).encode("utf-8") == bundle_bytes
+    assert _read_note_from_bare(bare, other_sha).encode("utf-8") == other_bundle
 
 
 def test_concurrent_push_retry(
@@ -206,26 +133,25 @@ def test_concurrent_push_retry(
     git(clone2, "push", "origin", "HEAD")
 
     other_bundle = _make_bundle_bytes(other_sha, key)
-    other_blob_proc = _git(
-        clone2, "hash-object", "-w", "--stdin", input=other_bundle.decode("latin-1")
-    )
+    other_blob_proc = _git(clone2, "hash-object", "-w", "--stdin", input=other_bundle)
     other_blob = other_blob_proc.stdout.strip()
 
     injected = {"count": 0}
 
     def intercepting_run(
-        repo: Path, *args: str, input: str | None = None
+        repo: Path, *args: str, input: bytes | None = None
     ) -> subprocess.CompletedProcess[str]:
         result = _git(repo, *args, input=input)
         # After our first "notes add", push a competing note from clone2
         if len(args) >= 2 and args[0] == "notes" and "add" in args and injected["count"] == 0:
             injected["count"] += 1
             _git(clone2, "fetch", "origin", f"+{_NOTES_REF}:{_NOTES_REF}")
-            _git(clone2, "notes", "--ref", _NOTES_REF, "add", "-C", other_blob, other_sha)
+            _git(clone2, "notes", f"--ref={_NOTES_REF}", "add", "-C", other_blob, other_sha)
             _git(clone2, "push", "origin", f"{_NOTES_REF}:{_NOTES_REF}")
         return result
 
-    bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
+    bundle_bytes = _make_bundle_bytes(candidate, key)
+    bundle_file = _write_bundle(tmp_path, bundle_bytes)
     r = publish_bundle(bundle_file, src, candidate, run=intercepting_run)
 
     assert r.ok is True
@@ -233,8 +159,8 @@ def test_concurrent_push_retry(
     assert r.attempts == 2
 
     # Both notes present
-    assert _read_note_from_bare(bare, candidate).strip() != ""
-    assert _read_note_from_bare(bare, other_sha).strip() != ""
+    assert _read_note_from_bare(bare, candidate).encode("utf-8") == bundle_bytes
+    assert _read_note_from_bare(bare, other_sha).encode("utf-8") == other_bundle
 
 
 def test_candidate_not_in_repo(
