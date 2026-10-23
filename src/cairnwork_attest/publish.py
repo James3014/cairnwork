@@ -60,8 +60,18 @@ def _git(repo: Path, *args: str, input: bytes | None = None) -> subprocess.Compl
     )
 
 
+# userinfo in a URL (https://user:token@host, https://token@host) that git may echo on stderr
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
+
+
+def _redact(text: str) -> str:
+    """Hide credentials embedded in remote URLs before git output reaches a result."""
+    return _URL_USERINFO.sub(r"\1***@", text)
+
+
 class _GitFailure(Exception):
     def __init__(self, code: str, detail: str) -> None:
+        detail = _redact(detail)
         super().__init__(detail)
         self.code = code
         self.detail = detail
