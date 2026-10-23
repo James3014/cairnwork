@@ -46,6 +46,9 @@ An attestation statement is an unsigned in-toto v1 Statement containing:
   - `test_source`: `"bundle"`, `"auto"` or `"none"`, the hidden-test mode the run itself used
     (the pipeline journals a `TEST_SOURCE` row in `journal.sqlite` before it checks the deferred
     tests; `statement` reads that row read-only by task and attempt, never `config.json`).
+    `cairnwork-verify` writes the same row, in the same `journal.sqlite`, under its one-off
+    `verify-...` task id (printed as `task_id` next to `attempt_id` in its JSON output); pass
+    those two to `cairnwork-attest statement`.
     No row (the task had no hidden tests, or the run predates this change) is `none`.
     Confidentiality of the hidden tests is claimed only for `bundle`; `auto` and `none` make no
     such claim. A config changed after the run does not change the recorded value.
