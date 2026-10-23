@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from cairnwork_attest.bundle import BundleError
 from cairnwork_attest.checkrun import _SLUG, TOKEN_ENV, post_check_run
 from cairnwork_attest.dsse import sign_statement
@@ -59,14 +61,16 @@ def _usage(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _build_envelope(args: argparse.Namespace, verified: VerifiedRecord) -> dict[str, Any]:
+def _build_envelope(
+    args: argparse.Namespace, verified: VerifiedRecord, private_key: Ed25519PrivateKey
+) -> dict[str, Any]:
     """Build and sign the statement exactly as ``statement --sign`` does."""
     state_dir = Path(args.state)
     return sign_statement(
         verified,
         producer=default_producer(),
         timestamp=datetime.now(UTC).isoformat(),
-        private_key=load_private_key(state_dir),
+        private_key=private_key,
         test_source=run_test_source(state_dir, args.task_id, args.attempt_id),
     )
 
@@ -85,7 +89,10 @@ def _write_private(path: Path, envelope: dict[str, Any]) -> None:
         os.fchmod(fd, 0o600)
         view = memoryview(data)
         while view:
-            view = view[os.write(fd, view) :]
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short write: no progress")
+            view = view[written:]
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)
@@ -119,7 +126,8 @@ def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _St
             args.attempt_id,
             expected_candidate=args.candidate,
         )
-        pubkey.write_text(public_key_pem(load_private_key(Path(args.state)).public_key()))
+        private_key = load_private_key(Path(args.state))
+        pubkey.write_text(public_key_pem(private_key.public_key()))
         if bundle.is_symlink():
             raise BundleError(f"bundle path is a symlink: {bundle}", code="BUNDLE_EXISTS")
         if bundle.exists():
@@ -127,7 +135,7 @@ def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _St
                 return _Step("statement", "OK", "reused existing bundle")
             raise BundleError(f"bundle already exists: {bundle}", code="BUNDLE_EXISTS")
         bundle.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(bundle, _build_envelope(args, verified))
+        _write_private(bundle, _build_envelope(args, verified, private_key))
     except AttestError as exc:
         return _Step("statement", exc.code, exc.message)
     except (OSError, ValueError) as exc:
