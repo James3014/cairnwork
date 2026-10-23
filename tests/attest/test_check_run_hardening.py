@@ -126,3 +126,19 @@ def test_cli_created_without_html_url(tmp_path: Path, capsys, monkeypatch) -> No
     rc = main(["check-run", "--bundle", str(path), "--repo-slug", "octo/repo"])
     assert rc == 0
     assert capsys.readouterr().out.strip() == f"CREATED {CAND} -"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"token": "abc\r\nX-Evil: 1"},
+        {"token": "tok en"},
+        {"details_url": "https://"},
+        {"details_url": "https:///path"},
+    ],
+)
+def test_more_usage_errors(tmp_path: Path, kw: dict) -> None:
+    http = FakeHttp()
+    res = _post(_bundle(tmp_path, Ed25519PrivateKey.generate()), http, **kw)
+    assert (res.ok, res.code) == (False, "USAGE")
+    assert http.calls == [] and "abc" not in (res.detail or "")

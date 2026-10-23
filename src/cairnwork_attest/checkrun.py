@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from cairnwork_attest.verify import _parse_statement_payload, verify_bundle
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _KEYID = re.compile(r"^[0-9a-f]{64}$")
 _TEST_SOURCE = re.compile(r"^[a-z_]{1,32}$")
+_TOKEN = re.compile(r"^[A-Za-z0-9_.-]{1,512}$")
 _SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/+=,-]")
 _MAX_VALUE = 200
@@ -87,8 +89,8 @@ def _facts(bundle_path: Path) -> dict[str, Any]:
         raise BundleError(err.detail if err else "statement malformed", code="STATEMENT_SHAPE")
     try:
         candidate = statement["subject"][0]["digest"]["gitCommit"]
-        keyid = envelope["signatures"][0]["keyid"]
-    except (KeyError, IndexError, TypeError) as exc:
+        keyid = envelope["signatures"][0].get("keyid")
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise BundleError(f"statement shape: {exc}", code="STATEMENT_SHAPE") from exc
     if not isinstance(candidate, str) or not _OID.fullmatch(candidate):
         raise BundleError("bundle subject gitCommit is not 40-hex", code="STATEMENT_SHAPE")
@@ -170,10 +172,14 @@ def _check_args(
         return "--repo needs --public-key (full offline verify)"
     if not token:
         return f"missing token (set {TOKEN_ENV})"
+    if not _TOKEN.fullmatch(token):
+        return f"{TOKEN_ENV} has unexpected characters"
     if not _SLUG.fullmatch(repo_slug) or any(p in (".", "..") for p in repo_slug.split("/")):
         return f"repo slug must be OWNER/NAME: {_clean(repo_slug)!r}"
     if details_url is not None and not (
-        details_url.startswith("https://") and re.fullmatch(r"[^\s\x00-\x1f\x7f]+", details_url)
+        details_url.startswith("https://")
+        and re.fullmatch(r"[^\s\x00-\x1f\x7f]+", details_url)
+        and urllib.parse.urlsplit(details_url).hostname
     ):
         return "details url must start with https:// and contain no whitespace"
     return None
