@@ -200,6 +200,12 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             f"malformed --candidate: {candidate!r} (must be 40-hex)", candidate, args.json
         )
 
+    expected_base = args.base
+    if expected_base is not None and not _OID.fullmatch(expected_base):
+        return _usage_error(
+            f"malformed --base: {expected_base!r} (must be 40-hex)", candidate, args.json
+        )
+
     repo = Path(args.repo)
     if not args.json:
         print(f"Candidate: {candidate}", file=sys.stderr)
@@ -227,6 +233,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         repo=repo,
         expected_candidate=candidate,
         core_identity_pin=core_id_pin,
+        expected_base=expected_base,
     )
 
     if args.json:
@@ -281,7 +288,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         if result.code == "NOOP":
             print(f"NOOP {result.candidate}")
         else:
-            print(f"PUBLISHED {result.candidate} {result.notes_ref} {result.notes_tip}")
+            print(f"PUBLISHED {result.candidate} {result.notes_ref} {result.notes_tip or '-'}")
     else:
         detail = f": {result.detail}" if result.detail else ""
         print(f"{result.code}{detail}", file=sys.stderr)
@@ -316,6 +323,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--repo", type=Path, required=True, help="Git repository directory")
     p_ver.add_argument(
         "--candidate", type=str, required=True, help="Expected candidate commit SHA (40-hex)"
+    )
+    p_ver.add_argument(
+        "--base",
+        type=str,
+        default=None,
+        help="Require the statement's base commit to equal this SHA (40-hex)",
     )
     p_ver.add_argument(
         "--core-identity", type=Path, default=None, help="Path to Core identity JSON pin file"

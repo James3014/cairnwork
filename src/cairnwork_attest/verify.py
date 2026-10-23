@@ -101,7 +101,10 @@ def _parse_statement_payload(
 
 
 def _check_subject_and_commits(
-    statement: dict[str, Any], repo: Path, expected_candidate: str
+    statement: dict[str, Any],
+    repo: Path,
+    expected_candidate: str,
+    expected_base: str | None = None,
 ) -> tuple[str | None, str | None, VerifyResult | None]:
     subjects = statement.get("subject")
     if not isinstance(subjects, list) or len(subjects) != 1:
@@ -138,6 +141,16 @@ def _check_subject_and_commits(
             _fail(
                 "CANDIDATE_MISMATCH",
                 f"subject candidate {candidate!r} != expected_candidate {expected_candidate!r}",
+            ),
+        )
+
+    if expected_base is not None and base != expected_base:
+        return (
+            None,
+            None,
+            _fail(
+                "BASE_MISMATCH",
+                f"predicate base_commit {base!r} != expected_base {expected_base!r}",
             ),
         )
 
@@ -332,6 +345,7 @@ def verify_bundle(
     repo: Path,
     expected_candidate: str,
     core_identity_pin: Mapping[str, Any] | None = None,
+    expected_base: str | None = None,
 ) -> VerifyResult:
     """Verify an attestation bundle against local git objects and a trusted public key.
 
@@ -355,7 +369,9 @@ def verify_bundle(
     if statement is None:
         return _fail("STATEMENT_SHAPE")
 
-    candidate, base, err = _check_subject_and_commits(statement, repo, expected_candidate)
+    candidate, base, err = _check_subject_and_commits(
+        statement, repo, expected_candidate, expected_base
+    )
     if err is not None:
         return err
     if candidate is None or base is None:

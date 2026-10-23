@@ -170,6 +170,7 @@ return `ENVELOPE_SHAPE`. Only programmer errors (such as wrong argument types) m
   2. `STATEMENT_SHAPE`: Statement payload decodes as strict JSON with `_type == "https://in-toto.io/Statement/v1"`, `predicateType == "https://cairnwork.github.io/attestation/verified-change/v0.1"`, and an object `predicate`. Unknown fields inside the signed Statement may stay for forward compatibility.
   3. `SUBJECT_SHAPE`: Statement has exactly one subject entry with a valid 40-hex `gitCommit` digest, and `predicate.base_commit` is a 40-hex commit hash.
   4. `CANDIDATE_MISMATCH`: The Statement's subject `gitCommit` must equal `expected_candidate` (checked right after signature and shape checks). Verifying without pinning the candidate proves only that "some commit was verified".
+     - `BASE_MISMATCH` (part of step 4): Only when the caller passes `--base <sha>` (`expected_base`): `predicate.base_commit` must equal it. Checked right after `CANDIDATE_MISMATCH`, so only a signed, well-shaped statement reaches the comparison. Without `--base` this check is skipped and behaviour is unchanged.
   5. `COMMIT_NOT_FOUND`: Both candidate and base commits exist in the target git repository (`git cat-file -e <sha>^{commit}`).
   6. `REQUEST_HASH_MISMATCH`: `predicate.request_hash` matches the recomputed SHA-256 digest of canonical JSON `predicate.request` using the notary digest rule.
   7. `COMMIT_BINDING_MISMATCH`: `predicate.request.change_set.target_revision` and `source_revision` match `git-commit:<candidate>` and `git-commit:<base>`.
@@ -189,12 +190,12 @@ cairnwork-attest keygen --state <state-dir>
 cairnwork-attest statement --state <state-dir> --task-id <id> --attempt-id <id> --candidate <sha> --out bundle.json --sign
 
 # 3. Offline verification: verify the signed bundle using public key and git repo
-cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo> --candidate <sha> [--core-identity <json>]
+cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-repo> --candidate <sha> [--base <sha>] [--core-identity <json>]
 ```
 
 `--candidate <sha>` is required with no default. The caller must decide and pass the candidate commit explicitly (for example, `--candidate "$(git rev-parse HEAD)"`). The tool refuses to guess the candidate from HEAD or the local environment because an attacker-controlled checkout must never be trusted to choose the candidate commit under evaluation.
 
-Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
+Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. Optional `--base <40-hex>` requires the statement's `predicate.base_commit` to equal it; a different base fails with `BASE_MISMATCH` (exit 1, `ok: false` under `--json`), and a malformed value (not exactly 40 lowercase hex) is a usage error like a malformed `--candidate` (exit 2). Without `--base`, output and exit code are unchanged. The `base` field in `verify --json` is still the base claimed by the bundle. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
 
 `verify --json` also prints `test_source` (`"bundle"`, `"auto"`, `"none"`, or `null` when the bundle
 lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
@@ -213,7 +214,7 @@ cairnwork-attest publish \
   --notes-ref refs/notes/cairnwork
 ```
 
-The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used. The local notes ref is treated as a mirror of the remote: each attempt force-fetches it, so notes that exist only locally on that ref are discarded. `--remote` must be a configured remote name and `--notes-ref` must be under `refs/notes/`; anything else is rejected as `USAGE` before git runs.
+The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used. The local notes ref is treated as a mirror of the remote: each attempt force-fetches it, so notes that exist only locally on that ref are discarded. `--remote` must be a configured remote name and `--notes-ref` must be under `refs/notes/`; anything else is rejected as `USAGE` before git runs. `--json` prints one line with `ok`, `code`, `detail`, `candidate`, `notes_ref`, `remote`, `attempts`, `blob` and `notes_tip` (the notes ref commit after the push; `null` when the push succeeded but the local tip could not be read, shown as `-` in the plain-text `PUBLISHED` line). When a push fails and the local notes ref cannot be restored, the code is `LOCAL_REF_RESET_FAILED` and `detail` carries both the restore and the push error.
 
 ## Check Run (Phase 2, informational)
 
