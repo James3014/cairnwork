@@ -15,6 +15,10 @@ process it started outside its group is killed if it still carries the attempt
 marker, and one that still holds the output afterwards fails the run.
 With an account-pool dispatcher configured (agy_dispatch.py) the worker runs that
 instead of agy, prompt on stdin, same environment plus the pool's tuning variables.
+With ``agy_run_as_user`` set as well, the dispatcher runs agy as that worker account,
+and the attempt succeeds only if the dispatcher's worker receipts prove it ran as that
+account and was swept clean; a run left behind by a killed dispatcher is swept through
+the wrapper (agy_receipts.py).
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cairnwork.confined import ATTEMPT_ENV, copy_capped, sweep_marked
-from cairnwork.workers import agy_dispatch
+from cairnwork.workers import agy_dispatch, agy_receipts
 
 ENV_KEEP = (
     "HOME",
@@ -144,27 +148,68 @@ class AgyWorker:
             threading.Thread(target=_feed, args=(process, prompt), daemon=True).start()
         copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
         copier.start()
-        held = True
+        self._await(process, copier, reader, workdir.name, log, log_path)
+
+    def _await(self, process, copier, reader, attempt: str, log, log_path) -> None:
+        dispatch = self.dispatch
+        timed_out = None
         try:
             process.wait(timeout=self.timeout_seconds + 60)
         except subprocess.TimeoutExpired as exc:
+            timed_out = exc
             if dispatch is not None:
-                agy_dispatch.ask_to_stop(process)  # lets it release its lease
-            raise AgyWorkerError("agy timed out") from exc
+                agy_dispatch.ask_to_stop(process)  # lets it release its lease and sweep itself
         finally:
-            held = _stop(process, copier, workdir.name, reader)
+            held = _stop(process, copier, attempt, reader)
             if not held:  # else the copier still reads: leave both open rather than hang
                 process.stdout.close()
                 if process.stderr is not None:
                     process.stderr.close()
                 log.close()
+        completion = None
+        if dispatch is not None and dispatch.run_as_user is not None:
+            completion = _settle_worker_run(dispatch, reader, process, held, timed_out, log_path)
+        if timed_out is not None:
+            raise AgyWorkerError("agy timed out") from timed_out
         if held:
             raise AgyWorkerError("a process agy started outlived it and holds its output")
         if reader is not None:
             agy_dispatch.raise_if_exhausted(reader.status(), process.returncode, log_path)
+            agy_dispatch.raise_if_worker_refused(reader.status(), log_path)
         if process.returncode != 0:
             why = f"; {reader.describe()}" if reader is not None else ""
             raise AgyWorkerError(f"agy exited {process.returncode}{why}; log {log_path}")
+        if completion is not None:
+            raise agy_dispatch.AgyWorkerAccountFailed(f"{completion}; log {log_path}")
+
+
+def _settle_worker_run(dispatch, reader, process, held, timed_out, log_path) -> str | None:
+    """Judge a run under agy_run_as_user from the dispatcher's receipts and write its
+    record. However the dispatcher ended, every launched run whose receipts do not prove
+    a clean sweep and removal is swept through the wrapper first (a removed root after a
+    clean sweep receipt needs nothing). Raises for an attempt the receipts do not show
+    isolated and clean and for an unswept run; returns the
+    completion problem of an exit-0 run (raised after the exit-code checks, so a
+    dispatcher-reported failure keeps its own label)."""
+    known = not (held or reader.unknown or reader.dropped)
+    receipts = agy_receipts.parse(reader.lines(), dispatch.run_as_user, known=known)
+    code = process.returncode
+    killed = timed_out is not None or code < 0
+    unswept = agy_receipts.sweep_after_kill(dispatch, receipts, killed=killed)
+    found = agy_receipts.problems(receipts)
+    completion = agy_receipts.completion_problem(receipts) if code == 0 else None
+    ended = ["TIMED_OUT"] * (timed_out is not None) + ["HELD"] * held
+    extra = [completion] if completion else []
+    agy_receipts.write_record(log_path, receipts, unswept + ended + found + extra)
+    survivors = [u for u in unswept if u.startswith("WORKER_SWEEP_UNCLEAN")]
+    if survivors or (unswept and (ended or not found)):  # primary whenever a run may survive
+        raise AgyWorkerError(
+            f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; "
+            f"receipt problems: {found}; log {log_path}"
+        )
+    if found and not ended:
+        raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found + unswept)}; log {log_path}")
+    return completion
 
 
 def _feed(process, prompt: str) -> None:

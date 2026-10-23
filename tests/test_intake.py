@@ -330,6 +330,9 @@ def test_route_hands_the_dispatcher_to_the_worker(monkeypatch):
     )["dispatch"]
     assert (got.path, got.pool_wait_seconds, got.provider_stall_seconds) == ("/opt/pool/d", 1, 2)
     assert got.stream_no_progress_seconds == 3
+    assert got.run_as_user is None
+    got = run({"agy_dispatch": "/opt/pool/d", "agy_run_as_user": "_cairnwork_worker"})["dispatch"]
+    assert got.run_as_user == "_cairnwork_worker"
 
 
 def _with_origin(repo, tmp_path):

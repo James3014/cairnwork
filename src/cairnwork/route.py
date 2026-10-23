@@ -129,6 +129,7 @@ def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
         config["agy_dispatch_pool_wait_seconds"],
         config["agy_dispatch_provider_stall_seconds"],
         config["agy_dispatch_stream_no_progress_seconds"],
+        run_as_user=config["agy_run_as_user"],
     )
 
 
