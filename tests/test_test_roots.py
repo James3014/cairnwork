@@ -281,7 +281,8 @@ def test_two_case_variants_of_a_root_are_refused(pkg_project, tmp_path):
 
 
 def test_tests_with_teeth_checks_the_roots_before_any_base_run(pkg_project, tmp_path, monkeypatch):
-    import cairnwork.pipeline as pipeline
+    # tests_with_teeth and its run_verifiers/ensure_test_commit calls live in pipeline_judge now
+    import cairnwork.pipeline_judge as pipeline_judge
 
     git(pkg_project, "rm", "-rq", "pkg")
     base = _base_with(pkg_project, {"src/keep.py": "x = 1\n"}, {"pkg/tests": "../src"})
@@ -291,10 +292,10 @@ def test_tests_with_teeth_checks_the_roots_before_any_base_run(pkg_project, tmp_
     def boom(*args, **kwargs):
         raise AssertionError("the base was run")
 
-    monkeypatch.setattr(pipeline, "run_verifiers", boom)
-    monkeypatch.setattr(pipeline, "ensure_test_commit", boom)
+    monkeypatch.setattr(pipeline_judge, "run_verifiers", boom)
+    monkeypatch.setattr(pipeline_judge, "ensure_test_commit", boom)
     with pytest.raises(Rejected, match="TEST_ROOT_NOT_A_DIRECTORY"):
-        pipeline.tests_with_teeth(task, (), tmp_path, None, (None, None))
+        pipeline_judge.tests_with_teeth(task, (), tmp_path, None, (None, None))
 
 
 @pytest.mark.parametrize(
