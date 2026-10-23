@@ -200,11 +200,26 @@ Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces 
 lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
 not yet refuse `auto` bundles.
 
+## Publishing to a forge (Phase 2, step 1)
+
+Once a signed bundle exists, `cairnwork-attest publish` delivers it to the forge by attaching it as a git note on a dedicated notes ref and pushing that ref to the remote. Signing and publishing are separate steps by design: `publish` takes an already-signed bundle, never calls Core and never modifies the candidate commit.
+
+```shell
+cairnwork-attest publish \
+  --bundle attestation.bundle.json \
+  --repo . \
+  --candidate <sha> \
+  --remote origin \
+  --notes-ref refs/notes/cairnwork
+```
+
+The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used.
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred:
 - Sigstore signing and transparency log integration.
-- Forge reporting and PR status checks.
+- Forge reporting via Check Runs (the notes push is implemented by `cairnwork-attest publish`).
 - `hidden_test_commit`: Durably binding secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
