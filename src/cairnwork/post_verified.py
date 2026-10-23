@@ -23,6 +23,7 @@ from typing import Any
 
 LOG_NAME = "post-verified-hook.jsonl"
 TAIL_CHARS = 2000
+CLEANUP_SECONDS = 5  # after a timeout kill, for pipes a detached descendant still holds
 TOKEN_VAR = "CAIRNWORK_GITHUB_TOKEN"
 _PASSED = ("PATH", "HOME", "LANG", "LC_ALL", TOKEN_VAR)
 
@@ -96,18 +97,26 @@ def run_post_verified_hook(
 
 
 def alert(message: str) -> None:
-    """One stderr line; never raises (a closed or broken stderr must not reach the runner)."""
+    """One stderr line; never raises, and a broken stderr cannot change the exit code."""
     try:
         print(f"ALERT post_verified_hook {message}", file=sys.stderr, flush=True)
-    except Exception:  # noqa: BLE001, S110 - nowhere left to report to
-        pass
+    except Exception:  # noqa: BLE001 - nowhere left to report to
+        try:  # the unflushed line would fail again at exit (status 120): point fd 2 at devnull
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stderr.fileno())
+            os.close(devnull)
+        except Exception:  # noqa: BLE001, S110 - e.g. an in-memory stderr with no descriptor
+            pass
 
 
-def _run(argv: list[str], seconds: int, env: dict[str, str]) -> tuple[int, str, str]:
-    """Its own session, so a timeout kills whatever the hook started (git, gh) as well."""
+def _run(argv: list[str], seconds: int, env: dict[str, str]) -> tuple[int, bytes, bytes]:
+    """Its own session, so a timeout kills what the hook started; cleanup is bounded too.
+
+    Output stays bytes: _tail decodes it leniently, so no output can lose the record.
+    """
     with subprocess.Popen(
         argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env=env, start_new_session=True,
+        env=env, start_new_session=True,
     ) as proc:  # fmt: skip
         try:
             out, err = proc.communicate(timeout=seconds)
@@ -116,7 +125,10 @@ def _run(argv: list[str], seconds: int, env: dict[str, str]) -> tuple[int, str, 
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 proc.kill()
-            out, err = proc.communicate()
+            try:
+                out, err = proc.communicate(timeout=CLEANUP_SECONDS)
+            except subprocess.TimeoutExpired:  # a descendant in its own session holds the pipes
+                out = err = None
             raise subprocess.TimeoutExpired(argv, seconds, out, err) from None
         return proc.returncode, out, err
 

@@ -229,14 +229,27 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
 
 def _post_verified(intake: Intake, github: GitHub, clone: Path, status) -> None:
     """The opt-in hook, after the outcome is final: logged and alerted, never a verdict."""
+    try:
+        config = intake.config()
+    except Exception as exc:  # noqa: BLE001 - off means silent, so alert only if it names a hook
+        if _names_hook(intake.state / "config.json"):
+            alert(f"skipped: {type(exc).__name__}")
+        return
     try:  # status was validated by _open_pr
         run_post_verified_hook(
-            intake.state, intake.config(), task_id=str(status["task_id"]),
+            intake.state, config, task_id=str(status["task_id"]),
             attempt_id=str(status["attempt_id"]), candidate=str(status["candidate_commit"]),
             clone=clone, repo_slug=github.repo, gh=github.gh,
         )  # fmt: skip
     except Exception as exc:  # noqa: BLE001 - nothing here may change the settle result
         alert(f"skipped: {type(exc).__name__}")
+
+
+def _names_hook(path: Path) -> bool:
+    try:
+        return "post_verified_hook" in path.read_text(errors="replace")
+    except OSError:
+        return False
 
 
 def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -> str:

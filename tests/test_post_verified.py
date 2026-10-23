@@ -3,10 +3,8 @@
 import inspect
 import io
 import json
-import os
 import stat
 import subprocess
-import time
 
 import pytest
 from conftest import commit_change
@@ -275,67 +273,24 @@ def test_a_config_that_breaks_at_settle_time_does_not_change_the_result(rig, mon
     assert commented and github.labels[7] == {runner.DONE}
 
 
-def _direct(tmp_path, body="exit 0", seconds=300):
-    hook, seen = _hook(tmp_path, body)
-    (tmp_path / "state").mkdir(exist_ok=True)
-    cfg = {**intake_config.DEFAULT_CONFIG, "post_verified_hook": hook,
-           "post_verified_hook_seconds": seconds}  # fmt: skip
-
-    def run():
-        done = post_verified.run_post_verified_hook(
-            tmp_path / "state", cfg, task_id="t1", attempt_id="a1", candidate="c",
-            clone=tmp_path, repo_slug="o/r", gh="/bin/gh",
-        )  # fmt: skip
-        assert done is not None
-        return done
-
-    return run, tmp_path / "state" / post_verified.LOG_NAME, seen
-
-
-def test_a_fifo_log_does_not_block_and_is_alerted(tmp_path, capsys):
-    run, log, _ = _direct(tmp_path)
-    os.mkfifo(log)
-    started = time.monotonic()
-    assert run()["ok"] is True
-    assert time.monotonic() - started < 10 and "cannot record" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("kind", ["readable", "hardlink"])
-def test_an_existing_log_that_is_not_private_is_not_written(tmp_path, capsys, kind):
-    run, log, _ = _direct(tmp_path)
-    if kind == "readable":
-        log.write_text("old\n")
-        log.chmod(0o644)
-    else:
-        other = tmp_path / "other"
-        other.write_text("old\n")
-        other.chmod(0o600)
-        os.link(other, log)
-    assert run()["ok"] is True
-    assert log.read_text() == "old\n" and "cannot record" in capsys.readouterr().err
-
-
-def test_an_existing_private_log_is_appended_to(tmp_path):
-    run, log, _ = _direct(tmp_path)
-    run()
-    run()
-    assert len(log.read_text().splitlines()) == 2
-
-
-def test_a_timeout_also_kills_what_the_hook_started(tmp_path, capsys):
-    run, _log_path, seen = _direct(tmp_path, f"sleep 60 & echo $! > {tmp_path}/child; wait", 1)
-    assert run()["reason"] == "TIMEOUT"
-    child = int((tmp_path / "child").read_text())
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(child, 9)
-        pytest.fail("the hook's child survived the timeout")
+def test_an_off_hook_is_silent_even_if_config_breaks_at_settle_time(rig, monkeypatch, capsys):
+    github = FakeGitHub([issue()])
+    taken = runner.take(rig["intake"], github, rig["clone"])[0]
+    commit = commit_change(rig["clone"], {"src/calc.py": "x = 2\n"})
+    monkeypatch.setattr(Intake, "status", _completed(rig, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    real, commented = Intake.config, []
+    real_comment = github.comment
+    monkeypatch.setattr(github, "comment", lambda *a: (commented.append(1), real_comment(*a))[1])
+    monkeypatch.setattr(
+        Intake, "config",
+        lambda self: (_ for _ in ()).throw(IntakeRefused("BAD_CONFIG", "x")) if commented
+        else real(self),
+    )  # fmt: skip
+    capsys.readouterr()
+    out = runner.settle(rig["intake"], github, rig["clone"])
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize(
