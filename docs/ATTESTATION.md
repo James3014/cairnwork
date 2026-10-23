@@ -286,7 +286,8 @@ Checks run in this order and the first failure is reported:
 9. Core verdict (`RESPONSE_NOT_VERIFIED`, `CORE_IDENTITY_MISMATCH`), as for v0.1
 
 On success `verify --json` adds `assurance`, what the receiver checked itself (`null` for v0.1):
-`mode` (`full`/`confidential`), `head`, `non_test_paths` (`verified` or
+`mode` (`full`/`confidential`), `test_source` (`policy_pinned` with `--policy`, otherwise
+`signer_choice`: the test commit the signer chose, which the receiver should read itself), `head`, `non_test_paths` (`verified` or
 `verified_against_core_manifest`), `test_contents` (`verified` or `not_verified`), `overlay`
 (`rebuilt` or `not_verified`) and `verifier_runs` (always `signer_claim`). Without `--json` the
 same object follows the `OK` line. A verify-action that predates v0.2 refuses these receipts with

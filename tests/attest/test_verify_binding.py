@@ -54,6 +54,7 @@ def test_full_mode_rebuilds_the_executed_tree_without_the_scratch_commit(world):
     assert result.ok and result.assurance is not None and result.statement is not None, result
     assert result.assurance["mode"] == "full"
     assert result.assurance["test_contents"] == "verified"
+    assert result.assurance["test_source"] == "signer_choice"  # no policy: not pinned
     stmt = result.statement
     assert stmt["subject"][0]["digest"]["gitCommit"] == world["head"]
     assert stmt["predicate"]["hidden_test_commit"] == world["tests"]
@@ -68,6 +69,7 @@ def test_confidential_mode_needs_a_policy_and_says_what_it_did_not_check(world):
     assert result.assurance["mode"] == "confidential"
     assert result.assurance["test_contents"] == "not_verified"
     assert result.assurance["overlay"] == "not_verified"
+    assert result.assurance["test_source"] == "policy_pinned"
 
 
 def test_a_policy_is_also_checked_in_full_mode(world):

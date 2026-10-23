@@ -141,7 +141,12 @@ def verify_bound(
         err = _check_response_verified(ctx.predicate, pin)
         if err is not None:
             return err
-    return VerifyResult(ok=True, code="OK", statement=statement, assurance=_assurance(full))
+    return VerifyResult(
+        ok=True,
+        code="OK",
+        statement=statement,
+        assurance=_assurance(full, pinned=policy is not None),
+    )
 
 
 def _keyid_of(public_key_pem: Path) -> str:
@@ -333,10 +338,12 @@ def _head_tree(ctx: _Ctx) -> VerifyResult | None:
     return None
 
 
-def _assurance(full: bool) -> dict[str, str]:
-    """What this receiver checked itself; the verifier runs are always the signer's word."""
+def _assurance(full: bool, *, pinned: bool) -> dict[str, str]:
+    """What this receiver checked itself; the verifier runs are always the signer's word. Without
+    a policy the test source is whichever test commit the signer chose (``signer_choice``)."""
     return {
         "mode": "full" if full else "confidential",
+        "test_source": "policy_pinned" if pinned else "signer_choice",
         "head": "verified",
         "non_test_paths": "verified" if full else "verified_against_core_manifest",
         "test_contents": "verified" if full else "not_verified",
