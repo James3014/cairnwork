@@ -34,6 +34,17 @@ def publish_env(tmp_path: Path) -> tuple[Path, Path, str]:
     return make_publish_env(tmp_path)
 
 
+def _recorder():  # noqa: ANN202
+    """A runner that records every git call and runs it for real."""
+    calls: list[tuple[str, ...]] = []
+
+    def recording_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
+        calls.append(args)
+        return _git(repo, *args, input=input)
+
+    return calls, recording_run
+
+
 @pytest.mark.parametrize(
     "remote",
     ["--upload-pack=touch PWNED", "-o", "origin;id", "ext::sh -c id", ""],
@@ -43,11 +54,7 @@ def test_unsafe_remote_rejected(
 ) -> None:
     src, bare, candidate = publish_env
     bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
-    calls = []
-
-    def recording_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
-        calls.append(args)
-        return _git(repo, *args, input=input)
+    calls, recording_run = _recorder()
 
     r = publish_bundle(bundle_file, src, candidate, remote=remote, run=recording_run)
     assert (r.ok, r.code) == (False, "USAGE")
@@ -75,11 +82,7 @@ def test_max_attempts_below_one_is_usage(
 ) -> None:
     src, _bare, candidate = publish_env
     bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
-    calls = []
-
-    def recording_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
-        calls.append(args)
-        return _git(repo, *args, input=input)
+    calls, recording_run = _recorder()
 
     r = publish_bundle(bundle_file, src, candidate, max_attempts=0, run=recording_run)
     assert r.code == "USAGE"
@@ -113,7 +116,7 @@ def test_failed_push_reports_local_ref_reset_failure(
     r = publish_bundle(bundle_file, src, candidate, run=failing_run)
 
     assert (r.ok, r.code, r.attempts) == (False, "LOCAL_REF_RESET_FAILED", 1)
-    assert r.detail == "local ref locked"
+    assert r.detail == "local ref locked; push: rejected (fetch first)"
     expected = (
         ("update-ref", _NOTES_REF, old_tip) if existing_ref else ("update-ref", "-d", _NOTES_REF)
     )
@@ -122,14 +125,14 @@ def test_failed_push_reports_local_ref_reset_failure(
     assert _remote_tip(bare) == old_tip
 
 
-@pytest.mark.parametrize("via_cli", [False, True])
+@pytest.mark.parametrize("via_cli", [False, True, "text"])
 def test_successful_push_with_unreadable_notes_tip(
     tmp_path: Path,
     publish_env: tuple[Path, Path, str],
     key: Ed25519PrivateKey,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    via_cli: bool,
+    via_cli: bool | str,
 ) -> None:
     src, bare, candidate = publish_env
     calls = []
@@ -143,7 +146,13 @@ def test_successful_push_with_unreadable_notes_tip(
 
     bundle_bytes = _make_bundle_bytes(candidate, key)
     bundle_file = _write_bundle(tmp_path, bundle_bytes)
-    if via_cli:
+    if via_cli == "text":
+        monkeypatch.setattr("cairnwork_attest.publish._git", failing_tip_run)
+        argv = ["publish", "--repo", str(src), "--candidate", candidate, "--bundle"]
+        assert main([*argv, str(bundle_file)]) == 0
+        out = capsys.readouterr().out.strip()
+        assert out == f"PUBLISHED {candidate} {_NOTES_REF} -"
+    elif via_cli:
         monkeypatch.setattr("cairnwork_attest.publish._git", failing_tip_run)
         rc = main(
             [
