@@ -198,7 +198,10 @@ def _try_push(
         except _GitFailure:
             # The push succeeded; the tip is optional result metadata.
             return None
-    _restore_ref(run, repo, notes_ref, old_tip)
+    try:
+        _restore_ref(run, repo, notes_ref, old_tip)
+    except _GitFailure as exc:  # keep why the push failed next to why the restore did
+        raise _GitFailure(exc.code, f"{exc.detail}; push: {proc.stderr.strip()}") from None
     if "rejected" in proc.stderr and any(m in proc.stderr for m in _RETRYABLE):
         return _RETRY
     raise _GitFailure("PUSH_FAILED", proc.stderr.strip())
