@@ -201,12 +201,14 @@ def _settle_worker_run(dispatch, reader, process, held, timed_out, log_path) -> 
     ended = ["TIMED_OUT"] * (timed_out is not None) + ["HELD"] * held
     extra = [completion] if completion else []
     agy_receipts.write_record(log_path, receipts, unswept + ended + found + extra)
+    survivors = [u for u in unswept if u.startswith("WORKER_SWEEP_UNCLEAN")]
+    if survivors or (unswept and (ended or not found)):  # primary whenever a run may survive
+        raise AgyWorkerError(
+            f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; "
+            f"receipt problems: {found}; log {log_path}"
+        )
     if found and not ended:
         raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found + unswept)}; log {log_path}")
-    if unswept:
-        raise AgyWorkerError(
-            f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; log {log_path}"
-        )
     return completion
 
 

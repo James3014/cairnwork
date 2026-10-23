@@ -225,3 +225,18 @@ def test_lost_lines_with_a_final_status_still_sweep_the_known_root(tmp_path, mon
         worker.run(workdir, TASK)
     assert json.loads(seen.read_text())[-2:] == ["--sweep", str(layout)]
     assert not layout.exists()
+
+
+def test_an_unswept_run_is_the_primary_reason_over_incomplete_receipts(
+    tmp_path, monkeypatch, layout
+):
+    _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP unclean 4242'); sys.exit(3)")
+    stderr = launch(str(layout)) + status("failed", failure_kind="AGY_PROVIDER_FAILED")
+    worker, workdir = _dying(tmp_path, stderr, "sys.exit(1)")
+    with pytest.raises(AgyWorkerError, match="^WORKER_SWEEP_UNCLEAN: .*WORKER_RECEIPT_INCOMPLETE"):
+        worker.run(workdir, TASK)
+    assert layout.exists()
+    problems = _record(workdir)["problems"]
+    assert problems[0].startswith("WORKER_SWEEP_UNCLEAN") and "WORKER_RECEIPT_INCOMPLETE" in str(
+        problems
+    )

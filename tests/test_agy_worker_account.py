@@ -116,10 +116,13 @@ def test_an_unclean_graceful_end_fails_closed_whatever_the_exit_code(
     monkeypatch.setattr(agy_dispatch, "sweep_worker_run", lambda *a: sudo.write_text("x"))
     stderr = launch(ROOT) + bad + status("completed" if exit_code == 0 else "failed")
     worker, workdir, _ = _replaying(tmp_path, stderr, exit_code)
-    with pytest.raises(AgyWorkerAccountFailed, match=f"^{code}:") as raised:
+    # a run root gone without a clean sweep receipt may have left a worker: that leads
+    swept = all(f'"{k}": {v}' in bad for k, v in (("result", '"clean"'), ("left", "[]")))
+    primary = code if swept and '"wrapper": "CLEAN"' in bad else "WORKER_SWEEP_UNCLEAN"
+    with pytest.raises((AgyWorkerError, AgyWorkerAccountFailed), match=f"^{primary}:") as raised:
         worker.run(workdir, TASK)
-    assert "attempt 1" in str(raised.value)
-    assert not sudo.exists()  # no post-hoc sweep after a graceful end (rc 64 otherwise)
+    assert "attempt 1" in str(raised.value) and code in str(raised.value)
+    assert not sudo.exists()  # the root is gone: nothing to sweep (the wrapper would say rc 64)
     assert _record(workdir)["attempts"][0]["run_root"] == ROOT
 
 
@@ -146,7 +149,7 @@ def test_a_refused_worker_account_fails_the_attempt_with_its_own_code(tmp_path, 
     assert "not run as the owner" in str(raised.value)
 
 
-def test_a_launch_that_never_started_is_reported_as_the_account_failure(tmp_path):
+def test_a_launch_that_never_started_still_names_the_account_failure(tmp_path):
     failure = "AGY_WORKER_LAUNCH_FAILED:wrapper_did_not_start"
     stderr = (
         launch(ROOT)
@@ -155,7 +158,8 @@ def test_a_launch_that_never_started_is_reported_as_the_account_failure(tmp_path
         + status("failed", failure_kind=failure)
     )
     worker, workdir, _ = _replaying(tmp_path, stderr, 1)
-    with pytest.raises(AgyWorkerAccountFailed, match=f"^WORKER_ACCOUNT_FAILED: {failure}"):
+    # not_started is no clean sweep receipt: the unswept run leads, the account failure follows
+    with pytest.raises(AgyWorkerError, match=f"^WORKER_SWEEP_UNCLEAN: .*{failure}"):
         worker.run(workdir, TASK)
     assert _record(workdir)["attempts"][0]["worker_failure"] == failure
 
