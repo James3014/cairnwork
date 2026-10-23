@@ -184,6 +184,7 @@ def _escape_fixture(tmp_path):
 
 def test_launchctl_row_needs_denied_job_that_never_ran_and_a_working_control(tmp_path, monkeypatch):
     fx, rows = _escape_fixture(tmp_path)
+    monkeypatch.setattr(escapes, "JOB_SETTLE_SECONDS", 0)
     monkeypatch.setattr(
         escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
     )

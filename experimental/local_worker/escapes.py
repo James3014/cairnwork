@@ -18,6 +18,7 @@ from experimental.local_worker.tools import WorkerTools, direct_argv, sudo_argv
 if TYPE_CHECKING:
     from experimental.local_worker.canary import Fixture
 
+JOB_SETTLE_SECONDS = 3.0
 OWNER_SUFFIX = "-owner"  # marker of the Owner's positive-control job
 VICTIM_TEST = "test_victim.py"
 VICTIM_SOURCE = (
@@ -132,7 +133,10 @@ def launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
             continue
         control = _owner_launchctl_control(fx, name)
         marker = fx.escape_markers[name]
-        _remove_job(f"com.cairnwork.canary.{fx.run_root.name[:8]}.{name}")  # nothing runs later
+        # Remove the attempt's job (the Owner's domain only: a job in the worker's own domain cannot
+        # be reached from here), then give a delayed job time to show itself before the check.
+        _remove_job(f"com.cairnwork.canary.{fx.run_root.name[:8]}.{name}")
+        time.sleep(JOB_SETTLE_SECONDS)
         ran = os.path.lexists(marker)
         unlink_quiet(marker)
         r = dict(r, owner_control=control, job_ran_in_sandbox_attempt=ran)
