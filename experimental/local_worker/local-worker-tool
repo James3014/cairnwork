@@ -7,6 +7,7 @@
 # names that path. experimental/local_worker/tools.py runs it with `sudo -n -u _cairnwork_worker`.
 #
 # Five actions, nothing else (exit 64 = refused before anything ran):
+#   [--start-nonce <hex>] before the action prints LOCAL_WORKER_STARTED <hex> on stderr first.
 #   local-worker-tool list   <run_root> <relpath>        list a directory of the checkout
 #   local-worker-tool read   <run_root> <relpath>        print a regular file of the checkout
 #   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
@@ -130,6 +131,9 @@ profile() {
   printf '(deny signal)\n(allow signal (target same-sandbox))\n'
 }
 
+# The sandboxed command gets stdout AND stderr on the Owner's stdout (2>&1 below). Our own stderr,
+# where the start marker went, is never handed to it: test code that lseeks/truncates fd 2 can then
+# only damage its own output, not the Owner's proof that this wrapper started.
 sandboxed() {
   cd -- "$CHECKOUT"
   exec /usr/bin/env -i \
@@ -139,7 +143,7 @@ sandboxed() {
     LANG=en_US.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     "$TAG_ENV=${RUN_ROOT##*/}" \
-    "$SANDBOX_EXEC" -p "$(profile)" "$@"
+    "$SANDBOX_EXEC" -p "$(profile)" "$@" 2>&1
 }
 
 # Worker-owned pids of this run: the run tag in their environment, or a cwd inside the run root.
@@ -159,6 +163,18 @@ sweep_pids() {
     esac
   done
 }
+
+# Optional first option: --start-nonce <hex>. The Owner's tool layer passes a fresh nonce per call
+# and treats "LOCAL_WORKER_STARTED <nonce>" as the first stderr line as the only proof that this
+# wrapper started (sudo failures, exit 126/127 and model-written output cannot fake it).
+if [ "${1:-}" = --start-nonce ]; then
+  [ "$#" -ge 2 ] || refuse "--start-nonce needs a value"
+  case "$2" in
+    "" | *[!0-9a-f]*) refuse "start nonce must be lowercase hex" ;;
+  esac
+  printf 'LOCAL_WORKER_STARTED %s\n' "$2" >&2
+  shift 2
+fi
 
 [ "$#" -ge 2 ] || refuse "usage: local-worker-tool <list|read|write|pytest|sweep> <run_root> ..."
 ACTION=$1

@@ -1,13 +1,22 @@
 """Isolation canary for the local worker arm (#88; knowledge addendum 2026-10-23 §0a item 4, §4).
 
-Three checks, each through the real tool layer (tools.WorkerTools), never by the Owner directly:
+Four checks, each through the real tool layer (tools.WorkerTools), never by the Owner directly:
   (a) reads of a private test bundle, the harness, the Owner's home and another attempt are denied;
   (b) writes outside the checkout (and into .git) are denied;
-  (c) outbound network (internet, loopback Splash/Ollama ports, DNS) is denied.
+  (c) outbound network (internet, loopback Splash/Ollama ports, DNS) is denied;
+  (d) no way out through launchd (a launched job must never run: marker file, plus the Owner
+      running the same job outside the sandbox as positive control) and no signal to a process
+      outside the sandbox: the Owner's process (uid layer in worker mode) and a worker-uid
+      process in another sandbox (Seatbelt alone), plus a same-sandbox child as control.
 Each is probed twice: as wrapper arguments (path checks must refuse) and as code the worker runs
 through run_tests (Seatbelt and, in worker mode, the uid must deny). Positive controls make sure the
 tools still work. The JSON report and its sha256 go into the addendum's §10 freeze table; only a
 ``worker`` mode report with overall PASS counts there (``direct`` mode exercises Seatbelt only).
+A signal to an unsandboxed process of the worker uid cannot be set up without a second sudoers
+rule: that case (Owner process, same uid) runs in the ``direct`` report, so the §10 table also
+cites a ``direct`` report whose ``wrapper_sha256`` equals the installed wrapper's. Likewise the
+worker account may have no launchd domain, so a failed launchctl in worker mode cannot tell that
+from a Seatbelt denial: the direct report shows the cause, the worker report that no job ran.
 
     python -m experimental.local_worker.canary --mode worker --out <dir>
 """
@@ -28,7 +37,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from experimental.local_worker import probe
+from experimental.local_worker import escapes, probe
 from experimental.local_worker.tools import (
     INSTALLED_WRAPPER,
     REFUSED_EXIT,
@@ -54,16 +63,27 @@ class Fixture:
     secret: str
     read_targets: dict[str, str]
     write_targets: dict[str, str]
+    escape_markers: dict[str, str]
 
     def remove(self) -> None:
         for path in (self.run_root, self.sibling, self.private):
             shutil.rmtree(path, ignore_errors=True)
+        for marker in self.escape_markers.values():
+            for path in (marker, marker + escapes.OWNER_SUFFIX):
+                escapes.unlink_quiet(path)
 
 
 def _mkdir(path: Path, mode: int) -> Path:
     path.mkdir(mode=mode)
     os.chmod(path, mode)
     return path
+
+
+def _make_venv(venv: Path, python: str) -> None:
+    subprocess.run(["uv", "venv", "-q", "--python", python, str(venv)], check=True)  # noqa: S607
+    subprocess.run(  # noqa: S607
+        ["uv", "pip", "install", "-q", "--python", str(venv / "bin/python"), "pytest"], check=True
+    )
 
 
 def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: list[str]) -> Fixture:
@@ -79,6 +99,9 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
     _mkdir(_mkdir(checkout / ".git", 0o770) / "hooks", 0o770)
     sibling = _mkdir(runs / secrets.token_hex(16), 0o750)
     _mkdir(sibling / "checkout", 0o770)
+    _mkdir(sibling / "tmp", 0o770)
+    (sibling / "checkout" / escapes.VICTIM_TEST).write_text(escapes.VICTIM_SOURCE)
+    os.chmod(sibling / "checkout" / escapes.VICTIM_TEST, 0o660)
     (sibling / "checkout" / "secret.txt").write_text(secret + "\n")
     os.chmod(sibling / "checkout" / "secret.txt", 0o660)
     private_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -88,11 +111,8 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
     (links / "link_private").symlink_to(private / "test_hidden.py")
     (links / "link_dir").symlink_to(sibling / "checkout")
     (links / "link_git").symlink_to("../.git")
-    venv = run_root / "venv"
-    subprocess.run(["uv", "venv", "-q", "--python", python, str(venv)], check=True)  # noqa: S607
-    subprocess.run(  # noqa: S607
-        ["uv", "pip", "install", "-q", "--python", str(venv / "bin/python"), "pytest"], check=True
-    )
+    _make_venv(run_root / "venv", python)
+    _make_venv(sibling / "venv", python)  # the victim is a pytest run of the sibling attempt
     tag = run_root.name[:8]
     read_targets = {
         "private_bundle": str(private / "test_hidden.py"),
@@ -112,7 +132,10 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
         "checkout_git_hook_upper": str(checkout / ".GIT" / "hooks" / "pre-push"),
         "checkout_git_config_via_link": str(links / "link_git" / "config"),
     }
-    return Fixture(run_root, sibling, private, secret, read_targets, write_targets)
+    escape_markers = {
+        name: f"/private/tmp/cw-canary-esc-{name}-{tag}" for name in probe.LAUNCHCTL_TARGETS
+    }
+    return Fixture(run_root, sibling, private, secret, read_targets, write_targets, escape_markers)
 
 
 def _wrapper_probes(tools: WorkerTools, fx: Fixture) -> dict[str, list[dict]]:
@@ -160,16 +183,24 @@ def _positive_controls(tools: WorkerTools) -> list[dict]:
     ]
 
 
-def _code_probes(tools: WorkerTools, fx: Fixture) -> tuple[list[dict], dict, dict]:
-    # A process outside the sandbox the probe must not be able to signal (killed afterwards).
-    victim = subprocess.Popen(["/bin/sleep", "300"])  # noqa: S607
+def _code_probes(
+    tools: WorkerTools, fx: Fixture, env: dict | None = None
+) -> tuple[list[dict], dict, dict]:
+    owner_victim = subprocess.Popen(["/bin/sleep", "300"])  # noqa: S607
+    sibling_proc = None  # the second victim runs as the worker in another sandbox
     try:
-        src = probe.source(fx.read_targets, fx.write_targets, fx.run_root.name[:8], victim.pid)
+        sibling_proc, sibling_pid = escapes.start_sibling_victim(tools, fx, env)
+        victims = {"signal_outside_sandbox": owner_victim.pid, "signal_other_sandbox": sibling_pid}
+        src = probe.source(
+            fx.read_targets, fx.write_targets, fx.run_root.name[:8], victims, fx.escape_markers
+        )
         tools.write_file("test_canary_probe.py", src)
         call = tools.run_tests(["-q", "-s", "test_canary_probe.py"])
     finally:
-        victim.kill()
-        victim.wait()
+        owner_victim.kill()
+        owner_victim.wait()
+        if sibling_proc:
+            escapes.stop_sibling_victim(tools, fx, sibling_proc)
     rows = [
         json.loads(line[len(probe.MARK) :])
         for line in call.output.splitlines()
@@ -230,13 +261,14 @@ def _check(rows: list[dict]) -> dict:
     return {"pass": bool(rows) and all(r["pass"] for r in rows), "probes": rows}
 
 
-def run_canary(tools: WorkerTools, fx: Fixture) -> dict:
+def run_canary(tools: WorkerTools, fx: Fixture, env: dict | None = None) -> dict:
     wrapper = _wrapper_probes(tools, fx)
     positive = _positive_controls(tools)
-    code_rows, identity, run = _code_probes(tools, fx)
+    code_rows, identity, run = _code_probes(tools, fx, env)
     left = _leftovers(fx)
     for path in left:  # a write that got through: record it, then remove it
         _remove_planted(path)
+    code_rows = escapes.signal_layers(escapes.launchctl_rows(code_rows, fx))
     code_rows = _dns_needs_owner(code_rows)
     code_rows += _complete(code_rows, "read", fx.read_targets)
     code_rows += _complete(code_rows, "write", fx.write_targets)
@@ -248,14 +280,14 @@ def run_canary(tools: WorkerTools, fx: Fixture) -> dict:
         {"probe": "no write target exists afterwards", "pass": not left, "leftovers": left}
     )
     nets = [r for r in code_rows if r["kind"] == "net"]
-    escapes = [r for r in code_rows if r["kind"] == "escape"]
+    escape_rows = [r for r in code_rows if r["kind"] == "escape"]
     positive.append(run)
     leak = {"probe": "no secret in any tool output", "pass": not run["secret_leaked"]}
     checks = {
         "a_read_denied": _check(reads + [leak]),
         "b_write_denied": _check(writes),
         "c_network_denied": _check(nets),
-        "d_launchd_escape_denied": _check(escapes),
+        "d_launchd_escape_denied": _check(escape_rows),
         "positive_controls": _check(positive),
     }
     worker = tools.mode == "worker"
@@ -336,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         timeout_seconds=120,
     )
     try:
-        result = run_canary(tools, fx)
+        result = run_canary(tools, fx, env)
     finally:
         fx.remove()
     report = {

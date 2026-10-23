@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from experimental.local_worker import canary
+from experimental.local_worker import canary, escapes
 
 WRAPPER = Path(canary.__file__).with_name("local-worker-tool")
 TAG = "0123456789abcdef0123456789abcdef"
@@ -149,6 +149,15 @@ def test_canary_direct_mode_denies_reads_writes_and_network(tmp_path):
     assert rc == 0 and report["overall"] == "SEATBELT_ONLY_PASS", failed
     for name in ("a_read_denied", "b_write_denied", "c_network_denied", "positive_controls"):
         assert report["checks"][name]["pass"], name
+    escapes = {p["probe"]: p for p in report["checks"]["d_launchd_escape_denied"]["probes"]}
+    assert report["checks"]["d_launchd_escape_denied"]["pass"], escapes
+    for name in ("launchctl_submit", "launchctl_bootstrap_gui_domain"):
+        row = escapes[f"code escape {name}"]
+        assert row["result"] == "DENIED" and row["job_ran_in_sandbox_attempt"] is False
+        assert row["owner_control"]["marker_seen"] is True  # the same job runs outside the sandbox
+    assert escapes["code escape signal_other_sandbox"]["result"] == "DENIED"
+    assert escapes["code escape signal_outside_sandbox"]["result"] == "DENIED"
+    assert escapes["code escape signal_same_sandbox_control"]["result"] == "ALLOWED"
     digest = report_path.with_suffix(".json.sha256").read_text().split()[0]
     import hashlib
 
@@ -160,3 +169,76 @@ def test_wrapper_refuses_a_run_root_without_tmp(runs):
     (runs / TAG / "tmp").rmdir()
     proc = run(runs, "read", str(runs / TAG), "a.txt")
     assert proc.returncode == 64 and b"tmp" in proc.stderr
+
+
+def _escape_fixture(tmp_path):
+    names = canary.probe.LAUNCHCTL_TARGETS
+    markers = {n: str(tmp_path / f"marker-{n}") for n in names}
+    fx = canary.Fixture(tmp_path, tmp_path, tmp_path, "s", {}, {}, markers)
+    rows = [
+        {"kind": "escape", "probe": f"code escape {n}", "result": "DENIED", "pass": True}
+        for n in names
+    ]
+    return fx, rows
+
+
+def test_launchctl_row_needs_denied_job_that_never_ran_and_a_working_control(tmp_path, monkeypatch):
+    fx, rows = _escape_fixture(tmp_path)
+    monkeypatch.setattr(escapes, "JOB_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(escapes, "_remove_job", lambda label: None)  # no launchctl on Linux CI
+    monkeypatch.setattr(
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+    )
+    assert all(r["pass"] for r in escapes.launchctl_rows(rows, fx))
+    # The control job did not run for the Owner either: the denial proves nothing.
+    monkeypatch.setattr(
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 5, "marker_seen": False}
+    )
+    got = escapes.launchctl_rows(rows, fx)
+    assert {r["result"] for r in got} == {"INCONCLUSIVE_OWNER_CONTROL_FAILED"}
+    assert not any(r["pass"] for r in got)
+    # launchctl failed but the job ran anyway: an escape, whatever the exit code said.
+    monkeypatch.setattr(
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+    )
+    for marker in fx.escape_markers.values():
+        Path(marker).write_text("ran")
+    got = escapes.launchctl_rows(rows, fx)
+    assert {r["result"] for r in got} == {"ESCAPED_JOB_RAN"} and not any(r["pass"] for r in got)
+    assert not any(Path(m).exists() for m in fx.escape_markers.values())
+
+
+def test_probe_source_compiles_and_signal_rows_never_use_pid_zero():
+    victims = {"signal_outside_sandbox": 4242, "signal_other_sandbox": 0}
+    src = canary.probe.source({}, {}, "ab", victims, {"launchctl_submit": "/m"})
+    compile(src, "probe", "exec")
+    assert "pid < 2" in src and "def launchctl_job" in src
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("tamper", ["os.lseek(2, 0, 0); os.ftruncate(2, 0)", "os.ftruncate(1, 0)"])
+def test_test_code_cannot_erase_the_start_marker(runs, tmp_path, tamper):
+    """Code run by pytest that rewinds/truncates fd 2 (or 1) must not make the call look like a
+    wrapper that never started: the sandboxed child does not hold the marker's file."""
+    from experimental.local_worker.tools import WorkerTools, subprocess_invoker
+
+    base = os.path.realpath(getattr(sys, "_base_executable", sys.executable))
+    py = runs / TAG / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f'#!/bin/sh\nexec {base} -c "import os; {tamper}; print(1)"\n')
+    py.chmod(0o755)
+    env = dict(
+        os.environ,
+        CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
+        CAIRNWORK_LOCAL_WORKER_PYROOT=sys.base_prefix,
+    )
+    tools = WorkerTools(
+        runs / TAG,
+        tmp_path / "calls.jsonl",
+        mode="direct",
+        wrapper=WRAPPER,
+        invoker=subprocess_invoker(env),
+        timeout_seconds=60,
+    )
+    call = tools.run_tests(["-q"])  # raises WorkerIsolationError if the marker was lost
+    assert call.exit_code == 0

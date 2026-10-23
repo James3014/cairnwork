@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,8 @@ WORKER_USER = "_cairnwork_worker"
 INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/local-bin/local-worker-tool")
 SUDO = "/usr/bin/sudo"
 REFUSED_EXIT = 64
+TERM_GRACE_SECONDS = 5.0  # after SIGTERM, and again after SIGKILL, before giving up on a wait
+START_MARKER = "LOCAL_WORKER_STARTED"  # first line the wrapper prints on stderr: "<marker> <nonce>"
 DEFAULT_MAX_OUTPUT_BYTES = 20_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
 CAPTURE_LIMIT = 8 * 1024 * 1024  # per stream; output goes to a temp file, never unbounded memory
@@ -41,13 +44,22 @@ class WorkerIsolationError(RuntimeError):
     """sudo could not start the wrapper as the worker: fail closed, never fall back to the Owner."""
 
 
-def sudo_argv(wrapper: Path, action: str, run_root: str, args: Sequence[str]) -> list[str]:
-    return [SUDO, "-n", "-u", WORKER_USER, str(wrapper), action, run_root, *args]
+def _nonce_args(nonce: str | None) -> list[str]:
+    return ["--start-nonce", nonce] if nonce else []
 
 
-def direct_argv(wrapper: Path, action: str, run_root: str, args: Sequence[str]) -> list[str]:
+def sudo_argv(
+    wrapper: Path, action: str, run_root: str, args: Sequence[str], nonce: str | None = None
+) -> list[str]:
+    head = [SUDO, "-n", "-u", WORKER_USER, str(wrapper)]
+    return [*head, *_nonce_args(nonce), action, run_root, *args]
+
+
+def direct_argv(
+    wrapper: Path, action: str, run_root: str, args: Sequence[str], nonce: str | None = None
+) -> list[str]:
     """Owner runs the wrapper itself: Seatbelt only, no uid layer (tests, pre-install canary)."""
-    return ["/bin/sh", str(wrapper), action, run_root, *args]
+    return ["/bin/sh", str(wrapper), *_nonce_args(nonce), action, run_root, *args]
 
 
 def _captured(fh) -> bytes:
@@ -86,9 +98,13 @@ def subprocess_invoker(env: dict[str, str] | None = None) -> Invoker:
                 rc = None
                 _signal(proc, kill=False)
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=TERM_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
                     _signal(proc, kill=True)
+                    try:
+                        proc.wait(timeout=TERM_GRACE_SECONDS)  # reap it: no zombie per timeout
+                    except subprocess.TimeoutExpired:
+                        pass  # a refused signal; the sweep that follows kills the worker side
             return rc, _captured(out), _captured(err)
 
     return invoke
@@ -227,16 +243,31 @@ class WorkerTools:
         return self._call("sweep", "sweep", [], {})
 
     # -- plumbing ----------------------------------------------------------------------------
-    def _argv(self, action: str, args: Sequence[str]) -> list[str]:
+    def _argv(self, action: str, args: Sequence[str], nonce: str | None = None) -> list[str]:
         build = sudo_argv if self.mode == "worker" else direct_argv
-        return build(self.wrapper, action, self.run_root, args)
+        return build(self.wrapper, action, self.run_root, args, nonce)
 
     def _invoke(self, action: str, args: Sequence[str], stdin: bytes | None) -> Invoked:
-        rc, out, err = self.invoker(self._argv(action, args), stdin, self.timeout_seconds)
-        if rc in (126, 127) or (self.mode == "worker" and rc == 1 and b"sudo:" in err[:4096]):
-            # The wrapper did not start as the worker (no rule, missing binary): fail closed.
-            raise WorkerIsolationError(err[:4096].decode("utf-8", errors="replace").strip())
-        return rc, out, err
+        # The wrapper prints "<START_MARKER> <nonce>" as the first thing on stderr. Whether it
+        # started is decided by that line alone, never by the exit code or by text such as
+        # "sudo:" in the output: a test the model wrote may exit 126/127 or print anything.
+        nonce = secrets.token_hex(8)
+        argv = self._argv(action, args, nonce)
+        rc, out, err = self.invoker(argv, stdin, self.timeout_seconds)
+        marker = f"{START_MARKER} {nonce}\n".encode()
+        if not err.startswith(marker):
+            # No rule, missing binary, refused sudo: the wrapper never ran. Fail closed.
+            detail = err[:4096].decode("utf-8", errors="replace").strip()
+            if action != "sweep":
+                self._sweep_quietly()  # a run that did start may have left processes behind
+            raise WorkerIsolationError(f"wrapper did not start (exit {rc}): {detail}")
+        return rc, out, err[len(marker) :]
+
+    def _sweep_quietly(self) -> None:
+        try:
+            self.sweep()
+        except WorkerIsolationError:
+            pass
 
     def _call(
         self,
