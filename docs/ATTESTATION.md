@@ -230,6 +230,12 @@ The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, 
 
 The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
 
+## Runner wiring (opt-in, default off)
+
+The Issue runner can call an executable after a task's PR is open: set the state `config.json` key `post_verified_hook` to an absolute path (and optionally `post_verified_hook_seconds`, default 300). Unset, nothing runs and the runner behaves exactly as before. The intended hook is `cairnwork-attest on-verified`, which signs the statement, publishes the note and posts the informational Check Run; it needs a signing key in the same state directory (`cairnwork-attest keygen --state <state>`).
+
+The hook runs only in the verified branch, after the PR, labels and comment are final, so it can never change the outcome. It gets the task, attempt, candidate, clone and `OWNER/NAME` as arguments, and only `PATH`, `HOME`, `LANG`, `LC_ALL`, `CAIRNWORK_GITHUB_TOKEN` (from the runner's own environment) and the git settings that let its notes push authenticate with the same `gh` credential helper as the runner's branch push. Every run is recorded in `<state>/post-verified-hook.jsonl` (token redacted); a failure, timeout or missing executable also prints one `ALERT post_verified_hook ...` line on stderr. The runner's exit code is unaffected.
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred:
