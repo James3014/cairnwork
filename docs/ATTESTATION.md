@@ -226,9 +226,9 @@ CAIRNWORK_GITHUB_TOKEN=... cairnwork-attest check-run \
   --public-key attestation.pub.pem
 ```
 
-The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, test source, key id and the offline verification result (with `--public-key` the signature is checked, reported as `VERIFIED, signature only`; add `--repo` to run the full `verify`; without a key the summary says the signature was not checked). Its conclusion is always `neutral`: it is informational and never the enforcing gate. Enforcement stays with `cairnwork/verify-action`, which verifies the published note itself.
+The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, test source, key id and the offline verification result (with `--public-key` the signature is checked, reported as `VERIFIED, signature only`; add `--repo` to run the full `verify`; `--repo` needs `--public-key`; without a key the title is marked `UNVERIFIED` and the summary says the signature was not checked). A missing or malformed key file fails before anything is posted (`KEY_UNREADABLE` / `KEY_MALFORMED`), so an operator mistake never reads as a forged bundle. Its conclusion is always `neutral`: it is informational and never the enforcing gate. Enforcement stays with `cairnwork/verify-action`, which verifies the published note itself.
 
-The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Values taken from the bundle are reduced to a conservative plain-text character set and capped at 200 characters before they enter the summary. Exit 0 means `CREATED`; usage, bundle, HTTP and network failures exit 2.
+The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
 
 ## Planned Follow-ups (Phase 2+)
 

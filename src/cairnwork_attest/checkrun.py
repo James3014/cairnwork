@@ -18,18 +18,21 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.bundle import BundleError, read_bundle
 from cairnwork_attest.dsse import verify_envelope
-from cairnwork_attest.keys import KeyFileError, load_public_key_pem
+from cairnwork_attest.keys import load_public_key_pem
 from cairnwork_attest.record import AttestError
-from cairnwork_attest.verify import verify_bundle
+from cairnwork_attest.verify import _parse_statement_payload, verify_bundle
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
+_KEYID = re.compile(r"^[0-9a-f]{64}$")
+_TEST_SOURCE = re.compile(r"^[a-z_]{1,32}$")
 _SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/@+=,-]")
+_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/+=,-]")
 _MAX_VALUE = 200
 _TIMEOUT_SECONDS = 30
 _API = "https://api.github.com"
@@ -77,24 +80,34 @@ def _facts(bundle_path: Path) -> dict[str, Any]:
     envelope = read_bundle(bundle_path)
     try:
         raw_payload = base64.b64decode(envelope["payload"], validate=True)
-        statement = json.loads(raw_payload)
+    except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise BundleError(f"payload is not base64: {exc}", code="STATEMENT_SHAPE") from exc
+    statement, err = _parse_statement_payload(raw_payload)
+    if err is not None or statement is None:
+        raise BundleError(err.detail if err else "statement malformed", code="STATEMENT_SHAPE")
+    try:
         candidate = statement["subject"][0]["digest"]["gitCommit"]
-        predicate = statement.get("predicate", {})
         keyid = envelope["signatures"][0]["keyid"]
-    except (KeyError, IndexError, TypeError, ValueError, AttributeError, binascii.Error) as exc:
+    except (KeyError, IndexError, TypeError) as exc:
         raise BundleError(f"statement shape: {exc}", code="STATEMENT_SHAPE") from exc
     if not isinstance(candidate, str) or not _OID.fullmatch(candidate):
         raise BundleError("bundle subject gitCommit is not 40-hex", code="STATEMENT_SHAPE")
-    if not isinstance(predicate, dict):
-        raise BundleError("statement predicate is not an object", code="STATEMENT_SHAPE")
+    predicate = statement["predicate"]
     return {
         "candidate": candidate,
-        "base": predicate.get("base_commit"),
-        "test_source": predicate.get("test_source"),
-        "keyid": keyid,
+        "base": _shown(predicate.get("base_commit"), _OID, "not present"),
+        "test_source": _shown(predicate.get("test_source"), _TEST_SOURCE, "unknown"),
+        "keyid": _shown(keyid, _KEYID, "not present"),
         "statement_sha256": hashlib.sha256(raw_payload).hexdigest(),
         "envelope": envelope,
     }
+
+
+def _shown(value: object, pattern: re.Pattern[str], missing: str) -> str:
+    """Show a bundle value only when it has the expected shape; never echo free text."""
+    if value is None:
+        return missing
+    return value if isinstance(value, str) and pattern.fullmatch(value) else "invalid"
 
 
 def _offline_result(facts: dict[str, Any], public_key: Path | None, repo: Path | None) -> str:
@@ -109,10 +122,7 @@ def _offline_result(facts: dict[str, Any], public_key: Path | None, repo: Path |
             expected_candidate=facts["candidate"],
         )
         return "VERIFIED" if result.ok else result.code
-    try:
-        key = load_public_key_pem(public_key.read_bytes())
-    except (KeyFileError, OSError):
-        return "SIGNATURE_INVALID"
+    key = load_public_key_pem(public_key.read_bytes())
     outcome = verify_envelope(facts["envelope"], key)
     return "VERIFIED, signature only" if outcome.ok else "SIGNATURE_INVALID"
 
@@ -121,9 +131,9 @@ def build_summary(facts: dict[str, Any], offline: str) -> str:
     """Render the markdown summary; every bundle-derived value is cleaned."""
     rows = [
         ("Candidate", facts["candidate"]),
-        ("Base", facts["base"] if facts["base"] is not None else "not present"),
+        ("Base", facts["base"]),
         ("Statement SHA-256", facts["statement_sha256"]),
-        ("Test source", facts["test_source"] if facts["test_source"] is not None else "unknown"),
+        ("Test source", facts["test_source"]),
         ("Key id", facts["keyid"]),
         ("Offline verification", offline),
     ]
@@ -137,18 +147,27 @@ def build_summary(facts: dict[str, Any], offline: str) -> str:
     return "\n".join(lines)
 
 
-def _http_error(status: int, body: bytes) -> CheckRunResult:
+def _http_error(status: int, body: bytes, token: str) -> CheckRunResult:
     message = ""
     try:
         parsed = json.loads(body)
         if isinstance(parsed, dict):
-            message = _clean(parsed.get("message", ""))
-    except ValueError:
+            raw = str(parsed.get("message", ""))
+            message = _clean(raw.replace(token, "[redacted]") if token else raw)
+    except (ValueError, RecursionError):
         pass
     return _fail("HTTP_ERROR", f"HTTP {status}: {message}".rstrip(": "))
 
 
-def _check_args(repo_slug: str, details_url: str | None, token: str | None) -> str | None:
+def _check_args(
+    repo_slug: str,
+    details_url: str | None,
+    token: str | None,
+    public_key: Path | None,
+    repo: Path | None,
+) -> str | None:
+    if repo is not None and public_key is None:
+        return "--repo needs --public-key (full offline verify)"
     if not token:
         return f"missing token (set {TOKEN_ENV})"
     if not _SLUG.fullmatch(repo_slug) or any(p in (".", "..") for p in repo_slug.split("/")):
@@ -177,17 +196,26 @@ def post_check_run(
     offline (full ``verify_bundle`` when ``repo`` is also given). The token is
     only placed in the Authorization header, never in any result.
     """
-    usage = _check_args(repo_slug, details_url, token)
+    usage = _check_args(repo_slug, details_url, token, public_key, repo)
     if usage is not None:
         return _fail("USAGE", usage)
     try:
         facts = _facts(Path(bundle_path))
+        if public_key is not None:
+            load_public_key_pem(
+                public_key.read_bytes()
+            )  # an operator key problem never reads as a forgery
     except AttestError as exc:
         return _fail(exc.code, _clean(exc.message))
+    except OSError as exc:
+        return _fail("KEY_UNREADABLE", _clean(exc.strerror or "cannot read public key"))
     candidate = facts["candidate"]
     facts["bundle"] = Path(bundle_path)
     offline = _offline_result(facts, public_key, repo)
-    output = {"title": "Cairnwork attestation (informational)", "summary": ""}
+    title = "Cairnwork attestation (informational)"
+    if public_key is None:
+        title = "Cairnwork attestation (informational, UNVERIFIED: signature not checked)"
+    output = {"title": title, "summary": ""}
     output["summary"] = build_summary(facts, offline)
     payload: dict[str, Any] = {
         "name": _clean(name),
@@ -208,10 +236,10 @@ def post_check_run(
     url = f"{_API}/repos/{repo_slug}/check-runs"
     try:
         status, resp = (http or _default_http)(url, "POST", headers, body)
-    except (OSError, urllib.error.URLError, TimeoutError):
+    except (OSError, urllib.error.URLError, TimeoutError, HTTPException):
         return _fail("NETWORK_ERROR", "request to GitHub failed", candidate)
     if status != 201:
-        failed = _http_error(status, resp)
+        failed = _http_error(status, resp, token or "")
         return _fail(failed.code, failed.detail or "", candidate)
     try:
         created = json.loads(resp)
@@ -257,7 +285,7 @@ def cmd_check_run(args: argparse.Namespace) -> int:
         }
         print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
     elif result.ok:
-        print(f"CREATED {result.candidate} {result.html_url}")
+        print(f"CREATED {result.candidate} {result.html_url or '-'}")
     else:
         detail = f": {result.detail}" if result.detail else ""
         print(f"{result.code}{detail}", file=sys.stderr)
