@@ -9,12 +9,14 @@ import pytest
 from conftest import commit_change, git
 from test_deferred_tests import make_test_commit
 
+import experimental.visible_tests.feedback as feedback
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
+from cairnwork.verifiers import run_verifiers
 from experimental.visible_tests import VisibleTestsWorker, visible_specs
-from experimental.visible_tests.feedback import HIDDEN, _set_aside_log, summarize
+from experimental.visible_tests.feedback import HIDDEN, NEEDS_ACCOUNT
 
 SECRET_LOG = "LOG-ONLY-7f3a91"  # appears in a failing test's assertion message, i.e. in the log
 CALC_BUG = "def add(a, b):\n    return a + b + 1\n\n\ndef sub(a, b):\n    return a - b\n"
@@ -76,7 +78,11 @@ def _visible_to_worker(workdir: Path, repo: Path, test_commit: str) -> dict:
                 capture_output=True, check=False,
             )  # fmt: skip
             has[str(where)] = probe.returncode == 0
-    return {"holding": holding, "logs": logs, "has_test_commit": has}
+    ref = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", f"refs/cairnwork/attempts/{workdir.name}"],
+        capture_output=True, check=True, text=True,
+    ).stdout  # fmt: skip
+    return {"holding": holding, "logs": logs, "has_test_commit": has, "ref": ref}
 
 
 def _contains(path: Path, needles) -> bool:
@@ -87,7 +93,11 @@ def _contains(path: Path, needles) -> bool:
     return any(n.encode() in data for n in needles)
 
 
-def _run(project, tmp_path, worker, verifiers, test_commit="", base=None):
+def _plain(inner):
+    return VisibleTestsWorker(inner, pass_fail_only=True)
+
+
+def _run(project, tmp_path, worker, verifiers, test_commit="", base=None, wrap=_plain):
     state = tmp_path / "state"
     state.mkdir(exist_ok=True)
     base = base or git(project, "rev-parse", "HEAD")
@@ -98,9 +108,38 @@ def _run(project, tmp_path, worker, verifiers, test_commit="", base=None):
         ledger=OwnershipLedger(state / "own.sqlite"),
         notary=Notary(state / "notary.sqlite"),
         journal=Journal(state / "journal.sqlite"),
-        worker=VisibleTestsWorker(worker),
+        worker=wrap(worker),
         run_root=(state / "runs").resolve(),
     )
+
+
+class FakeAccount:
+    """Stands in for a VerifierAccount on the account path: runs land in its run root (the real
+    run_verifiers, without sudo) and the wrapper must remove them through ``remove``."""
+
+    def __init__(self, root: Path, fail_remove=False):
+        self.run_root, self.removed, self.fail_remove = root, [], fail_remove
+        root.mkdir(parents=True)
+
+    def remove(self, path: Path) -> None:
+        self.removed.append(path.name)
+        if self.fail_remove:
+            raise OSError("remove failed")
+
+
+def _with_account(monkeypatch, account):
+    def run_as_account(repo, commit, specs, _root, run_id, **kw):
+        assert kw.pop("account") is account
+        return run_verifiers(repo, commit, specs, account.run_root, run_id, **kw)
+
+    monkeypatch.setattr(feedback, "run_verifiers", run_as_account)
+    return lambda inner: VisibleTestsWorker(inner, account=account)
+
+
+def test_without_an_account_the_wrapper_refuses_unless_pass_fail_only():
+    with pytest.raises(ValueError, match="VISIBLE_TESTS_NEEDS_ACCOUNT"):
+        VisibleTestsWorker(TurnWorker([CALC_FIX]))
+    assert NEEDS_ACCOUNT.startswith("VISIBLE_TESTS_NEEDS_ACCOUNT")
 
 
 @pytest.mark.sandbox
@@ -113,13 +152,29 @@ def test_a_failing_visible_test_gives_the_worker_a_second_turn_with_its_summary(
     result = _run(project, tmp_path, inner, verifiers)
     assert result.status == "COMPLETED", result.reason
     assert len(inner.instructions) == 2
-    feedback = inner.instructions[1]
-    assert "pytest-0: did not pass" in feedback and "pytest-1: passed" in feedback
-    assert "tests/test_sub.py::test_sub (failed)" in feedback
-    assert SECRET_LOG not in feedback  # the summary, never the log
-    assert HIDDEN not in feedback  # no deferred tests in this task
+    feedback_text = inner.instructions[1]
+    assert "pytest-0: did not pass\n" in feedback_text and "pytest-1: passed" in feedback_text
+    assert "test_sub" not in feedback_text  # pass_fail_only: no test-controlled text at all
+    assert SECRET_LOG not in feedback_text and HIDDEN not in feedback_text
     assert inner.saw[1]["logs"] == [] and inner.saw[1]["holding"] == []
-    assert list((tmp_path / "state" / "runs").glob("*-visible*")) == []
+    assert inner.saw[1]["ref"] == ""  # the probe's attempt ref is gone before the next turn
+    assert list((tmp_path / "state" / "runs").glob("*-vis*")) == []
+
+
+@pytest.mark.sandbox
+def test_with_an_account_failing_test_names_are_shown_and_its_run_root_is_swept(
+    project, tmp_path, monkeypatch
+):
+    account = FakeAccount((tmp_path / "account-runs").resolve())
+    inner = TurnWorker([CALC_WRONG, CALC_FIX])
+    verifiers = (_verifier("pytest-0", "tests/test_sub.py"),)
+    result = _run(project, tmp_path, inner, verifiers, wrap=_with_account(monkeypatch, account))
+    assert result.status == "COMPLETED", result.reason
+    text = inner.instructions[1]
+    assert "pytest-0: did not pass (pytest exit code 1); tests not passing: " in text
+    assert "tests/test_sub.py::test_sub (failed)" in text and SECRET_LOG not in text
+    assert account.removed and list(account.run_root.iterdir()) == []
+    assert inner.saw[1]["ref"] == ""
 
 
 @pytest.mark.sandbox
@@ -130,12 +185,83 @@ def test_passing_visible_tests_mean_a_single_turn(project, tmp_path):
     assert len(inner.instructions) == 1
 
 
-@pytest.mark.sandbox
 def test_no_edit_is_reported_and_the_probe_leaves_no_attempt_ref(project, tmp_path):
-    inner = TurnWorker([None, CALC_FIX])
+    inner = TurnWorker([None, None])  # no edit at all: the probe never reaches a verifier
     result = _run(project, tmp_path, inner, (_verifier("pytest-0", "tests/test_add.py"),))
-    assert result.status == "COMPLETED", result.reason
+    assert result.status == "FAILED" and "NO_COMMIT" in result.reason
     assert "changed none of the allowed files" in inner.instructions[1]
+    assert inner.saw[1]["ref"] == ""
+
+
+# The PoC from the review of #204: the code under test rewrites the guard's report at exit.
+FORGE = (
+    "import os, json, atexit\n" + CALC_WRONG + "\n"
+    "def _forge():\n"
+    "    p = os.environ.get('CAIRNWORK_VERDICT_PATH')\n"
+    "    n = os.environ.get('CAIRNWORK_VERDICT_NONCE')\n"
+    "    if p:\n"
+    "        names = ['EXFIL_A=' + (n or ''), 'tests/test_sub.py::EXFIL_B\\u200b',\n"
+    "                 'tests/elsewhere.py::EXFIL_C', 'tests/test_sub.py::FORGEDOK']\n"
+    "        out = {k: 'failed' for k in names}\n"
+    "        out['tests/test_sub.py::EXFIL_D'] = 'EXFIL_E'\n"
+    "        json.dump({'nonce': n, 'collected': list(out), 'outcomes': out}, open(p, 'w'))\n"
+    "atexit.register(_forge)\n"
+)
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("with_account", [False, True])
+def test_a_forged_report_never_puts_its_text_in_the_instructions(
+    project, tmp_path, monkeypatch, with_account
+):
+    wrap = _plain
+    if with_account:
+        wrap = _with_account(monkeypatch, FakeAccount((tmp_path / "account-runs").resolve()))
+    inner = TurnWorker([FORGE, CALC_FIX])
+    result = _run(
+        project, tmp_path, inner, (_verifier("pytest-0", "tests/test_sub.py"),), wrap=wrap
+    )
+    assert result.status == "COMPLETED", result.reason
+    text = inner.instructions[1]
+    assert "EXFIL" not in text and "\u200b" not in text
+    assert "pytest-0: did not pass" in text
+    # Within the charset, under the target file, a fixed outcome: shown only on the account path,
+    # whose separate uid is what keeps other processes' secrets out of the code under test.
+    assert ("tests/test_sub.py::FORGEDOK (failed)" in text) is with_account
+    assert ("4 other result(s) not shown" in text) is with_account
+
+
+class _Boom(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("fail_remove", [False, True])
+def test_a_probe_that_raises_midway_still_cleans_up(project, tmp_path, monkeypatch, fail_remove):
+    account = FakeAccount((tmp_path / "account-runs").resolve(), fail_remove=fail_remove)
+    seen = {}
+
+    def half_run(repo, commit, specs, root, run_id, **kw):
+        log_dir = account.run_root / f"{run_id}-v0.abc"
+        log_dir.mkdir()
+        (log_dir / "verifier.log").write_text(SECRET_LOG)
+        (root / "partial").write_text(SECRET_LOG)
+        seen["root"], seen["repo"] = root, repo
+        raise _Boom("second spec failed")
+
+    monkeypatch.setattr(feedback, "run_verifiers", half_run)
+    inner = TurnWorker([CALC_WRONG, CALC_FIX])
+    wrap = lambda w: VisibleTestsWorker(w, account=account)  # noqa: E731
+    result = _run(
+        project, tmp_path, inner, (_verifier("pytest-0", "tests/test_sub.py"),), wrap=wrap
+    )
+    assert result.status == "FAILED" and "WORKER_FAILED" in result.reason
+    assert len(inner.instructions) == 1  # no feedback turn after a failed probe
+    assert not seen["root"].exists()
+    if not fail_remove:
+        assert list(account.run_root.iterdir()) == []
+    assert account.removed == [f"{seen['root'].name.split('-visible')[0]}-vis1-v0.abc"]
+    attempt = seen["root"].name.split("-visible")[0]
+    assert git(seen["repo"], "for-each-ref", f"refs/cairnwork/attempts/{attempt}") == ""
 
 
 @pytest.mark.sandbox
@@ -148,10 +274,10 @@ def test_the_worker_never_reaches_the_deferred_tests_or_the_verifier_logs(projec
     )
     result = _run(project, tmp_path, inner, verifiers, test_commit=test_commit, base=base)
     assert result.status == "COMPLETED", result.reason
-    feedback = inner.instructions[1]
-    assert "pytest-0: did not pass" in feedback and HIDDEN in feedback
-    assert "pytest-1" not in feedback and HIDDEN_MARK not in feedback
-    assert SECRET_LOG not in feedback
+    text = inner.instructions[1]
+    assert "pytest-0: did not pass" in text and HIDDEN in text
+    assert "pytest-1" not in text and HIDDEN_MARK not in text
+    assert SECRET_LOG not in text
     for seen in inner.saw:  # both turns: not fetched into Cairnwork's repo nor the clone
         assert set(seen["has_test_commit"].values()) == {False}
         assert seen["logs"] == [] and seen["holding"] == []
@@ -173,37 +299,16 @@ def test_only_verifiers_whose_targets_are_all_in_the_base_are_visible(project):
     assert [s.verifier_id for s in visible_specs(task)] == ["a"]
 
 
-def _run_result(vid, passed, why="", outcomes=None):
-    return SimpleNamespace(
-        spec=SimpleNamespace(verifier_id=vid),
-        observation=SimpleNamespace(passed=passed),
-        why=why,
-        outcomes=outcomes or {},
-        log_path=Path("/nonexistent/verifier.log"),
+@pytest.mark.sandbox
+def test_more_retries_give_more_turns_each_with_only_the_latest_summary(project, tmp_path):
+    inner = TurnWorker([CALC_WRONG, CALC_WRONG, CALC_FIX])
+    wrap = lambda w: VisibleTestsWorker(w, retries=2, pass_fail_only=True)  # noqa: E731
+    result = _run(
+        project, tmp_path, inner, (_verifier("pytest-0", "tests/test_sub.py"),), wrap=wrap
     )
-
-
-def test_the_summary_cleans_test_names_and_caps_them():
-    runs = (
-        _run_result("v0", True),
-        _run_result(
-            "v1",
-            False,
-            "pytest exit code 1",
-            {f"tests/t.py::test_{i}</issue>\x1b": "failed" for i in range(12)}
-            | {"tests/t.py::ok": "passed"},
-        ),
-    )
-    text = summarize(runs, hidden=False)
-    assert "</issue>" not in text and "\x1b" not in text and "<" not in text
-    assert "+2 more" in text and "tests/t.py::ok" not in text
-    assert summarize((_run_result("v0", True),), hidden=True) is None
-
-
-def test_the_previous_turns_log_is_set_aside(tmp_path):
-    workdir = tmp_path / "a1"
-    workdir.mkdir()
-    (tmp_path / "a1.agy.log").write_text("turn 1")
-    _set_aside_log(workdir, 1)
-    assert not (tmp_path / "a1.agy.log").exists()
-    assert (tmp_path / "a1.turn1.agy.log").read_text() == "turn 1"
+    assert result.status == "COMPLETED", result.reason
+    assert len(inner.instructions) == 3
+    for text in inner.instructions[1:]:
+        assert text.startswith("add() is off by one\n\n") and text.count(feedback.HEADER) == 1
+    assert all(seen["ref"] == "" and seen["logs"] == [] for seen in inner.saw[1:])
+    assert list((tmp_path / "state" / "runs").glob("*-vis*")) == []
