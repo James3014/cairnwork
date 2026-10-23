@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.bundle import BundleError, read_bundle
+from cairnwork_attest.checkrun_gh import gh_http, gh_problem
 from cairnwork_attest.dsse import verify_envelope
 from cairnwork_attest.keys import load_public_key_pem
 from cairnwork_attest.record import AttestError
@@ -167,12 +168,17 @@ def _check_args(
     token: str | None,
     public_key: Path | None,
     repo: Path | None,
+    gh: Path | None = None,
 ) -> str | None:
     if repo is not None and public_key is None:
         return "--repo needs --public-key (full offline verify)"
-    if not token:
+    if gh is not None:
+        problem = gh_problem(gh)
+        if problem is not None:
+            return problem
+    elif not token:
         return f"missing token (set {TOKEN_ENV})"
-    if not _TOKEN.fullmatch(token):
+    elif not _TOKEN.fullmatch(token):
         return f"{TOKEN_ENV} has unexpected characters"
     if not _SLUG.fullmatch(repo_slug) or any(p in (".", "..") for p in repo_slug.split("/")):
         return f"repo slug must be OWNER/NAME: {_clean(repo_slug)!r}"
@@ -200,14 +206,16 @@ def post_check_run(
     details_url: str | None = None,
     token: str | None,
     http: Http | None = None,
+    gh: Path | None = None,
 ) -> CheckRunResult:
     """Post a neutral Check Run on the bundle's candidate commit.
 
     Never raises for bad input. With ``public_key`` the signature is checked
     offline (full ``verify_bundle`` when ``repo`` is also given). The token is
-    only placed in the Authorization header, never in any result.
+    only placed in the Authorization header, never in any result. With ``gh``
+    (a ``gh``-compatible CLI that authenticates itself) no token is used at all.
     """
-    usage = _check_args(repo_slug, details_url, token, public_key, repo)
+    usage = _check_args(repo_slug, details_url, token, public_key, repo, gh)
     if usage is not None:
         return _fail("USAGE", usage)
     try:
@@ -238,11 +246,14 @@ def post_check_run(
     if details_url is not None:
         payload["details_url"] = details_url
     headers = {
-        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "cairnwork-attest",
     }
+    if gh is None:
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        http, token = gh_http(gh), None
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
     url = f"{_API}/repos/{repo_slug}/check-runs"
     try:
@@ -271,11 +282,12 @@ def add_subparser(subparsers: Any) -> None:
     p.add_argument("--repo", type=Path, default=None, help="Git repo for full offline verify")
     p.add_argument("--name", type=str, default="cairnwork attestation", help="Check Run name")
     p.add_argument("--details-url", type=str, default=None, help="https:// details URL")
+    p.add_argument("--gh", type=Path, default=None, help="gh-compatible CLI that authenticates")
     p.add_argument("--json", action="store_true", help="JSON output")
 
 
 def cmd_check_run(args: argparse.Namespace) -> int:
-    """Dispatch the check-run subcommand (token comes from the environment only)."""
+    """Dispatch the check-run subcommand (token from the environment only, or --gh)."""
     result = post_check_run(
         args.bundle,
         args.repo_slug,
@@ -284,6 +296,7 @@ def cmd_check_run(args: argparse.Namespace) -> int:
         name=args.name,
         details_url=args.details_url,
         token=os.environ.get(TOKEN_ENV),
+        gh=args.gh,
     )
     if args.json:
         obj = {

@@ -161,6 +161,7 @@ def _check_run_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _St
         public_key=pubkey,
         repo=Path(args.repo),
         token=os.environ.get(TOKEN_ENV),
+        gh=args.gh,
     )
     return _Step("check_run", result.code, result.detail)
 
@@ -234,6 +235,7 @@ def add_subparser(subparsers: Any) -> None:
     p.add_argument("--notes-ref", type=str, default="refs/notes/cairnwork", help="Notes ref path")
     p.add_argument("--out-dir", type=Path, default=None, help="Bundle directory (absolute)")
     p.add_argument("--no-check-run", action="store_true", help="Skip the informational Check Run")
+    p.add_argument("--gh", type=Path, default=None, help="gh-compatible CLI for the Check Run")
 
 
 def cmd_on_verified(args: argparse.Namespace) -> int:
