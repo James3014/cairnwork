@@ -139,7 +139,7 @@ def launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
         time.sleep(JOB_SETTLE_SECONDS)
         ran = os.path.lexists(marker)
         unlink_quiet(marker)
-        r = dict(r, owner_control=control, job_ran_in_sandbox_attempt=ran)
+        r = dict[str, object](r, owner_control=control, job_ran_in_sandbox_attempt=ran)
         if ran:  # an escape outranks a failed control
             r.update({"pass": False, "result": "ESCAPED_JOB_RAN"})
         elif not control["marker_seen"]:
