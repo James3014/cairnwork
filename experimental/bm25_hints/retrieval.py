@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 
 from .bm25 import BM25Index, tokens
@@ -48,25 +49,38 @@ def read_text(path: Path) -> str | None:
     return data.decode("utf-8", "ignore")
 
 
-def rank_files(
-    repo_dir: str | Path, issue_text: str, k: int = 10, include_tests: bool = False
-) -> list[str]:
-    """The ``k`` tracked files most likely to change for ``issue_text``.
+def checkout_texts(repo_dir: str | Path) -> Iterator[tuple[str, str]]:
+    """``(path, text)`` for every readable tracked text file of a working tree."""
+    root = Path(repo_dir)
+    for rel in tracked_files(root):
+        text = read_text(root / rel)
+        if text is not None:
+            yield rel, text
+
+
+def score_texts(
+    items: Iterable[tuple[str, str]], query: str, include_tests: bool = False
+) -> list[tuple[str, float]]:
+    """Every file sharing a term with ``query`` as ``(path, score)``, best first.
 
     Score = BM25 over file content plus path tokens (weighted ``PATH_WEIGHT``).
     Ties break on path order; files with no matching term are never returned.
     """
-    root = Path(repo_dir)
     paths: list[str] = []
     docs: list[list[str]] = []
-    for rel in tracked_files(root):
+    for rel, text in items:
         if not include_tests and is_test_path(rel):
-            continue
-        text = read_text(root / rel)
-        if text is None:
             continue
         paths.append(rel)
         docs.append(tokens(rel) * PATH_WEIGHT + tokens(text))
-    scores = BM25Index(docs).scores(tokens(issue_text))
+    scores = BM25Index(docs).scores(tokens(query))
     ranked = sorted(scores, key=lambda i: (-scores[i], paths[i]))
-    return [paths[i] for i in ranked[: max(k, 0)]]
+    return [(paths[i], scores[i]) for i in ranked]
+
+
+def rank_files(
+    repo_dir: str | Path, issue_text: str, k: int = 10, include_tests: bool = False
+) -> list[str]:
+    """The ``k`` tracked files of a checkout that best match ``issue_text`` (BM25 only)."""
+    scored = score_texts(checkout_texts(repo_dir), issue_text, include_tests)
+    return [path for path, _ in scored[: max(k, 0)]]
