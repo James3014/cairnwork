@@ -140,3 +140,13 @@ def test_a_tampered_core_response_is_not_verified(project, state, tmp_path):
     assert (
         out["reason"] == "CORE_MANIFEST_HASH_MISMATCH"
     )  # Core said VERIFIED; the binding check overrides
+
+
+def test_a_patch_using_a_verdict_forging_api_is_refused_with_its_own_code(project, state):
+    base = base_of(project)
+    forged = FIX + "\nimport os\nos._exit(0)\n"
+    cand = candidate(project, base, {"src/calc.py": forged})
+    code, out = verify(state, project, base, cand)
+    assert code == 2 and out["verified"] is False and out["status"] == "REFUSED"
+    assert out["reason"].startswith("VERIFIER_TAMPER_API") and "src/calc.py:" in out["reason"]
+    assert "[os_exit]" in out["reason"] and out["core_status"] == ""
