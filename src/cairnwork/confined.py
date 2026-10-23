@@ -24,7 +24,9 @@ PS_ATTEMPTS = 3
 PS_TIMEOUT_SECONDS = 60
 
 
-def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, bool, int]:
+def execute(
+    argv, cwd, env, timeout, log_path, reap=None, pass_fds=()
+) -> tuple[int | None, bool, int]:
     """Run in a new process group; the parent copies output into log_path (the child
     never holds the log's file descriptor); kill the group afterwards."""
     token = env.get(RUN_TOKEN_VAR)
@@ -40,6 +42,7 @@ def execute(argv, cwd, env, timeout, log_path, reap=None) -> tuple[int | None, b
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=pass_fds,  # descriptors the child inherits on purpose (report_channel)
             preexec_fn=_limit_file_size,  # noqa: PLW1509 - only setrlimit, no locks
         )
         copier = threading.Thread(target=copy_capped, args=(process.stdout, log), daemon=True)
