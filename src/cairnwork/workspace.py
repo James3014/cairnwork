@@ -40,6 +40,8 @@ from pathlib import Path
 from cairnwork.changeset import ChangeSetError, read_change_set
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.protected_paths import is_protected
+from cairnwork.tamper_scan import CODE as TAMPER_CODE
+from cairnwork.tamper_scan import scan_patch
 from cairnwork.treecompare import tree_differences
 
 FORBIDDEN_MODES = frozenset({"120000", "160000"})  # symlink, submodule
@@ -193,6 +195,12 @@ def check_candidate_commit(
             raise CandidateRejected("DELETION_FORBIDDEN", entry.path)
         if entry.after_mode in FORBIDDEN_MODES or entry.before_mode in FORBIDDEN_MODES:
             raise CandidateRejected("FORBIDDEN_MODE", f"{entry.path} ({entry.after_mode})")
+    try:  # raises the bar, not a boundary (tamper_scan.py)
+        tamper = scan_patch(repo, base, head)
+    except GitCommandError as exc:
+        raise CandidateRejected("UNREADABLE_CHANGE", str(exc)) from exc
+    if tamper:
+        raise CandidateRejected(TAMPER_CODE, ", ".join(str(finding) for finding in tamper[:5]))
     try:
         run_git(repo, "diff", "--no-ext-diff", "--no-textconv", "--check", base, head)
     except GitCommandError as exc:

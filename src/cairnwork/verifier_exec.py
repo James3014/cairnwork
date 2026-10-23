@@ -26,7 +26,7 @@ def _same_directory(path: Path, before: os.stat_result) -> bool:
     return same and stat.S_ISDIR(after.st_mode)
 
 
-def _execute(argv, profile_path, checkout, env, timeout, log_path, account, backend):
+def _execute(argv, profile_path, checkout, env, timeout, log_path, account, backend, pass_fds=()):
     """Run argv under the sandbox profile, as the verifier account when one is given.
     As if the verifier's venv were activated, its bin directory (argv[0] is its Python)
     leads PATH: tests that spawn plain ``python`` get the same interpreter as pytest."""
@@ -36,7 +36,9 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account, back
     env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory")
     env["GIT_CONFIG_VALUE_0"] = os.path.realpath(checkout)
     if account is None:
-        return confined.execute(backend.wrap(argv, profile_path), checkout, env, timeout, log_path)
+        return confined.execute(
+            backend.wrap(argv, profile_path), checkout, env, timeout, log_path, pass_fds=pass_fds
+        )  # under an account sudo would close the descriptors: that path passes none
     os.chmod(profile_path, 0o640)
     returncode, timed_out, survivors = confined.execute(
         account.wrap(argv, profile_path, env),

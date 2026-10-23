@@ -57,7 +57,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cairnwork_sandbox
-from cairnwork import pytest_config, report_guard
+from cairnwork import pytest_config, report_channel, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
@@ -241,7 +241,7 @@ def _remove_scratch(dirs, account) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _prepare_run(private: Path, ini: Path, ini_text: bytes):
+def _prepare_run(private: Path, ini: Path, ini_text: bytes, channel=None):
     """Create the per-run directory (the only place besides the checkout the child may
     write), its HOME and TMPDIR, and the scrubbed environment."""
     run_dir = private / "run"
@@ -264,8 +264,11 @@ def _prepare_run(private: Path, ini: Path, ini_text: bytes):
     )
     env[RUN_TOKEN_VAR] = secrets.token_hex(16)
     verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
-    env[report_guard.PATH_ENV] = str(verdict_path)
-    env[report_guard.NONCE_ENV] = verdict_nonce
+    if channel is not None:  # owner run: descriptors, no nonce or path in the environment
+        env.update(channel.env())
+    else:  # verifier account: sudo closes descriptors, so path and nonce stay in the environment
+        env[report_guard.PATH_ENV] = str(verdict_path)
+        env[report_guard.NONCE_ENV] = verdict_nonce
     return run_dir, home, tmp, env, verdict_path, verdict_nonce
 
 
@@ -275,12 +278,29 @@ def _run_one(
     plugins = pytest_config.installed_plugins(python)
     ini_text = settings.ini_text(checkout, plugins)
     private = Path(tempfile.mkdtemp(prefix=f"{checkout.name}.", dir=checkout.parent.parent))
+    channel = report_channel.open_channel(private) if account is None else None
+    try:
+        return _run_one_in(
+            repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account,
+            settings, note, plugins, ini_text, private, channel,
+        )  # fmt: skip
+    finally:
+        if channel is not None:
+            channel.close()
+
+
+def _run_one_in(
+    repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings, note,
+    plugins, ini_text, private, channel,
+) -> VerifierRun:  # fmt: skip
     log_path, ini, profile_path = (
         private / "verifier.log",
         private / "pytest.ini",
         private / "profile.sb",
     )
-    run_dir, home, tmp, env, verdict_path, verdict_nonce = _prepare_run(private, ini, ini_text)
+    run_dir, home, tmp, env, verdict_path, verdict_nonce = _prepare_run(
+        private, ini, ini_text, channel
+    )
     if account is not None:
         account.share_run(private, ini, run_dir, home, tmp)
     if attempt_id:
@@ -300,8 +320,9 @@ def _run_one(
             mask_home_credentials=account is None,  # account uid can't enter the owner's home
         )
         _write_new(profile_path, profile.text.encode())
+        fds = channel.pass_fds if channel else ()
         returncode, timed_out, survivors = _execute(
-            argv, profile_path, checkout, env, timeout, log_path, account, backend
+            argv, profile_path, checkout, env, timeout, log_path, account, backend, fds
         )
     else:
         _write_new(log_path, b"no sandbox backend available: verifier not executed\n")
@@ -310,7 +331,7 @@ def _run_one(
         mutated = tuple(tree_differences(repo, candidate_commit, checkout))
     else:
         mutated = ("checkout replaced",)
-    verdict = report_guard.read_verdict(verdict_path, verdict_nonce)
+    verdict = channel.read() if channel else report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0
     too_big = log_path.stat().st_size > MAX_LOG_BYTES
