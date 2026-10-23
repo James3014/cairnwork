@@ -236,3 +236,16 @@ def test_out_dir_is_used(
     assert rc == 0
     assert obj["bundle"] == str(out_dir / "task-1-a1.bundle.json")
     assert (out_dir / "task-1-a1.bundle.json").is_file()
+
+
+def test_symlinked_bundle_path_is_refused(
+    env: Env, http: FakeHttp, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(capsys, env.argv())[0] == 0
+    real = env.bundle.parent.parent / "real.bundle.json"
+    env.bundle.rename(real)
+    env.bundle.symlink_to(real)  # a valid bundle, but reached through a link
+    rc, _, obj = _run(capsys, env.argv())
+    assert rc == 2
+    assert _codes(obj)[0] == ("statement", "BUNDLE_EXISTS")
+    assert env.bundle.is_symlink()

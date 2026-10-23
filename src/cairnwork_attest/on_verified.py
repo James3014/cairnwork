@@ -114,7 +114,9 @@ def _existing_is_ours(path: Path, args: argparse.Namespace, pubkey: Path) -> boo
 def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _Step:
     try:
         pubkey.write_text(public_key_pem(load_private_key(Path(args.state)).public_key()))
-        if bundle.is_symlink() or bundle.exists():
+        if bundle.is_symlink():
+            raise BundleError(f"bundle path is a symlink: {bundle}", code="BUNDLE_EXISTS")
+        if bundle.exists():
             if _existing_is_ours(bundle, args, pubkey):
                 return _Step("statement", "OK", "reused existing bundle")
             raise BundleError(f"bundle already exists: {bundle}", code="BUNDLE_EXISTS")
