@@ -230,6 +230,20 @@ The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, 
 
 The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
 
+## On Verified (runner hook)
+
+A runner calls `cairnwork-attest on-verified` once a task was verified. It runs `statement --sign`, `publish` and `check-run` in that order and stops at the first failing step (later steps are reported as `SKIPPED`):
+
+```bash
+cairnwork-attest on-verified --state /abs/state --task-id T --attempt-id A \
+  --candidate <40-hex> --repo /abs/clone --repo-slug OWNER/NAME \
+  [--remote origin] [--notes-ref refs/notes/cairnwork] [--out-dir /abs/dir] [--no-check-run]
+```
+
+The bundle is written to `<out-dir or STATE/attestations>/<task>-<attempt>.bundle.json` with mode 0600. Task and attempt ids must match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; paths must be absolute. A bundle already at that path is reused only if it fully verifies for this candidate (so a re-run publishes `NOOP`); any other file there fails with `BUNDLE_EXISTS`. The Check Run signature check uses the state's own public key. The token comes from `CAIRNWORK_GITHUB_TOKEN`; without it the `check_run` step is `USAGE` (the note is still published).
+
+It prints one JSON line (sorted keys): `ok`, `task_id`, `attempt_id`, `candidate`, `bundle` and `steps` (`step`, `code`, `detail`). Exit 0 when every step that ran succeeded (statement `OK`, publish `PUBLISHED` or `NOOP`, check run `CREATED` or skipped by `--no-check-run`), 1 when publish returned `NOTE_CONFLICT`, 2 for any other failure. The token never appears in the output.
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred:
