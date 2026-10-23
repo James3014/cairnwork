@@ -25,6 +25,7 @@ from cairnwork_attest.keys import (
     load_private_key,
     public_key_pem,
 )
+from cairnwork_attest.publish import publish_bundle
 from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
 from cairnwork_attest.statement import TEST_SOURCES, Producer, build_statement, run_test_source
 from cairnwork_attest.verify import verify_bundle
@@ -249,6 +250,44 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """Dispatch the publish subcommand."""
+    result = publish_bundle(
+        bundle=Path(args.bundle),
+        repo=Path(args.repo),
+        candidate=args.candidate,
+        remote=args.remote,
+        notes_ref=args.notes_ref,
+        max_attempts=args.max_attempts,
+    )
+    if args.json:
+        obj = {
+            "attempts": result.attempts,
+            "blob": result.blob,
+            "candidate": result.candidate,
+            "code": result.code,
+            "detail": result.detail,
+            "notes_ref": result.notes_ref,
+            "notes_tip": result.notes_tip,
+            "ok": result.ok,
+            "remote": result.remote,
+        }
+        print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
+    elif result.ok:
+        if result.code == "NOOP":
+            print(f"NOOP {result.candidate}")
+        else:
+            print(f"PUBLISHED {result.candidate} {result.notes_ref} {result.notes_tip}")
+    else:
+        detail = f": {result.detail}" if result.detail else ""
+        print(f"{result.code}{detail}", file=sys.stderr)
+    if result.ok:
+        return 0
+    if result.code == "NOTE_CONFLICT":
+        return 1
+    return 2
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cairnwork-attest",
@@ -286,6 +325,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p_pub = subparsers.add_parser("publish", help="Publish signed bundle as git note")
+    p_pub.add_argument("--bundle", type=Path, required=True, help="Signed bundle file path")
+    p_pub.add_argument("--repo", type=Path, required=True, help="Git repository directory")
+    p_pub.add_argument("--candidate", type=str, required=True, help="Candidate commit SHA (40-hex)")
+    p_pub.add_argument("--remote", type=str, default="origin", help="Git remote name")
+    p_pub.add_argument(
+        "--notes-ref",
+        type=str,
+        default="refs/notes/cairnwork",
+        help="Notes ref path",
+    )
+    p_pub.add_argument("--max-attempts", type=int, default=5, help="Max push retry attempts")
+    p_pub.add_argument("--json", action="store_true", help="JSON output")
+
     return parser
 
 
@@ -301,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_statement(args)
     if args.command == "verify":
         return _cmd_verify(args)
+    if args.command == "publish":
+        return _cmd_publish(args)
     return 2
 
 
