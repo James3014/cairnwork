@@ -230,8 +230,9 @@ def test_a_forged_report_never_puts_its_text_in_the_instructions(
     text = inner.instructions[1]
     assert "EXFIL" not in text and "\u200b" not in text
     assert "pytest-0: did not pass" in text
-    # The plugin scrubs the hand-over from os.environ at import, so on both paths the code under
-    # test finds nothing to forge a report with: none of its names reach the instructions.
+    # The plugin removes the hand-over from os.environ at import, so this PoC (which reads
+    # os.environ) finds nothing to forge a report with on either path: none of its names reach the
+    # instructions. The sanitizer itself is tested directly in test_visible_tests_summary.py.
     assert "FORGEDOK" not in text and "other result(s) not shown" not in text
 
 

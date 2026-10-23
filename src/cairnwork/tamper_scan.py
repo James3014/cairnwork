@@ -14,6 +14,7 @@ dedicated reason so an operator can see why. The rule list is the one place to c
 
 from __future__ import annotations
 
+import codecs
 import posixpath
 import re
 from dataclasses import dataclass
@@ -92,7 +93,7 @@ def added_lines(diff: str) -> dict[str, list[tuple[int, str]]]:
     current, number = None, 0
     for raw in diff.splitlines():
         if raw.startswith("+++ "):
-            target = raw[4:]
+            target = _unquote(raw[4:])
             current = target[2:] if target.startswith("b/") else None
             if current is not None:
                 files.setdefault(current, [])
@@ -103,6 +104,14 @@ def added_lines(diff: str) -> dict[str, list[tuple[int, str]]]:
             files[current].append((number, raw[1:]))
             number += 1
     return files
+
+
+def _unquote(name: str) -> str:
+    """git C-quotes a path with special characters (``"b/a\\tb.py"``, octal escapes for bytes)."""
+    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
+        return name
+    raw = name[1:-1].encode("utf-8", "surrogateescape")
+    return codecs.escape_decode(raw)[0].decode("utf-8", "surrogateescape")
 
 
 def scan_patch(repo: Path, base: str, head: str) -> list[Finding]:

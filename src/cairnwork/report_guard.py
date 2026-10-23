@@ -22,18 +22,22 @@ path from the environment, writes a matching record and exits — reading the no
 environment is no harder than reading the old argv path, so this is partial mitigation, not a
 boundary.
 
-Raising the bar (this module, ``report_channel`` and ``tamper_scan``): when the verifier runs
-as the owner (no verifier account) the nonce and the report destination no longer sit in the
+Raising the bar (this module, ``report_channel`` and ``tamper_scan``): when the verifier runs as
+the owner (no verifier account) the nonce and the report destination no longer sit in the
 environment. The parent hands the child two inherited file descriptors (``pass_fds``): a pipe
 holding the nonce and an anonymous (already unlinked) file for the record; only their numbers
 travel in ``CAIRNWORK_GUARD_FDS``. The plugin reads the nonce, closes that pipe and removes every
 guard variable from ``os.environ`` when its module is imported, which is before any conftest or
-candidate code. The parent reads the record from its own descriptor, so there is no path to
-guess, replace or plant. Candidate patches are also scanned for the APIs such a forgery needs
-(tamper_scan.py, reason ``VERIFIER_TAMPER_API``). Both are a higher hurdle, not a boundary: a
-process that shares the interpreter can still scan its open descriptors or build the API names
-from strings. Under a verifier account sudo closes descriptors above 2, so that path keeps the
-environment hand-over (path and nonce), still scrubbed by the plugin once read.
+test module (interpreter start-up hooks such as ``sitecustomize.py`` and ``.pth`` files run
+earlier; they are protected verifier inputs a candidate cannot add). The parent reads the record
+from its own descriptor, so there is no path to guess, replace or plant. Candidate patches are
+also scanned for the APIs such a forgery needs (tamper_scan.py, reason ``VERIFIER_TAMPER_API``).
+Both are a higher hurdle, not a boundary: a process that shares the interpreter can still scan its
+open descriptors or build the API names from strings. Under a verifier account sudo closes
+descriptors above 2, so that path keeps the environment hand-over (path and nonce); the plugin
+removes it from ``os.environ`` once read, but the process's original environment stays readable
+(``/proc/self/environ`` on Linux, ``KERN_PROCARGS2`` for the same uid on macOS), so on that path
+the nonce is still within reach of the code under test.
 
 A real boundary needs the verdict produced outside the candidate's process (a subprocess per
 test, or an external observer), tracked as Tier-3 in the report-forgery research
@@ -68,7 +72,7 @@ _NONCE_ENV = "CAIRNWORK_VERDICT_NONCE"
 
 def _take():
     """Read the hand-over once and scrub it from os.environ. Runs at import: pytest loads
-    this module (-p) before any conftest or candidate code."""
+    this module (-p) before any conftest or test module."""
     spec = os.environ.pop(_FDS_ENV, None)
     path = os.environ.pop(_PATH_ENV, None)
     nonce = os.environ.pop(_NONCE_ENV, None)
@@ -115,7 +119,10 @@ class _Reporter:
             os.ftruncate(self._fd, 0)
             written = 0
             while written < len(data):
-                written += os.pwrite(self._fd, data[written:], written)
+                step = os.pwrite(self._fd, data[written:], written)
+                if step <= 0:  # no progress: leave a short record, which the parent refuses
+                    break
+                written += step
             return
         fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as handle:

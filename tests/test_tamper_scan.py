@@ -93,3 +93,13 @@ def test_scan_patch_reads_only_added_lines_of_a_real_commit(repo):
         ("src/old.py", 2, "os_exit")
     ]
     assert CODE == "VERIFIER_TAMPER_API"
+
+
+def test_paths_git_quotes_are_still_scanned(repo):
+    """git C-quotes paths with special or non-ASCII characters (``+++ "b/..."``): still scanned."""
+    base = git(repo, "rev-parse", "HEAD")
+    head = commit_change(
+        repo, {'src/we"ird.py': "import os\nos._exit(0)\n", "src/café.py": "gc.get_objects()\n"}
+    )
+    found = {(f.path, f.rule) for f in scan_patch(repo, base, head)}
+    assert found == {('src/we"ird.py', "os_exit"), ("src/café.py", "gc_walk")}
