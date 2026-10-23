@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,13 +113,13 @@ def _existing_is_ours(
 
 def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _Step:
     try:
-        pubkey.write_text(public_key_pem(load_private_key(Path(args.state)).public_key()))
         verified = verify_record(
             Path(args.state) / "notary.sqlite",
             args.task_id,
             args.attempt_id,
             expected_candidate=args.candidate,
         )
+        pubkey.write_text(public_key_pem(load_private_key(Path(args.state)).public_key()))
         if bundle.is_symlink():
             raise BundleError(f"bundle path is a symlink: {bundle}", code="BUNDLE_EXISTS")
         if bundle.exists():
@@ -130,9 +131,7 @@ def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _St
     except AttestError as exc:
         return _Step("statement", exc.code, exc.message)
     except (OSError, ValueError) as exc:
-        return _Step(
-            "statement", "ERROR", str(getattr(exc, "strerror", None) or "cannot build statement")
-        )
+        return _Step("statement", "ERROR", str(getattr(exc, "strerror", None) or exc))
     return _Step("statement", "OK")
 
 
@@ -158,15 +157,24 @@ def _check_run_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _St
     return _Step("check_run", result.code, result.detail)
 
 
+def _guarded(name: str, step: Callable[[], _Step]) -> _Step:
+    """A step that raised unexpectedly (git missing, a socket error, ...) becomes ERROR, so the
+    runner always gets its one JSON line."""
+    try:
+        return step()
+    except Exception as exc:  # noqa: BLE001 - a hook must report, never crash
+        return _Step(name, "ERROR", f"{type(exc).__name__}: {exc}")
+
+
 def _run_steps(args: argparse.Namespace, bundle: Path, pubkey: Path) -> list[_Step]:
-    steps = [_statement_step(args, bundle, pubkey)]
+    steps = [_guarded("statement", lambda: _statement_step(args, bundle, pubkey))]
     if steps[-1].code == "OK":
-        steps.append(_publish_step(args, bundle))
+        steps.append(_guarded("publish", lambda: _publish_step(args, bundle)))
     if steps[-1].step == "publish" and steps[-1].code in _PUBLISH_OK:
         if args.no_check_run:
             steps.append(_Step("check_run", "SKIPPED", _NO_CHECK_RUN))
         else:
-            steps.append(_check_run_step(args, bundle, pubkey))
+            steps.append(_guarded("check_run", lambda: _check_run_step(args, bundle, pubkey)))
     return steps
 
 
@@ -227,6 +235,9 @@ def cmd_on_verified(args: argparse.Namespace) -> int:
         return _report(args, None, [_Step("statement", "USAGE", reason)])
     out_dir = Path(args.out_dir) if args.out_dir is not None else Path(args.state) / "attestations"
     bundle = out_dir / f"{args.task_id}-{args.attempt_id}.bundle.json"
-    with tempfile.TemporaryDirectory(prefix="cairnwork-onverified-") as tmp:
-        steps = _run_steps(args, bundle, Path(tmp) / "public.pem")
+    try:
+        with tempfile.TemporaryDirectory(prefix="cairnwork-onverified-") as tmp:
+            steps = _run_steps(args, bundle, Path(tmp) / "public.pem")
+    except OSError as exc:  # the temp dir itself could not be created or removed
+        steps = [_Step("statement", "ERROR", f"temporary directory: {exc.strerror or exc}")]
     return _report(args, bundle if steps[0].code == "OK" else None, steps)

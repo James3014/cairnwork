@@ -336,3 +336,35 @@ def test_missing_notary_is_a_step_code(
     assert obj["steps"][0]["step"] == "statement"
     assert obj["steps"][0]["code"] not in ("OK", "ERROR")
     assert http.calls == [] and not env.bundle.exists()
+
+
+def test_publish_raising_still_prints_one_json_line(
+    env: Env, http: FakeHttp, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cairnwork_attest import on_verified
+
+    def boom(**_kw: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(on_verified, "publish_bundle", boom)
+    rc, out, obj = _run(capsys, env.argv())
+    assert rc == 2
+    assert _codes(obj) == [("statement", "OK"), ("publish", "ERROR"), ("check_run", "SKIPPED")]
+    assert TOKEN not in out and http.calls == []
+
+
+def test_short_writes_still_write_the_whole_bundle(
+    env: Env, http: FakeHttp, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os as os_module
+
+    real_write = os_module.write
+
+    def one_byte(fd: int, data: bytes | memoryview) -> int:
+        return real_write(fd, bytes(data[:1]))
+
+    monkeypatch.setattr(os_module, "write", one_byte)
+    rc, _, obj = _run(capsys, env.argv())
+    monkeypatch.setattr(os_module, "write", real_write)
+    assert rc == 0, obj
+    json.loads(env.bundle.read_text())  # complete, parseable
