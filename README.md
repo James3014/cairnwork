@@ -50,7 +50,7 @@ cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證�
 
 ## 邊界
 
-- 第一天的依賴只有 `nexus-core`（nexus-certify）和 `nexus-runtime`，以固定版本引用。
+- 第一天的依賴只有 `nexus-core`（nexus-certify），以固定版本引用；不依賴 `nexus-runtime`。
 - 工具類 sibling repo（RIE、opencli-reviewer、open-swe-runtime、workbench、repo-learning）只透過版本化的輸入輸出契約呼叫。nexus-deployment-lab 是部署控制端，不是下層工具。devspace 不接。
 - sibling repo 永遠不得 import Cairnwork。
 - Cairnwork 不得改動 Nexus-new#2721 的量測環境。
