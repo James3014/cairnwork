@@ -9,6 +9,7 @@ import pytest
 from conftest import commit_change, git
 
 import cairnwork.pipeline as pipeline
+import cairnwork.pipeline_judge as pipeline_judge
 from cairnwork import pytest_config
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.journal import Journal
@@ -187,7 +188,8 @@ def test_the_runner_passes_python_and_base_commit(monkeypatch, repo, tmp_path):
         seen.update(kwargs)
         raise RuntimeError("stop here")
 
-    monkeypatch.setattr(pipeline, "run_verifiers", fake_run_verifiers)
+    # run_verifiers is called from pipeline_judge.judge_candidate (split out of pipeline.py)
+    monkeypatch.setattr(pipeline_judge, "run_verifiers", fake_run_verifiers)
 
     class Worker:
         def run(self, workdir, _task):

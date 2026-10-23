@@ -256,6 +256,17 @@ def test_output_over_the_cap_fails(project, tmp_path, monkeypatch):
     assert not run(project, tmp_path / "big", head, "tests/test_a.py::test_x").observation.passed
 
 
+def test_a_report_over_the_cap_fails_and_says_so(project, tmp_path, monkeypatch):
+    # #184: the guard's report is bigger than the parent reads; the run cannot pass and says why
+    from cairnwork import report_guard
+
+    head = commit_change(project, {"src/src_a.py": "X = 2\n"})
+    monkeypatch.setattr(report_guard, "MAX_REPORT_BYTES", 10)
+    got = run(project, tmp_path / "big", head, "tests/test_a.py::test_x")
+    assert not got.observation.passed and got.report_too_big and not got.plain_failure
+    assert "test report over the size cap" in got.why
+
+
 def test_observation_hash_binds_the_candidate_commit(project, tmp_path, monkeypatch):
     import cairnwork.verifiers as verifiers
 
