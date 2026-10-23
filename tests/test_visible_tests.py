@@ -4,6 +4,7 @@ pass/fail summary of the visible tests, and never reaches the deferred tests or 
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from conftest import commit_change, git
@@ -167,7 +168,7 @@ def test_a_failing_visible_test_gives_the_worker_a_second_turn_with_its_summary(
 def test_with_an_account_failing_test_names_are_shown_and_its_run_root_is_swept(
     project, tmp_path, monkeypatch
 ):
-    account = FakeAccount((tmp_path / "account-runs").resolve())
+    account: Any = FakeAccount((tmp_path / "account-runs").resolve())
     inner = TurnWorker([CALC_WRONG, CALC_FIX])
     verifiers = (_verifier("pytest-0", "tests/test_sub.py"),)
     result = _run(project, tmp_path, inner, verifiers, wrap=_with_account(monkeypatch, account))
@@ -239,7 +240,7 @@ class _Boom(RuntimeError):
 
 @pytest.mark.parametrize("fail_remove", [False, True])
 def test_a_probe_that_raises_midway_still_cleans_up(project, tmp_path, monkeypatch, fail_remove):
-    account = FakeAccount((tmp_path / "account-runs").resolve(), fail_remove=fail_remove)
+    account: Any = FakeAccount((tmp_path / "account-runs").resolve(), fail_remove=fail_remove)
     seen = {}
 
     def half_run(repo, commit, specs, root, run_id, **kw):

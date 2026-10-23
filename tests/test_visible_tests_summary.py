@@ -3,13 +3,20 @@ wording, or names that pass a strict filter; everything else is counted, never q
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from experimental.visible_tests.feedback import _set_aside_log, _sweep, summarize
 
 
-def _run(vid, passed, why="", outcomes=None, targets=("tests/t.py",)):
+def _text(runs, **kw) -> str:
+    text = summarize(runs, **kw)
+    assert text is not None
+    return text
+
+
+def _run(vid, passed, why="", outcomes=None, targets=("tests/t.py",)) -> Any:
     return SimpleNamespace(
         spec=SimpleNamespace(verifier_id=vid, targets=targets),
         observation=SimpleNamespace(passed=passed),
@@ -32,7 +39,7 @@ FORGED = {
 
 
 def test_detail_shows_only_filtered_names_and_counts_the_rest():
-    text = summarize((_run("v1", False, "pytest exit code 1", FORGED),), hidden=False, detail=True)
+    text = _text((_run("v1", False, "pytest exit code 1", FORGED),), hidden=False, detail=True)
     assert "tests not passing: tests/t.py::real[1-2] (error)" in text
     assert "6 other result(s) not shown" in text
     for bad in ("</issue>", "\u200b", "\ufeff", "other.py", "forged", "fff", "::ok"):
@@ -41,28 +48,28 @@ def test_detail_shows_only_filtered_names_and_counts_the_rest():
 
 def test_detail_caps_the_names():
     many = {f"tests/t.py::test_{i:02}": "failed" for i in range(13)}
-    text = summarize((_run("v1", False, "pytest exit code 1", many),), hidden=False, detail=True)
+    text = _text((_run("v1", False, "pytest exit code 1", many),), hidden=False, detail=True)
     assert "tests/t.py::test_09 (failed)" in text and "test_10" not in text
     assert "3 other result(s) not shown" in text
 
 
 def test_the_cause_keeps_fixed_phrases_and_drops_changed_file_names():
     why = "timed out; checkout changed (2: EXFIL_A, EXFIL_B); pytest exit code 2; free EXFIL_C"
-    text = summarize((_run("v1", False, why),), hidden=False, detail=True)
+    text = _text((_run("v1", False, why),), hidden=False, detail=True)
     assert "(timed out; checkout changed; pytest exit code 2; 1 other cause(s))" in text
     assert "EXFIL" not in text
 
 
 def test_pass_fail_only_quotes_nothing_from_the_run():
     run = _run("v1", False, "checkout changed (1: EXFIL_A)", FORGED)
-    text = summarize((run, _run("v0", True)), hidden=True, detail=False)
+    text = _text((run, _run("v0", True)), hidden=True, detail=False)
     assert "- v1: did not pass\n- v0: passed\n" in text
     for bad in ("EXFIL", "tests/t.py", "checkout", "exit code"):
         assert bad not in text
 
 
 def test_a_forged_verifier_id_is_not_quoted():
-    text = summarize((_run("v\u200b1", False),), hidden=False, detail=False)
+    text = _text((_run("v\u200b1", False),), hidden=False, detail=False)
     assert "- verifier: did not pass" in text
     assert summarize((_run("v0", True),), hidden=True, detail=True) is None
 
@@ -112,7 +119,7 @@ def test_the_sweep_takes_only_this_probes_entries(tmp_path):
     names = ["a1-vis1-v0.work", "a1-vis1-v0.xyz", "a1-vis1-v12", "a1-vis1-vx", "a1-vis10-v0.w",
              "a1-vis1-v0x", "b-a1-vis1-v0.w"]  # fmt: skip
     _entries(tmp_path, names)
-    account = _Account()
+    account: Any = _Account()
     _sweep(tmp_path, "a1-vis1", account)
     assert sorted(account.removed) == ["a1-vis1-v0.work", "a1-vis1-v0.xyz", "a1-vis1-v12"]
     left = sorted(p.name for p in tmp_path.iterdir())
@@ -121,7 +128,7 @@ def test_the_sweep_takes_only_this_probes_entries(tmp_path):
 
 def test_the_sweep_tries_every_entry_and_reraises_the_first_error(tmp_path):
     _entries(tmp_path, ["a1-vis1-v0.a", "a1-vis1-v1.a", "a1-vis1-v2.a"])
-    account = _Account(fail={"a1-vis1-v0.a", "a1-vis1-v1.a"})
+    account: Any = _Account(fail={"a1-vis1-v0.a", "a1-vis1-v1.a"})
     with pytest.raises(OSError, match="cannot remove"):
         _sweep(tmp_path, "a1-vis1", account)
     assert sorted(account.removed) == ["a1-vis1-v0.a", "a1-vis1-v1.a", "a1-vis1-v2.a"]
@@ -135,7 +142,7 @@ def test_the_sweep_unlinks_symlinks_without_following_them(tmp_path):
     root = tmp_path / "runs"
     root.mkdir()
     (root / "a1-vis1-v0.a").symlink_to(outside)
-    account = _Account()
+    account: Any = _Account()
     _sweep(root, "a1-vis1", account)
     assert not (root / "a1-vis1-v0.a").is_symlink() and account.removed == []
     assert (outside / "keep").read_text() == "x"
