@@ -1,9 +1,13 @@
-"""EXPERIMENTAL (default off, not imported by core): BM25 file hints for an Issue.
+"""EXPERIMENTAL (default off, not imported by core): an on-demand BM25 file finder.
 
-Given a checkout at the base commit and the Issue text, ``rank_files`` returns the
-repo-relative paths most likely to need a change. See OWNER / EXPIRES.
+The worker asks for files when it needs them (``tool.py``); nothing is injected into its
+prompt up front. ``find_files`` ranks files the query names first, then BM25 over content
+and path tokens (``retrieval``). CLI: ``python -m experimental.bm25_hints find``. See
+OWNER / EXPIRES.
 """
 
+from .find import Hit, find_files
 from .retrieval import rank_files
+from .tool import FinderConfig, respond
 
-__all__ = ["rank_files"]
+__all__ = ["FinderConfig", "Hit", "find_files", "rank_files", "respond"]
