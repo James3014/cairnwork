@@ -186,12 +186,11 @@ def _positive_controls(tools: WorkerTools) -> list[dict]:
 def _code_probes(
     tools: WorkerTools, fx: Fixture, env: dict | None = None
 ) -> tuple[list[dict], dict, dict]:
-    # Two processes the probe must not be able to signal. The first is the Owner's (killed
-    # afterwards); the second runs as the worker in another sandbox.
     owner_victim = subprocess.Popen(["/bin/sleep", "300"])  # noqa: S607
-    sibling_proc, sibling_pid = escapes.start_sibling_victim(tools, fx, env)
-    victims = {"signal_outside_sandbox": owner_victim.pid, "signal_other_sandbox": sibling_pid}
+    sibling_proc = None  # the second victim runs as the worker in another sandbox
     try:
+        sibling_proc, sibling_pid = escapes.start_sibling_victim(tools, fx, env)
+        victims = {"signal_outside_sandbox": owner_victim.pid, "signal_other_sandbox": sibling_pid}
         src = probe.source(
             fx.read_targets, fx.write_targets, fx.run_root.name[:8], victims, fx.escape_markers
         )
@@ -200,7 +199,8 @@ def _code_probes(
     finally:
         owner_victim.kill()
         owner_victim.wait()
-        escapes.stop_sibling_victim(tools, fx, sibling_proc)
+        if sibling_proc:
+            escapes.stop_sibling_victim(tools, fx, sibling_proc)
     rows = [
         json.loads(line[len(probe.MARK) :])
         for line in call.output.splitlines()

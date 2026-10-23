@@ -50,9 +50,10 @@ def start_sibling_victim(tools: WorkerTools, fx: Fixture, env: dict | None):
             if not chunk:
                 break
             buf += chunk
-            for line in buf.decode(errors="replace").splitlines():
-                if line.startswith("VICTIM_PID "):
-                    return proc, int(line.split()[1])
+            for line in buf.decode(errors="replace").split("\n")[:-1]:  # complete lines only
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "VICTIM_PID" and parts[1].isdigit():
+                    return proc, int(parts[1])
         elif proc.poll() is not None:
             break
     return proc, 0
@@ -99,12 +100,17 @@ def _owner_launchctl_control(fx: Fixture, name: str) -> dict:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not (seen := os.path.lexists(marker)):
             time.sleep(0.2)
-    for cleanup in (["remove", label], ["bootout", f"gui/{uid}/{label}"]):
-        subprocess.run(["/bin/launchctl", *cleanup], capture_output=True, timeout=20, check=False)
+    _remove_job(label)
     Path(marker).unlink(missing_ok=True)
     if plist:
         Path(plist).unlink(missing_ok=True)
     return {"rc": proc.returncode, "marker_seen": seen}
+
+
+def _remove_job(label: str) -> None:
+    uid = os.getuid()
+    for cleanup in (["remove", label], ["bootout", f"gui/{uid}/{label}"]):
+        subprocess.run(["/bin/launchctl", *cleanup], capture_output=True, timeout=20, check=False)
 
 
 def unlink_quiet(path: str) -> None:
@@ -126,6 +132,7 @@ def launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
             continue
         control = _owner_launchctl_control(fx, name)
         marker = fx.escape_markers[name]
+        _remove_job(f"com.cairnwork.canary.{fx.run_root.name[:8]}.{name}")  # nothing runs later
         ran = os.path.lexists(marker)
         unlink_quiet(marker)
         r = dict(r, owner_control=control, job_ran_in_sandbox_attempt=ran)
