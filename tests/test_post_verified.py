@@ -1,9 +1,12 @@
 """The opt-in post-verified hook: off = nothing changes; a failing hook is never a verdict."""
 
 import inspect
+import io
 import json
+import os
 import stat
 import subprocess
+import time
 
 import pytest
 from conftest import commit_change
@@ -65,14 +68,14 @@ def _round(rig, monkeypatch, **keys):
 
 def _spy(monkeypatch):
     """The hook runs recorded (a call carrying --task-id); every other subprocess is untouched."""
-    calls, real = [], subprocess.run
+    calls, real = [], subprocess.Popen
 
     def spy(argv, *args, **kw):
         if "--task-id" in argv:
             calls.append(argv)
         return real(argv, *args, **kw)
 
-    monkeypatch.setattr(post_verified.subprocess, "run", spy)
+    monkeypatch.setattr(post_verified.subprocess, "Popen", spy)
     return calls
 
 
@@ -106,9 +109,7 @@ def test_on_and_ok_runs_the_hook_once_with_a_narrow_environment(rig, monkeypatch
     monkeypatch.setenv("GIT_SSH_COMMAND", "false")
     spawned = _spy(monkeypatch)
     github, out, commit = _round(rig, monkeypatch, post_verified_hook=hook)
-    assert out == [
-        {"issue": 7, "pr": "https://github.com/James3014/demo/pull/1", "post_verified_hook": "OK"}
-    ]
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
     assert len(spawned) == 1 and github.labels[7] == {runner.DONE}
     args = (seen / "argv").read_text().split("\n")[:-1]
     assert args[0::2] == ["--state", "--task-id", "--attempt-id", "--candidate", "--repo",
@@ -144,7 +145,7 @@ def test_a_failing_hook_never_changes_the_outcome(rig, monkeypatch, tmp_path, ca
         hook, _seen = _hook(tmp_path, f'echo "boom {TOKEN}"; exit 2')
         keys = {"post_verified_hook": hook}
     elif failure == "timeout":
-        hook, _seen = _hook(tmp_path, "sleep 30")
+        hook, _seen = _hook(tmp_path, "echo partial; sleep 30")
         keys = {"post_verified_hook": hook, "post_verified_hook_seconds": 1}
     else:
         keys = {"post_verified_hook": str(tmp_path / "no-such-hook")}
@@ -153,11 +154,10 @@ def test_a_failing_hook_never_changes_the_outcome(rig, monkeypatch, tmp_path, ca
     github, out, _ = _round(rig, monkeypatch, **keys)
     err = capsys.readouterr().err
     url = "https://github.com/James3014/demo/pull/1"  # the same as with the hook off
-    assert out[0]["pr"] == url and "error" not in out[0]
+    assert out == [{"issue": 7, "pr": url}]  # the same as with the hook off
     assert github.labels == {7: {runner.DONE}} and len(github.prs) == 1
     assert github.comments[-1][1] == done_text(url, "James3014/demo") and len(github.comments) == 2
     reason = {"exit2": "exit 2", "timeout": "TIMEOUT", "missing": "FileNotFoundError"}[failure]
-    assert out[0]["post_verified_hook"].startswith(reason)
     assert err.startswith("ALERT post_verified_hook task t") and reason in err
     assert TOKEN not in err
     (line,) = _log(rig)
@@ -165,6 +165,7 @@ def test_a_failing_hook_never_changes_the_outcome(rig, monkeypatch, tmp_path, ca
     assert (line["error"] or "").startswith(reason) == (failure != "exit2")
     assert TOKEN not in json.dumps(line)
     assert "[redacted]" in line["stdout_tail"] or failure != "exit2"
+    assert line["stdout_tail"] == "partial\n" or failure != "timeout"
 
 
 def test_the_runner_exit_code_ignores_the_hook(rig, monkeypatch, tmp_path, capsys):
@@ -182,7 +183,8 @@ def test_the_runner_exit_code_ignores_the_hook(rig, monkeypatch, tmp_path, capsy
     assert runner.main(argv) == 0
     captured = capsys.readouterr()
     result = json.loads(captured.out)
-    assert result["settle"][0]["post_verified_hook"] == "exit 2" and "ALERT" in captured.err
+    assert result["settle"] == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
+    assert "ALERT post_verified_hook task" in captured.err and "exit 2" in captured.err
     assert github.labels[7] == {runner.DONE}
 
 
@@ -233,11 +235,107 @@ def test_an_exception_in_the_hook_step_is_not_a_verdict(rig, monkeypatch, capsys
 
     monkeypatch.setattr(runner, "run_post_verified_hook", boom)
     github, out, _ = _round(rig, monkeypatch)
-    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1",
-                    "post_verified_hook": "ValueError"}]  # fmt: skip
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
     assert (
         github.labels[7] == {runner.DONE} and "ALERT post_verified_hook" in capsys.readouterr().err
     )
+
+
+class _BrokenStderr(io.StringIO):
+    def write(self, s):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_broken_stderr_does_not_change_the_result(rig, monkeypatch, tmp_path):
+    hook, _seen = _hook(tmp_path, "exit 2")
+    monkeypatch.setattr(runner.sys, "stderr", _BrokenStderr())
+    github, out, _ = _round(rig, monkeypatch, post_verified_hook=hook)
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
+    assert github.labels[7] == {runner.DONE}
+
+
+def test_a_config_that_breaks_at_settle_time_does_not_change_the_result(rig, monkeypatch):
+    github = FakeGitHub([issue()])
+    taken = runner.take(rig["intake"], github, rig["clone"])[0]
+    commit = commit_change(rig["clone"], {"src/calc.py": "x = 2\n"})
+    monkeypatch.setattr(Intake, "status", _completed(rig, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    real, commented = Intake.config, []
+    real_comment = github.comment
+    monkeypatch.setattr(github, "comment", lambda *a: (commented.append(1), real_comment(*a))[1])
+
+    def flaky(self):
+        if commented:  # only the hook step reads it after the done comment
+            raise IntakeRefused("BAD_CONFIG", "broken mid-settle")
+        return real(self)
+
+    monkeypatch.setattr(Intake, "config", flaky)
+    out = runner.settle(rig["intake"], github, rig["clone"])
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
+    assert commented and github.labels[7] == {runner.DONE}
+
+
+def _direct(tmp_path, body="exit 0", seconds=300):
+    hook, seen = _hook(tmp_path, body)
+    (tmp_path / "state").mkdir(exist_ok=True)
+    cfg = {**intake_config.DEFAULT_CONFIG, "post_verified_hook": hook,
+           "post_verified_hook_seconds": seconds}  # fmt: skip
+
+    def run():
+        done = post_verified.run_post_verified_hook(
+            tmp_path / "state", cfg, task_id="t1", attempt_id="a1", candidate="c",
+            clone=tmp_path, repo_slug="o/r", gh="/bin/gh",
+        )  # fmt: skip
+        assert done is not None
+        return done
+
+    return run, tmp_path / "state" / post_verified.LOG_NAME, seen
+
+
+def test_a_fifo_log_does_not_block_and_is_alerted(tmp_path, capsys):
+    run, log, _ = _direct(tmp_path)
+    os.mkfifo(log)
+    started = time.monotonic()
+    assert run()["ok"] is True
+    assert time.monotonic() - started < 10 and "cannot record" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", ["readable", "hardlink"])
+def test_an_existing_log_that_is_not_private_is_not_written(tmp_path, capsys, kind):
+    run, log, _ = _direct(tmp_path)
+    if kind == "readable":
+        log.write_text("old\n")
+        log.chmod(0o644)
+    else:
+        other = tmp_path / "other"
+        other.write_text("old\n")
+        other.chmod(0o600)
+        os.link(other, log)
+    assert run()["ok"] is True
+    assert log.read_text() == "old\n" and "cannot record" in capsys.readouterr().err
+
+
+def test_an_existing_private_log_is_appended_to(tmp_path):
+    run, log, _ = _direct(tmp_path)
+    run()
+    run()
+    assert len(log.read_text().splitlines()) == 2
+
+
+def test_a_timeout_also_kills_what_the_hook_started(tmp_path, capsys):
+    run, _log_path, seen = _direct(tmp_path, f"sleep 60 & echo $! > {tmp_path}/child; wait", 1)
+    assert run()["reason"] == "TIMEOUT"
+    child = int((tmp_path / "child").read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the hook's child survived the timeout")
 
 
 @pytest.mark.parametrize(

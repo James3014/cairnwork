@@ -51,7 +51,7 @@ from cairnwork.lineage import require_on_main
 from cairnwork.lineage import verify_origin as _verify_origin
 from cairnwork.ownership import OwnershipError, OwnershipUnknown
 from cairnwork.pipeline import TaskRejected
-from cairnwork.post_verified import run_post_verified_hook
+from cairnwork.post_verified import alert, run_post_verified_hook
 from cairnwork.workspace import ATTEMPT_ID
 
 QUEUE, RUNNING, FAILED_LABEL, DONE, NEEDS_FIX = (
@@ -209,8 +209,8 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
                 url = _open_pr(intake, github, clone, number, status)
                 github.relabel(number, DONE, RUNNING)
                 github.comment(number, done_text(url, github.repo))
-                hook = _post_verified(intake, github, clone, status)  # off: {}
-                results.append({"issue": number, "pr": url, **hook})
+                results.append({"issue": number, "pr": url})
+                _post_verified(intake, github, clone, status)  # never touches the result
             else:
                 github.relabel(number, FAILED_LABEL, RUNNING)
                 github.comment(number, failure_text(status))
@@ -227,18 +227,16 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
     return results
 
 
-def _post_verified(intake: Intake, github: GitHub, clone: Path, status) -> dict[str, str]:
-    """The opt-in hook, after the outcome is final; {} when it is off, and never a verdict."""
+def _post_verified(intake: Intake, github: GitHub, clone: Path, status) -> None:
+    """The opt-in hook, after the outcome is final: logged and alerted, never a verdict."""
     try:  # status was validated by _open_pr
-        done = run_post_verified_hook(
+        run_post_verified_hook(
             intake.state, intake.config(), task_id=str(status["task_id"]),
             attempt_id=str(status["attempt_id"]), candidate=str(status["candidate_commit"]),
             clone=clone, repo_slug=github.repo, gh=github.gh,
         )  # fmt: skip
-    except Exception as exc:  # noqa: BLE001 - the hook must never change the settle result
-        print(f"ALERT post_verified_hook: {type(exc).__name__}", file=sys.stderr)
-        return {"post_verified_hook": f"{type(exc).__name__}"}
-    return {} if done is None else {"post_verified_hook": "OK" if done["ok"] else done["reason"]}
+    except Exception as exc:  # noqa: BLE001 - nothing here may change the settle result
+        alert(f"skipped: {type(exc).__name__}")
 
 
 def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -> str:

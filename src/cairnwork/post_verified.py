@@ -4,7 +4,8 @@ The state ``config.json`` key ``post_verified_hook`` names an executable (generi
 never imports what it is). It gets the task, attempt and candidate as arguments and only
 the few environment variables below, the GitHub token among them (never as an argument).
 Its outcome is recorded in ``post-verified-hook.jsonl`` and alerted on stderr, and is never
-a verdict: the labels, comment and PR are already final when it runs. Unset = nothing runs.
+a verdict: the labels, comment, PR and the runner's result are already final when it runs.
+Unset = nothing runs.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -69,11 +72,7 @@ def run_post_verified_hook(
     error: str | None = None
     out = err = ""
     try:
-        done = subprocess.run(
-            argv, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=config["post_verified_hook_seconds"], env=_env(gh), check=False,
-        )  # fmt: skip
-        returncode, out, err = done.returncode, done.stdout, done.stderr
+        returncode, out, err = _run(argv, config["post_verified_hook_seconds"], _env(gh))
     except subprocess.TimeoutExpired as exc:
         error, out, err = "TIMEOUT", exc.stdout, exc.stderr  # type: ignore[assignment]
     except (OSError, subprocess.SubprocessError) as exc:
@@ -92,19 +91,54 @@ def run_post_verified_hook(
     ok = returncode == 0 and error is None
     reason = None if ok else (error or f"exit {returncode}")
     if reason:
-        print(f"ALERT post_verified_hook task {task_id} attempt {attempt_id}: {reason}",
-              file=sys.stderr)  # fmt: skip
+        alert(f"task {task_id} attempt {attempt_id}: {reason}")
     return {"returncode": returncode, "ok": ok, "reason": reason}
 
 
-def _append(path: Path, record: dict[str, Any]) -> None:
-    line = json.dumps(record, sort_keys=True) + "\n"
+def alert(message: str) -> None:
+    """One stderr line; never raises (a closed or broken stderr must not reach the runner)."""
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        print(f"ALERT post_verified_hook {message}", file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001, S110 - nowhere left to report to
+        pass
+
+
+def _run(argv: list[str], seconds: int, env: dict[str, str]) -> tuple[int, str, str]:
+    """Its own session, so a timeout kills whatever the hook started (git, gh) as well."""
+    with subprocess.Popen(
+        argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=env, start_new_session=True,
+    ) as proc:  # fmt: skip
         try:
-            os.write(fd, line.encode())
+            out, err = proc.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(argv, seconds, out, err) from None
+        return proc.returncode, out, err
+
+
+def _append(path: Path, record: dict[str, Any]) -> None:
+    """Append to a private regular file only: no symlink, FIFO, hard link or readable log."""
+    data = (json.dumps(record, sort_keys=True) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError("not a single-link regular file")
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise OSError("not private to the runner")
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError("no progress writing")
+                data = data[written:]
         finally:
             os.close(fd)
     except OSError as exc:
-        print(f"ALERT post_verified_hook: cannot record to {path.name}: {type(exc).__name__}",
-              file=sys.stderr)  # fmt: skip
+        alert(f"cannot record to {path.name}: {type(exc).__name__}: {exc}")
