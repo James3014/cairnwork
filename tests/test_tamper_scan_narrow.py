@@ -96,6 +96,13 @@ def test_is_test_path(path, expected):
         ("sys.modules['dep\"] = m", True),
         ("sys.modules.update({'dep': m})", True),
         ("sys.modules.clear()", True),
+        ('sys.modules["pytest"] = fake', True),
+        ('sys.modules["_cairnwork_report_guard"] = fake', True),
+        ("sys.modules['dep'] = sys.modules['pytest'] = Fake()", True),
+        ("sys.modules['dep'] = sys.modules.pop('pytest')", True),
+        ("sys.modules['dep'] = (sys.modules.update({'pytest': f}), m)[1]", True),
+        ("sys.modules['dep'] = sys.modules.clear()", True),
+        ("sys.modules.setdefault('dep', sys.modules.pop('pytest'))", True),
     ],
 )
 def test_sys_modules_stubs_of_unrelated_modules_pass(line, caught):

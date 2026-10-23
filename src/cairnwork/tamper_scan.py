@@ -69,12 +69,13 @@ _STUB_NAME = (
     rf"(?:'(?!{_SENSITIVE_MODULE}(?:\.|'))[\w.]+'|\"(?!{_SENSITIVE_MODULE}(?:\.|\"))[\w.]+\")"
 )
 _STUB_KEY = rf"\[\s*{_STUB_NAME}\s*\]"
+_STUB_RHS = r"(?:(?!\bmodules\b)[^;])*"  # no second sys.modules access chained on the line
 # One statement on the line: assign, delete, pop or setdefault one literal stub key.
 _SYS_MODULES_STUB = (
-    rf"^\s*(?:sys\s*\.\s*modules\s*{_STUB_KEY}\s*=(?!=)[^;]*"
+    rf"^\s*(?:sys\s*\.\s*modules\s*{_STUB_KEY}\s*=(?!=){_STUB_RHS}"
     rf"|del\s+sys\s*\.\s*modules\s*{_STUB_KEY}"
     rf"|sys\s*\.\s*modules\s*\.\s*pop\s*\(\s*{_STUB_NAME}\s*(?:,\s*None\s*)?\)"
-    rf"|sys\s*\.\s*modules\s*\.\s*setdefault\s*\(\s*{_STUB_NAME}\s*,[^;]*)\s*(?:#.*)?$"
+    rf"|sys\s*\.\s*modules\s*\.\s*setdefault\s*\(\s*{_STUB_NAME}\s*,{_STUB_RHS})\s*(?:#.*)?$"
 )
 _TEST_DIRS = frozenset({"tests", "test", "testing"})
 
