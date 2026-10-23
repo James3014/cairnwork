@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork import confined, verifier_escape
+from cairnwork import confined, lock_queue, verifier_escape
 from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
@@ -53,9 +53,9 @@ DEFAULT_ROOT = Path(
 # A waiter gives up after this long instead of queueing behind a stuck holder. run_verifiers
 # holds the lock across every spec (each bounded by its timeout, 600 s by default), so it does
 # not use this fixed floor alone: lock_wait_seconds() sizes the wait from the spec count.
-# Waiters poll, so there is no FIFO order: under steady contention one can starve until its
-# own timeout, which is the bound (Issue #140: a cross-process ticket queue would add stale
-# tickets and crashed-holder recovery for a starvation that already fails closed).
+# Waiters queue by ticket in .verifier.queue; a dead waiter's released flock lets us skip it.
+# A live but stopped (SIGSTOP) older waiter blocks later ones until their own timeout,
+# which fails closed.
 LOCK_TIMEOUT_SECONDS = 900.0
 _LOCK_MARGIN_SECONDS = 300.0
 # The derived wait never exceeds this (4 h, about 23 specs at the 600 s default): a huge spec
@@ -369,17 +369,25 @@ class VerifierAccount:
         fd = os.open(self.root / ".verifier.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise VerifierAccountError(
-                            f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
-                        ) from None
-                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+            try:
+                with lock_queue.ticket(self.root / ".verifier.queue", deadline) as is_my_turn:
+                    while True:
+                        if is_my_turn():
+                            try:
+                                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except BlockingIOError:
+                                pass  # the current holder still owns the main lock
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise lock_queue.TicketTimeout
+                        time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+            except lock_queue.TicketTimeout:
+                raise VerifierAccountError(
+                    f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
+                ) from None
+            except OSError as exc:
+                raise VerifierAccountError(f"verifier lock queue: {exc}") from exc
             yield
         finally:
             os.close(fd)
