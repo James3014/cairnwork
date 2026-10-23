@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     except TaskRejected as exc:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except RunLockBusy as exc:
-        return _emit({"error": exc.code, "detail": "a runner is still working"}, 2)
+        return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except (
         KeyReusedWithDifferentRequest,
         DuplicateLogicalTask,
