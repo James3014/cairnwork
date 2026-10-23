@@ -28,10 +28,11 @@ What the probe reuses and what the worker can see:
   Residual channel in account mode (Issue #207, measured in the PR #204 round-2 review): the code
   under test can still choose names that pass the filter (charset and target-file prefix), so
   each turn's summary can carry up to MAX_NAMES x MAX_NAME_CHARS = 10 x 160 characters of text of
-  its choosing. That text cannot carry other processes' secrets on this host: reading another
-  uid's KERN_PROCARGS2 is EPERM for a non-root account, the setuid /bin/ps is denied under the
-  Seatbelt profile, and require_idle keeps other account processes away while a probe runs. The
-  worst case is that it leaks this run's own one-time nonce, which the run already holds.
+  its choosing. In the round-2 review's measurements that text could not carry other processes'
+  secrets on this host: reading another uid's KERN_PROCARGS2 is EPERM for a non-root account,
+  the setuid /bin/ps is denied under the Seatbelt profile, and require_idle keeps other account
+  processes away while a probe runs. The only payload demonstrated was this run's own one-time
+  nonce, which the run already holds; this is a measured result, not a proof.
   Still open before promotion (Issue #207): a check with a real verifier account, not the
   same-uid stand-in used in CI; and showing only node ids that the base version collects (one
   extra collect; judged not worth its cost, see the Issue).
