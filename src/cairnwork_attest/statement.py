@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.assurance import assurance_from_record
@@ -20,6 +22,9 @@ STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 _OID = re.compile(r"^[0-9a-f]{40}$")
 
 
+TEST_SOURCES = ("bundle", "auto", "none")  # none: no hidden tests, or a pre-change run
+
+
 class StatementInputError(AttestError):
     code: str = "STATEMENT_INPUT_ERROR"
 
@@ -29,6 +34,36 @@ class Producer:
     name: str = "cairnwork"
     version: str = "0.0.1.dev0"
     git_commit: str = ""
+
+
+def run_test_source(state_dir: Path, task_id: str, attempt_id: str) -> str:
+    """The hidden-test mode the run journaled (read-only).
+
+    ``"none"`` only when there is no journal file (a pre-change state) or the journal has no
+    TEST_SOURCE row for this run (it had no hidden tests). An unreadable or locked journal, or
+    contradictory or unknown rows, raise: no statement is signed on a guess.
+    """
+    path = Path(state_dir) / "journal.sqlite"
+    if not path.is_file():
+        return "none"
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(
+                "SELECT detail FROM attempt_journal"
+                " WHERE task_id = ? AND attempt_id = ? AND phase = 'TEST_SOURCE' ORDER BY seq",
+                (task_id, attempt_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise AttestError(f"cannot read the journal's TEST_SOURCE row: {exc}") from exc
+    modes = {row[0] for row in rows}
+    if not modes:
+        return "none"
+    if len(modes) != 1 or not modes <= set(TEST_SOURCES):
+        raise AttestError(f"contradictory or unknown TEST_SOURCE rows: {sorted(modes)}")
+    return modes.pop()
 
 
 def _validate_verified_record(verified: VerifiedRecord) -> None:
@@ -76,7 +111,10 @@ def build_statement(
     *,
     producer: Producer,
     timestamp: str,
+    test_source: str = "none",
 ) -> dict[str, Any]:
+    if test_source not in TEST_SOURCES:
+        raise StatementInputError(f"test_source must be one of {TEST_SOURCES}, got {test_source!r}")
     _validate_verified_record(verified)
     record = verified.record
     assurance = assurance_from_record(verified)
@@ -111,6 +149,7 @@ def build_statement(
             "core_identity": core_identity,
             "verifier_observations": verifier_observations,
             "hidden_test_commit": None,
+            "test_source": test_source,
             "producer": {
                 "name": producer.name,
                 "version": producer.version,

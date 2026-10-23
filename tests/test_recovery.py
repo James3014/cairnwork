@@ -47,8 +47,8 @@ def stores(state):
     )
 
 
-def crash(project, state, fault, fix=GOOD):
-    env = {**os.environ, "CAIRNWORK_FAULT_AFTER": fault}
+def crash(project, state, fault, fix=GOOD, test_commit=""):
+    env = {**os.environ, "CAIRNWORK_FAULT_AFTER": fault, "CRASH_TEST_COMMIT": test_commit}
     done = subprocess.run(
         [sys.executable, str(DRIVER), str(project), str(state), fix],
         env=env,
@@ -75,6 +75,21 @@ def test_crash_before_verification_ends_failed(project, tmp_path, fault):
     ]
     assert ledger.get(task_id=decisions[0].task_id).status == "FAILED"
     assert not (tmp_path / "runs" / decisions[0].attempt_id).exists()
+
+
+def test_crash_right_after_test_source_settles_like_the_phase_before(project, tmp_path):
+    from test_deferred_tests import REGRESSION, make_test_commit
+
+    _, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    crash(project, tmp_path, "TEST_SOURCE", test_commit=test_commit)
+    decisions, ledger = settle(tmp_path)
+    assert [(d.previous_status, d.new_status, d.reason) for d in decisions] == [
+        ("DISPATCHED", "FAILED", "INTERRUPTED_AFTER_TEST_SOURCE")  # no Core verdict exists yet
+    ]
+    assert ledger.get(task_id=decisions[0].task_id).status == "FAILED"
+    assert not (tmp_path / "runs" / decisions[0].attempt_id).exists()
+    phases = [e.phase for e in stores(tmp_path)[2].entries(decisions[0].task_id)]
+    assert phases[-1] == "TEST_SOURCE"
 
 
 @pytest.mark.sandbox

@@ -16,7 +16,7 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 | `cancel --task-id ID` | 只能取消還沒開始的任務；已經在跑的會跑完 | `{"task_id", "status": "CANCELLED"}` |
 | `in-flight` | 給部署器的靜止閘門用；任何非 0 的 exit code（例如 state 目錄不存在）都要當作「有在途任務」 | `{"accepting", "count", "task_ids", "foreign_task_ids"}`。`count` 和 `task_ids` 只算所屬系統是 `cairnwork` 的在途任務；其他系統持有的在途任務另外列在 `foreign_task_ids`，不計入 `count` |
 | `accept`／`drain` | 打開／關閉接新任務（**預設是關閉**） | `{"accepting": bool}` |
-| `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1；任務已處理、但清不掉含隱藏測試的執行目錄時 exit 3（`leftover_run_dirs` > 0，不算乾淨成功，要人工清理）| `{"decisions": [...], "leftover_run_dirs": N}` |
+| `recover` | 處理中斷的任務，不會重跑。重開機後要執行一次；`in-flight` 長時間卡住時也可以執行。有執行程序還在跑時會拒絕，所以隨時執行都安全；有任務處理不了時 exit 1；任務已處理、但清不掉含隱藏測試的執行目錄（`leftover_run_dirs` > 0）或讀不到程序表、無法確認該次嘗試的程序已殺掉（`sweep_unavailable` 為 true，decision 的 `detail` 以 `SWEEP_UNAVAILABLE:` 開頭、`killed_processes` 為 -1）時 exit 4：沒有 `error`，不算乾淨成功，要人工清理或檢查；狀態判定不變，Core 在當機前已 VERIFIED 的任務仍是 COMPLETED（verdict 綁定候選 commit）| `{"decisions": [...], "leftover_run_dirs": N, "sweep_unavailable": bool}` |
 
 所有指令都要加 `--state <目錄>`。`config.json` 可以設定 `mirror`（絕對路徑）。**Gateway 轉送一定要設定**，因為請求的 `repo` 是線上 Controller，Cairnwork 不能寫入它。
 - mirror 是 Cairnwork 為這個目標 repo 準備的專用 clone，必須事先建好、有 `origin`，Issue 入口的 `--clone` 用的就是同一個。不存在時回 `BAD_CONFIG`。**一定要單分支**:用 `git clone --single-branch --branch main <url>` 建立,否則整包 clone 會把放延後(隱藏)測試的分支也抓進來、讓 worker 讀得到;runner 啟動時檢查 `remote.origin.fetch` 只含 main,否則以 `LINEAGE_MIRROR_NOT_SINGLE_BRANCH` 拒絕(#76)。
@@ -25,10 +25,10 @@ Gateway 保留自己的入口和認證，只呼叫一個指令 `cairnwork-route`
 - **來源血緣（`require_base_on_main`）**：state 的 `config.json` 可設 `"require_base_on_main"`（布林，預設 `true`）。新任務綁定前，Cairnwork 會 fetch 任務 repo 的 origin main，base commit 不在 origin/main 的歷史裡就拒絕 `BASE_NOT_ON_MAIN`；fetch 失敗則是另一個錯誤碼 `ORIGIN_FETCH_FAILED`（fail closed）。沒有 origin 的 repo 要在 config.json 設 `require_base_on_main` 為 `false`。重送已綁定的任務不重查。這是提交時防呆的檢查（擋誤送），不是防惡意呼叫者：路由路徑不跑 `verify_origin`。
 - 綁定的 repo 是 mirror，所以在途任務還沒結束時，不要更改 `mirror` 設定，否則重送會被當成不同的請求（`KeyReusedWithDifferentRequest`）。目錄必須屬於執行者、而且權限是 0700，否則拒絕（`BAD_STATE`），所以裡面的檔案只有擁有者能存取。呼叫端的 umask 不影響結果（umask 077 也可以，已實測）：verifier 帳號需要的讀取權限由 Cairnwork 自己設定。第一次正式 `accept` 請用全新的 state 目錄（請求摘要從這一版起包含 repo 路徑，舊目錄裡的綁定會對不上）。目錄裡存放 ledger、公證、journal、請求、執行目錄和 `config.json`（`model`、`agy`、`verifier_account`、`verifier_python`，預設使用專屬 verifier 帳號；verifier 在帳號自己的 `/Users/Shared/cairnwork` 底下執行）。目標 repo 的測試需要它自己的依賴時，用 `scripts/setup_target_venv.sh <乾淨 clone> <名稱> [Python 版本]` 依目標的 `uv.lock` 建 `/Users/Shared/cairnwork/venvs/<名稱>`，再把 `verifier_python` 設成那個 venv 的 `bin/python`（絕對路徑）。一個 state 目錄只有一個 `verifier_python`，所以一個 state 目錄只服務一個目標 repo；要接第二個 repo，就另開一個 state 目錄。pytest 設定一律取自任務的 base commit，不看候選版本（`src/cairnwork/pytest_config.py`）。
 
-**Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`BAD_CONFIG`、`BAD_STATE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`、`DuplicateLogicalTask`）；3 查不到這個任務（`UNKNOWN_TASK`），或 `recover` 清不掉執行目錄（輸出有 `leftover_run_dirs`，沒有 `error`）；1 其他錯誤。
+**Exit code**：0 成功；2 拒絕（`{"error", "detail"}`，例如 `NOT_ACCEPTING`、`BAD_REQUEST`、`BAD_SCOPE`、`BAD_CONFIG`、`BAD_STATE`、`NOT_CANCELLABLE`、`RUN_LOCK_BUSY`、`KeyReusedWithDifferentRequest`、`DuplicateLogicalTask`）；3 查不到這個任務（`UNKNOWN_TASK`）；4 `recover` 任務都處理了、但清不掉執行目錄或無法檢查程序（輸出有 `leftover_run_dirs`、`sweep_unavailable`，沒有 `error`）；1 其他錯誤。
 
 - **只有 `NOT_ACCEPTING` 代表「沒有收下，原系統可以接手」**。其他任何回答之後，都不可以把這筆任務交給別的系統。
-- 1 和 3 一律當作「不知道」，不是「失敗」。
+- 1、3 和 4 一律當作「不知道」，不是「失敗」。
 - 判斷任務完成只看 `status == "COMPLETED"`。`core_verified` 只是補充資訊。
 - `check` 只檢查請求格式，不檢查 repo 或 base commit 是否存在，所以 `would_accept: true` 之後的 `submit` 仍然可能失敗。
 

@@ -3,8 +3,9 @@ mutation review — `shown = recorded or verdict` and the CORE_NOT_VERIFIED fall
 by testing the extracted pure function directly."""
 
 from types import SimpleNamespace
+from typing import Any
 
-from cairnwork.reasons import verdict_reason
+from cairnwork.reasons import verdict_reason, why_not_passed
 
 
 def _v(status, reason=""):
@@ -41,3 +42,12 @@ def test_a_non_verified_status_with_no_reason_reads_core_status():
     assert verdict_reason(False, _v("FAILED_VERIFICATION"), _v("FAILED_VERIFICATION")) == (
         "CORE_FAILED_VERIFICATION"
     )
+
+
+def test_an_oversized_test_report_is_a_named_cause_only_when_flagged():
+    base: dict[str, Any] = dict(
+        ran_sandboxed=True, returncode=0, timed_out=False, mutated=(), survivors=0,
+        log_too_big=False, tests_ran=False,
+    )  # fmt: skip
+    assert "test report over the size cap" not in why_not_passed(**base)
+    assert "test report over the size cap" in why_not_passed(**base, report_too_big=True)

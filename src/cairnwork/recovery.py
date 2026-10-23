@@ -10,7 +10,13 @@ Rules (from Nexus-new's experience, see docs/LESSONS_FROM_NEXUS.md):
   task becomes FAILED with an INTERRUPTED reason.
   To try again, supersede it and submit a new key (pipeline.py);
 - kill any worker the dead run left behind (found by its CAIRNWORK_ATTEMPT
-  environment marker) and remove the attempt's clones;
+  environment marker) and remove the attempt's clones. When the process table
+  cannot be read (SWEEP_UNAVAILABLE) nothing is known about them: the Decision
+  says so (``sweep_unavailable``, detail) and the recovery is not clean (route
+  exits 4, as for leftover directories). The status decision does not change:
+  a verdict Core recorded is bound to the candidate commit, and a process that
+  outlived the run can neither alter it nor record another, so COMPLETED still
+  stands; a task without such a verdict is FAILED either way (#189);
 - settle each task on its own: one bad record is reported, not fatal, and
   recovery is idempotent, so it can run again after a crash during recovery.
 """
@@ -26,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cairnwork import runlock
-from cairnwork.confined import ATTEMPT_ENV, sweep_marked
+from cairnwork.confined import ATTEMPT_ENV, SWEEP_UNAVAILABLE, sweep_marked
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, OwnershipRecord
@@ -42,9 +48,10 @@ class Decision:
     previous_status: str
     new_status: str
     reason: str
-    killed_processes: int = 0
+    killed_processes: int = 0  # SWEEP_UNAVAILABLE (-1) when the processes could not be read
     detail: str = ""  # e.g. "LEFTOVER_RUN_DIRS: 2: a1-q-v0, a1-r-v0.x"; "" when nothing remains
     leftover_run_dirs: int = 0  # how many run directories the cleanup could not remove
+    sweep_unavailable: bool = False  # the attempt's processes were not checked: may still run
 
 
 def recover(
@@ -105,7 +112,8 @@ def _settle(
         return Decision(record.task_id, "", record.status, "FAILED", "INTERRUPTED_BEFORE_DISPATCH")
     attempt_id = entries[-1].attempt_id
     phases = [e for e in entries if e.attempt_id == attempt_id]
-    killed = sweep_marked(ATTEMPT_ENV, attempt_id)  # SWEEP_UNAVAILABLE (-1): not checked
+    killed = sweep_marked(ATTEMPT_ENV, attempt_id)
+    unchecked = killed == SWEEP_UNAVAILABLE  # unknown, never "none" (confined.sweep_marked)
     dispatched = [e.detail for e in phases if e.phase == "DISPATCHED" and e.detail]
     roots = [Path(run_root)]  # the state's run root, and the root this attempt was dispatched under
     if dispatched and Path(dispatched[-1]) != roots[0]:
@@ -119,7 +127,10 @@ def _settle(
         left += _leftover_names(owner_root, attempt_id)
     if account is not None:
         left += _leftover_names(account.run_root, attempt_id)
-    detail = f"LEFTOVER_RUN_DIRS: {_names(left)}" if left else ""
+    notes = [_SWEEP_UNAVAILABLE_NOTE] if unchecked else []
+    if left:
+        notes.append(f"LEFTOVER_RUN_DIRS: {_names(left)}")
+    detail = "; ".join(notes)
     if left and leftovers_log is not None:
         try:
             _log_leftovers(leftovers_log, record.task_id, attempt_id, left)
@@ -139,8 +150,9 @@ def _settle(
         new, reason = "FAILED", f"INTERRUPTED_AFTER_{phases[-1].phase}"
     ledger.set_status(record.task_id, new)
     return Decision(
-        record.task_id, attempt_id, record.status, new, reason, killed, detail, len(left)
-    )
+        record.task_id, attempt_id, record.status, new, reason, killed, detail, len(left),
+        unchecked,
+    )  # fmt: skip
 
 
 def _log_leftovers(path: Path, task_id: str, attempt_id: str, left: list[str]) -> None:
@@ -155,6 +167,9 @@ def _log_leftovers(path: Path, task_id: str, attempt_id: str, left: list[str]) -
 
 
 _RESULTS = ("COMPLETED", "FAILED")  # the run's own FINISHED details (pipeline.py)
+_SWEEP_UNAVAILABLE_NOTE = (
+    "SWEEP_UNAVAILABLE: processes of this attempt were not checked and may still run"
+)
 _RUN_TAGS = "vbpqr"  # verify, base-test, and the P2P probe / candidate run / re-run (p2p.py)
 
 

@@ -15,7 +15,11 @@ from cairnwork.p2p import P2PPlan, P2PRejected, plan_p2p, run_plan
 from cairnwork.verifiers import VerifierRun, VerifierSpec
 
 TASK = SimpleNamespace(
-    repo="/repo", base_commit="b" * 40, test_roots=("tests",), allowed_files=("src/pkg/a/b.py",)
+    repo="/repo",
+    base_commit="b" * 40,
+    test_roots=("tests",),
+    import_paths=(),
+    allowed_files=("src/pkg/a/b.py",),
 )
 RESULT = SimpleNamespace(attempt_id="att")
 VERIFYING = (None, None)
@@ -79,6 +83,31 @@ def test_degraded_probe_whose_module_dir_tests_all_fail_on_the_base_is_refused(m
     got, probed = plan(monkeypatch, existing, [(None, "base-probe-timeout"), (outcomes, "")])
     assert isinstance(got, P2PRejected) and len(probed) == 2
     assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "passes on the base" in str(got)
+
+
+def test_a_report_over_the_cap_degrades_to_module_dir_with_that_reason(monkeypatch):
+    # #184: a suite too large for one guard report. The changed file maps to nothing, so
+    # module-dir selects the tests directly in the root: the nested big file is left out.
+    existing = ("tests/nested/test_big.py", "tests/test_calc.py")
+    outcomes = {"tests/test_calc.py::test_a": "passed"}
+    got, probed = plan(
+        monkeypatch, existing, [(None, "base-probe-report-over-cap"), (outcomes, "")]
+    )
+    assert isinstance(got, P2PPlan) and got.spec is not None
+    assert got.rule["degraded"] == "base-probe-report-over-cap"
+    assert got.rule["applied"] == "module-dir" and got.rule["targets"] == 1
+    assert probed == [existing, ("tests/test_calc.py",)]
+
+
+def test_a_degraded_probe_that_would_run_the_same_files_is_refused_without_a_second_probe(
+    monkeypatch,
+):
+    # #184 flat layout: module-dir selects exactly the files whole-suite could not report on,
+    # so probing again is pointless; the refusal names the cause, not a module-dir probe
+    got, probed = plan(monkeypatch, ("tests/test_calc.py",), [(None, "base-probe-report-over-cap")])
+    assert isinstance(got, P2PRejected) and probed == [("tests/test_calc.py",)]
+    assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "base-probe-report-over-cap" in str(got)
+    assert "module-dir selects the same files" in str(got)
 
 
 def test_no_base_passing_test_without_degradation_runs_nothing(monkeypatch):
