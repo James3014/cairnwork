@@ -288,7 +288,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         if result.code == "NOOP":
             print(f"NOOP {result.candidate}")
         else:
-            print(f"PUBLISHED {result.candidate} {result.notes_ref} {result.notes_tip}")
+            print(f"PUBLISHED {result.candidate} {result.notes_ref} {result.notes_tip or '-'}")
     else:
         detail = f": {result.detail}" if result.detail else ""
         print(f"{result.code}{detail}", file=sys.stderr)
