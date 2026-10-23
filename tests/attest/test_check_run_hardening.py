@@ -135,6 +135,7 @@ def test_cli_created_without_html_url(tmp_path: Path, capsys, monkeypatch) -> No
         {"token": "tok en"},
         {"details_url": "https://"},
         {"details_url": "https:///path"},
+        {"details_url": "https://[x"},
     ],
 )
 def test_more_usage_errors(tmp_path: Path, kw: dict) -> None:

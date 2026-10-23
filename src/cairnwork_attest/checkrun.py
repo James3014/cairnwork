@@ -176,13 +176,18 @@ def _check_args(
         return f"{TOKEN_ENV} has unexpected characters"
     if not _SLUG.fullmatch(repo_slug) or any(p in (".", "..") for p in repo_slug.split("/")):
         return f"repo slug must be OWNER/NAME: {_clean(repo_slug)!r}"
-    if details_url is not None and not (
-        details_url.startswith("https://")
-        and re.fullmatch(r"[^\s\x00-\x1f\x7f]+", details_url)
-        and urllib.parse.urlsplit(details_url).hostname
-    ):
-        return "details url must start with https:// and contain no whitespace"
+    if details_url is not None and not _https_url(details_url):
+        return "details url must be https:// with a host and no whitespace"
     return None
+
+
+def _https_url(url: str) -> bool:
+    if not url.startswith("https://") or not re.fullmatch(r"[^\s\x00-\x1f\x7f]+", url):
+        return False
+    try:
+        return bool(urllib.parse.urlsplit(url).hostname)
+    except ValueError:
+        return False
 
 
 def post_check_run(
