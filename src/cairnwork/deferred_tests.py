@@ -63,9 +63,17 @@ def ensure_test_commit(repo: Path, test_commit: str, store=None) -> None:
     nothing on this machine holds the tests (the Issue runner reads its parent via the
     GitHub API, or from the private store). With a store (deferred_store.py, Issue #119)
     the commit comes from its bundle and never from a remote the worker could also reach;
-    a ``required`` store refuses a commit that was not imported instead of falling back."""
+    a ``required`` store refuses a commit that was not imported instead of falling back.
+    It does so before looking at repo: a commit that is already there but never went
+    through the store reached the machine by another route (a fetch from origin, a push)
+    and must not pass as "bundle" (#189); one the store holds is fetched from its bundle."""
     if not OID.fullmatch(test_commit):
         raise TestCommitRejected("TEST_COMMIT_INVALID", "not a 40-hex commit id")
+    if store is not None and store.required:  # provenance first, presence never suffices
+        if not store.has(test_commit):
+            raise TestCommitRejected("TEST_COMMIT_NOT_IMPORTED", test_commit)
+        store.fetch_into(repo, test_commit)
+        return
     try:
         run_git(repo, "cat-file", "-e", f"{test_commit}^{{commit}}")
         return
