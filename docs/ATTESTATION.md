@@ -215,11 +215,26 @@ cairnwork-attest publish \
 
 The note stores the bundle bytes exactly (`git hash-object -w` + `git notes add -C`, so no whitespace normalisation). `cairnwork/verify-action` fetches `refs/notes/cairnwork` and reads the note for the candidate commit. `publish` never overwrites an existing note: the same bundle is a no-op (`NOOP`, exit 0), a different bundle for the same candidate is `NOTE_CONFLICT` (exit 1, left for a human). A push rejected as non-fast-forward (another publisher advanced the ref) is retried after re-fetching, up to `--max-attempts`; network or identity failures exit 2. No automatic notes merge strategy is used. The local notes ref is treated as a mirror of the remote: each attempt force-fetches it, so notes that exist only locally on that ref are discarded. `--remote` must be a configured remote name and `--notes-ref` must be under `refs/notes/`; anything else is rejected as `USAGE` before git runs.
 
+## Check Run (Phase 2, informational)
+
+After publishing, `cairnwork-attest check-run` posts a GitHub Check Run on the candidate commit so reviewers see the attestation facts in the pull request UI:
+
+```shell
+CAIRNWORK_GITHUB_TOKEN=... cairnwork-attest check-run \
+  --bundle attestation.bundle.json \
+  --repo-slug OWNER/NAME \
+  --public-key attestation.pub.pem
+```
+
+The Check Run lists the candidate, base, SHA-256 of the signed Statement bytes, test source, key id and the offline verification result (with `--public-key` the signature is checked, reported as `VERIFIED, signature only`; add `--repo` to run the full `verify`; `--repo` needs `--public-key`; without a key the title is marked `UNVERIFIED` and the summary says the signature was not checked). A missing or malformed key file fails before anything is posted (`KEY_UNREADABLE` / `KEY_MALFORMED`), so an operator mistake never reads as a forged bundle. Its conclusion is always `neutral`: it is informational and never the enforcing gate. Enforcement stays with `cairnwork/verify-action`, which verifies the published note itself.
+
+The token is read only from the environment variable `CAIRNWORK_GITHUB_TOKEN` (never a command-line argument) and is never printed. Use a GitHub App installation token with `checks: write`. Bundle values enter the summary only when they have the expected shape (40-hex commits, 64-hex key id, a lowercase `test_source` word); anything else is shown as `invalid`, so no free text from the bundle reaches the pull request page. GitHub error messages are redacted of the token and reduced to plain text. Exit 0 means `CREATED`; usage, key, bundle, HTTP and network failures exit 2.
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred:
 - Sigstore signing and transparency log integration.
-- Forge reporting via Check Runs (the notes push is implemented by `cairnwork-attest publish`).
+- Enforcing forge status (the notes push is `cairnwork-attest publish`; the informational Check Run is `cairnwork-attest check-run`).
 - `hidden_test_commit`: Durably binding secret evaluation test commit in the notary record.
 - Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.

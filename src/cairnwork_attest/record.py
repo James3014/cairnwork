@@ -79,7 +79,7 @@ def parse_strict_json(
         )
     except AttestError:
         raise
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         raise error_cls(f"invalid JSON: {exc}", code=malformed_code) from exc
 
 
