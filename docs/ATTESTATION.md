@@ -244,6 +244,12 @@ The bundle is written to `<out-dir or STATE/attestations>/<task>-<attempt>.bundl
 
 It prints one JSON line (sorted keys): `ok`, `task_id`, `attempt_id`, `candidate`, `bundle` and `steps` (`step`, `code`, `detail`). Exit 0 when every step that ran succeeded (statement `OK`, publish `PUBLISHED` or `NOOP`, check run `CREATED` or skipped by `--no-check-run`), 1 when publish returned `NOTE_CONFLICT`, 2 for any other failure. The token never appears in the output.
 
+## Runner wiring (opt-in, default off)
+
+The Issue runner can call an executable after a task's PR is open: set the state `config.json` key `post_verified_hook` to an absolute path (and optionally `post_verified_hook_seconds`, default 300). Unset, nothing runs and the runner behaves exactly as before. The intended hook is `cairnwork-attest on-verified`, which signs the statement, publishes the note and posts the informational Check Run; it needs a signing key in the same state directory (`cairnwork-attest keygen --state <state>`).
+
+The hook runs only in the verified branch, after the PR, labels and comment are final, so it can never change the outcome. It gets the task, attempt, candidate, clone and `OWNER/NAME` as arguments, and only `PATH`, `HOME`, `LANG`, `LC_ALL`, `CAIRNWORK_GITHUB_TOKEN` (from the runner's own environment) and the git settings that let its notes push authenticate with the same `gh` credential helper as the runner's branch push. Every run is recorded in `<state>/post-verified-hook.jsonl` (token redacted); a failure, timeout or missing executable also prints one `ALERT post_verified_hook ...` line on stderr. The hook runs in its own session, so a timeout kills whatever it started too. The log is only appended to when it is a private (0600, owned by the runner) single-link regular file; anything else is alerted and skipped. The runner's printed result and exit code are exactly what they are with the hook off.
+
 ## Planned Follow-ups (Phase 2+)
 
 The following capabilities and gaps are explicitly deferred:

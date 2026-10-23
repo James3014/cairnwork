@@ -8,7 +8,7 @@ in one state directory (owner-only):
     config.json        {"model", "agy", "agy_dispatch", "agy_dispatch_*_seconds",
                         "agy_run_as_user", "verifier_account", "verifier_python", "gh",
                         "mirror", "core_url", "core_token_file", "core_identity", "test_roots",
-                        "import_paths"}
+                        "import_paths", "post_verified_hook", "post_verified_hook_seconds"}
     ownership.sqlite, notary.sqlite, journal.sqlite
     requests/<task_id>.json   the request as bound (its digest is checked again)
     runs/              attempt clones, verifier logs, one runner log per task
@@ -40,6 +40,7 @@ from typing import Any
 from cairnwork import runlock
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.gitcmd import GitCommandError, run_git
+from cairnwork.intake_config import DEFAULT_CONFIG, has_token, seconds_ok
 from cairnwork.intake_request import IntakeRefused, task_from_payload
 from cairnwork.issue_task import check_import_paths, check_test_roots
 from cairnwork.journal import Journal
@@ -51,7 +52,7 @@ from cairnwork.ownership import (
     OwnershipLedger,
     OwnershipUnknown,
 )
-from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, DEFAULT_MODE, check_p2p_config
+from cairnwork.p2p_selection import check_p2p_config
 from cairnwork.pipeline import TaskSpec, check_task
 from cairnwork.taskpaths import check_submitted_paths
 from cairnwork.verifier_account import VerifierAccount
@@ -59,64 +60,6 @@ from cairnwork.workers.agy_dispatch import valid_run_as_user
 from cairnwork_protocol.http import CoreHttpError, check_core_url, http_core_verify
 
 _spawn = subprocess.Popen  # replaced in tests
-# verifier_python: the target repository's own interpreter (scripts/setup_target_venv.sh),
-# an absolute path; None runs verifiers with the account's (or Cairnwork's) Python.
-# One per state directory, so one state directory serves one target repository.
-DEFAULT_CONFIG = {
-    "model": "gemini-3.8-flash-high",
-    "agy": "agy",
-    # An account-pool dispatcher run instead of agy (workers/agy_dispatch.py): an absolute
-    # path, and its timing in seconds; None runs agy itself.
-    "agy_dispatch": None,
-    "agy_dispatch_pool_wait_seconds": 600,
-    "agy_dispatch_provider_stall_seconds": 900,
-    "agy_dispatch_stream_no_progress_seconds": 900,
-    # The account the dispatcher runs agy as (--run-as-user, #183); None: the owner, as before.
-    "agy_run_as_user": None,
-    "verifier_account": True,
-    "verifier_python": None,
-    # The gh the Issue runner was started with (cairnwork-issues writes it), so the runner
-    # started by submit re-checks trust with the same one; None means DEFAULT_GH.
-    "gh": None,
-    # Cairnwork's own repository for this target: the base is fetched into it from the
-    # request's repo (read-only), and every ref or object Cairnwork writes lands here,
-    # never in the caller's repository (e.g. the Gateway's live Controller).
-    "mirror": None,
-    # Nexus Core as an HTTP service (cairnwork_protocol.http) instead of in-process:
-    # its root URL and a file holding its bearer token (never the token itself).
-    "core_url": None,
-    # The identity (Core's core_identity object) a remote Core must report; None pins the
-    # Core installed beside Cairnwork.
-    "core_identity": None,
-    "core_token_file": None,
-    # Where verifier targets and deferred tests may live (issue_task.check_test_roots).
-    "test_roots": ["tests"],
-    # Dirs prepended to the verifier's import path so a src-layout project can import its own
-    # package (#82, issue_task.check_import_paths); default empty keeps the behaviour unchanged.
-    "import_paths": [],
-    "test_source": "auto",
-    # A new task's base must be in origin/main's history (lineage.require_on_main, the #76
-    # class) before it is bound; False only for a repository that has no origin. This
-    # submit-time check guards against mistakes, not a hostile caller: verify_origin is not
-    # run on the route path.
-    "require_base_on_main": True,
-    # P2P widening (#117, p2p.py): whole-suite | module-dir | off (opt-out); seconds per run.
-    "p2p_selection": DEFAULT_MODE,
-    "p2p_time_budget_seconds": DEFAULT_BUDGET_SECONDS,
-}
-
-
-def _seconds(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 86400
-
-
-def _has_token(token_file: Any) -> bool:
-    """A regular file holding a token; it is read again at each Core call (rotation)."""
-    try:
-        path = Path(token_file)
-        return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
-    except (OSError, TypeError, ValueError):
-        return False
 
 
 @dataclass(frozen=True)
@@ -150,7 +93,14 @@ class Intake:
         loaded = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
-        for key in ("verifier_python", "mirror", "core_token_file", "agy_dispatch", "gh"):
+        for key in (
+            "verifier_python",
+            "mirror",
+            "core_token_file",
+            "agy_dispatch",
+            "gh",
+            "post_verified_hook",
+        ):
             value = loaded.get(key)
             if value is not None and not (isinstance(value, str) and os.path.isabs(value)):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be an absolute path")
@@ -158,7 +108,9 @@ class Intake:
         if not isinstance(model, str) or not model or any(c in model for c in "\n\r\0"):
             raise IntakeRefused("BAD_CONFIG", "model must be a one-line string")
         for key in DEFAULT_CONFIG.keys() & loaded.keys():
-            if key.startswith("agy_dispatch_") and not _seconds(loaded[key]):
+            if (
+                key.startswith("agy_dispatch_") or key == "post_verified_hook_seconds"
+            ) and not seconds_ok(loaded[key]):
                 raise IntakeRefused("BAD_CONFIG", f"{key} must be a whole number of seconds")
         if not valid_run_as_user(loaded):  # an account name, and only with agy_dispatch
             raise IntakeRefused("BAD_CONFIG", "agy_run_as_user: an account name, with agy_dispatch")
@@ -171,7 +123,7 @@ class Intake:
                 check_core_url(loaded["core_url"])
             except CoreHttpError as exc:
                 raise IntakeRefused("BAD_CONFIG", str(exc)) from exc
-            if not _has_token(loaded.get("core_token_file")):
+            if not has_token(loaded.get("core_token_file")):
                 raise IntakeRefused("BAD_CONFIG", "core_url needs a readable, non-empty token file")
         if not isinstance(loaded.get("require_base_on_main", True), bool):
             raise IntakeRefused("BAD_CONFIG", "require_base_on_main must be true or false")
