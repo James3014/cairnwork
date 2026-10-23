@@ -189,3 +189,24 @@ def test_run_verifiers_waits_for_the_lock_as_long_as_its_specs_need(tmp_path):
             tmp_path, "0" * 40, specs, tmp_path, "r", account=Spy(root=tmp_path), timeout=100
         )
     assert seen == [max(verifier_account.LOCK_TIMEOUT_SECONDS, 3 * 100 + 300.0)]
+
+
+@pytest.mark.parametrize("bad", [-1, -0.001, float("nan"), float("inf"), float("-inf")])
+def test_lock_wait_rejects_a_bad_spec_timeout_instead_of_hiding_it_in_the_floor(bad):
+    with pytest.raises(ValueError, match="spec timeout"):
+        verifier_account.lock_wait_seconds(1, bad)
+
+
+def test_lock_wait_accepts_a_zero_spec_timeout():
+    assert verifier_account.lock_wait_seconds(3, 0) == verifier_account.LOCK_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(("count", "per_spec"), [(24, 600), (1000, 600), (1, 1e9)])
+def test_lock_wait_never_exceeds_the_hard_cap(count, per_spec):
+    assert verifier_account.lock_wait_seconds(count, per_spec) == 14400.0
+
+
+def test_lock_wait_cap_is_read_at_call_time(monkeypatch):
+    monkeypatch.setattr(verifier_account, "LOCK_WAIT_CAP_SECONDS", 1000.0)
+    assert verifier_account.lock_wait_seconds(2, 600) == 1000.0
+    assert verifier_account.lock_wait_seconds(1, 600) == 900.0
