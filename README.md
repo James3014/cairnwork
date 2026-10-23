@@ -4,12 +4,14 @@ Cairnwork 是 Nexus-new 的後繼產品：一個接任務、執行、驗證，�
 
 ## 定位：完成有證據
 
+> Cairnwork 是小型 pytest 修補的試點驗收工具，依賴自備延後測試；通過仍需人工審查，外部收據驗證修復中（[#229](https://github.com/cairnwork/cairnwork/issues/229)）。
+
 Cairnwork 是 AI 寫程式代理人的交付驗證層。核心價值不是提高成功率，而是「完成有證據」：變更唯有通過延後隱藏測試才算完成（只有 `test_source: "bundle"` 嚴格模式保證 worker 看不到測試；預設 `auto` 是相容／示範模式，不作保密主張），並可附上離線可驗證的簽署證明（見 [docs/ATTESTATION.md](docs/ATTESTATION.md)）。具體是四件事：
 
 - **僅驗收完成**：沒通過驗收程序的候選 commit 不算完成。
 - **延後隱藏測試**：驗收用的測試在 worker 結束後才套到候選上，worker 的 clone 只有 base。保密保證只在 `test_source: "bundle"`（測試只放私有存放區、沒匯入就拒絕、絕不退回 origin）成立；`auto`（程式預設）有 bundle 就用、沒有才從 origin 的公開分支抓，worker 仍可能找得到，所以不主張保密。證明包的 `test_source` 欄位記錄該次執行當時用的模式（取自執行時寫入的紀錄，不是現在的 config.json；沒有隱藏測試或舊的執行為 `none`）。
 - **隔離驗證器＋Core 公證**：驗收在專用帳號與沙盒（macOS Seatbelt／Linux bubblewrap）執行，請求與結果進只增不改的紀錄，由 Core（nexus-certify）核驗並綁定確切的候選 commit。
-- **簽署證明可離線驗證**：驗收紀錄可用 `cairnwork-attest statement --sign` 產出 in-toto＋DSSE Ed25519 證明包，第三方用 `cairnwork-attest verify` 只靠公鑰與本機 git 物件離線重算；PR 上可用 [cairnwork/verify-action](https://github.com/cairnwork/verify-action) 自動檢查。
+- **簽署證明可離線驗證**：驗收紀錄可用 `cairnwork-attest statement --sign` 產出 in-toto＋DSSE Ed25519 證明包，第三方用 `cairnwork-attest verify` 只靠公鑰與本機 git 物件離線重算；PR 上可用 [cairnwork/verify-action](https://github.com/cairnwork/verify-action) 自動檢查。**現況限制**：`cairnwork-verify` 驗外部候選時，收據綁到驗證當下疊上測試的暫存 commit，驗完就刪，收件方目前驗不了（#229 修復中）；由 Issue runner 開的 PR 不受影響。
 
 不主張：
 
@@ -35,6 +37,7 @@ cairnwork demo        # 五分鐘示範：隔離 clone、範圍檢查、驗證�
 
 第一次 A/B（Cairnwork 過濾 vs 裸跑，28 題）：**打平、未贏**，原因與下一步見 [docs/results/2026-10-22-ab-run2.md](docs/results/2026-10-22-ab-run2.md)。
 延後驗收擋錯能力量測（偵測器評估、方向性）：真實模型錯誤只有 7 份、擋下 5，不下結論；規則式突變 205/205 擋下；真實正確修補誤擋 0/83；驗證通過不等於沒有缺陷。見 [docs/results/2026-10-22-filter-mechanism.md](docs/results/2026-10-22-filter-mechanism.md)。
+第三輪 A/B（2026-10-24，Gemini 與 Sonnet）：在 Sonnet 難題上，延後驗收擋下 11 個錯誤修正中的 10 個，holdout 通過的 36 個 0 個被擋；真錯分母低於預定的 20，判「資訊不足、方向正向」。交付精確率只從 15% 升到 19%：多數不可直接採用的修正是通過測試但需要修改，測試擋不到這類問題。失敗回饋重試與檔案提示都沒有幫助，不採用。擋錯幾乎全靠使用者自備的延後測試，Cairnwork 自帶的 P2P 與範圍檢查擋不到歷史假完成（離線重放的探索性子集 0/23）。
 
 ## 能力入場規則
 
