@@ -58,24 +58,37 @@ def checkout_texts(repo_dir: str | Path) -> Iterator[tuple[str, str]]:
             yield rel, text
 
 
+class TextIndex:
+    """A BM25 index over ``(path, text)`` items, built once and queried many times.
+
+    Score = BM25 over file content plus path tokens (weighted ``PATH_WEIGHT``).
+    """
+
+    def __init__(self, items: Iterable[tuple[str, str]], include_tests: bool = False) -> None:
+        self.paths: list[str] = []
+        docs: list[list[str]] = []
+        for rel, text in items:
+            if not include_tests and is_test_path(rel):
+                continue
+            self.paths.append(rel)
+            docs.append(tokens(rel) * PATH_WEIGHT + tokens(text))
+        self._index = BM25Index(docs)
+
+    def scored(self, query: str) -> list[tuple[str, float]]:
+        """Every file sharing a term with ``query`` as ``(path, score)``, best first.
+
+        Ties break on path order; files with no matching term are never returned.
+        """
+        scores = self._index.scores(tokens(query))
+        ranked = sorted(scores, key=lambda i: (-scores[i], self.paths[i]))
+        return [(self.paths[i], scores[i]) for i in ranked]
+
+
 def score_texts(
     items: Iterable[tuple[str, str]], query: str, include_tests: bool = False
 ) -> list[tuple[str, float]]:
-    """Every file sharing a term with ``query`` as ``(path, score)``, best first.
-
-    Score = BM25 over file content plus path tokens (weighted ``PATH_WEIGHT``).
-    Ties break on path order; files with no matching term are never returned.
-    """
-    paths: list[str] = []
-    docs: list[list[str]] = []
-    for rel, text in items:
-        if not include_tests and is_test_path(rel):
-            continue
-        paths.append(rel)
-        docs.append(tokens(rel) * PATH_WEIGHT + tokens(text))
-    scores = BM25Index(docs).scores(tokens(query))
-    ranked = sorted(scores, key=lambda i: (-scores[i], paths[i]))
-    return [(paths[i], scores[i]) for i in ranked]
+    """``TextIndex(items, include_tests).scored(query)`` for a single query."""
+    return TextIndex(items, include_tests).scored(query)
 
 
 def rank_files(

@@ -15,7 +15,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .retrieval import score_texts
+from .retrieval import TextIndex
 
 # A path with at least one '/', or a bare file name with a common source/config extension.
 _PATH_TOKEN = re.compile(
@@ -60,22 +60,33 @@ def named_files(query: str, files: Iterable[str]) -> list[str]:
     return hits
 
 
+class FileFinder:
+    """Index a file set once; answer any number of queries (``find``)."""
+
+    def __init__(self, items: Iterable[tuple[str, str]], include_tests: bool = False) -> None:
+        texts = list(items)
+        self._all_paths = [p for p, _ in texts]
+        self._index = TextIndex(texts, include_tests)
+
+    def find(self, query: str, k: int = 5) -> list[Hit]:
+        """The ``k`` (capped at MAX_K) files most relevant to ``query``.
+
+        A file named in the query is listed even if it is a test file: the caller asked for it.
+        """
+        k = max(0, min(k, MAX_K))
+        named = named_files(query, self._all_paths)
+        out = [Hit(p, 0.0, "named") for p in named]
+        seen = set(named)
+        for path, score in self._index.scored(query):
+            if len(out) >= k:
+                break
+            if path not in seen:
+                out.append(Hit(path, score, "bm25"))
+        return out[:k]
+
+
 def find_files(
     items: Iterable[tuple[str, str]], query: str, k: int = 5, include_tests: bool = False
 ) -> list[Hit]:
-    """The ``k`` (capped at MAX_K) files of ``items`` (``(path, text)``) most relevant to ``query``.
-
-    A file named in the query is listed even if it is a test file: the caller asked for it.
-    """
-    k = max(0, min(k, MAX_K))
-    texts = list(items)
-    named = named_files(query, (p for p, _ in texts))
-    out = [Hit(p, 0.0, "named") for p in named]
-    seen = set(named)
-    for path, score in score_texts(texts, query, include_tests):
-        if len(out) >= k:
-            break
-        if path in seen:
-            continue
-        out.append(Hit(path, score, "bm25"))
-    return out[:k]
+    """``FileFinder(items, include_tests).find(query, k)`` for a single query."""
+    return FileFinder(items, include_tests).find(query, k)

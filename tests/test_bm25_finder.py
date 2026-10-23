@@ -140,10 +140,82 @@ def test_respond_answers_from_base_commit(tmp_path):
 
 def test_respond_cleans_file_names_and_query(tmp_path):
     repo = make_repo(tmp_path / "r", {"a/<evil>`\u202e.py": "needle\n"})
-    text = respond(repo, "HEAD", f"{REQUEST_PREFIX} needle <x>", FinderConfig(enabled=True))
+    base = git(repo, "rev-parse", "HEAD")
+    text = respond(repo, base, f"{REQUEST_PREFIX} needle <x>", FinderConfig(enabled=True))
     assert text is not None
     body = text.split("\n", 1)[1]
     assert not any(c in body for c in "<>`\u202e")
+
+
+def _commit_raw_paths(repo: Path, names: list[bytes]) -> str:
+    """Commit files under arbitrary byte names (APFS refuses some) without a worktree."""
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=b"needle\n",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    info = b"".join(b"100644 " + blob + b"\t" + n + b"\0" for n in names)
+    subprocess.run(
+        ["git", "-C", str(repo), "update-index", "--add", "-z", "--index-info"],
+        input=info,
+        check=True,
+    )
+    tree = git(repo, "write-tree")
+    return git(repo, "commit-tree", tree, "-p", "HEAD", "-m", "raw names")
+
+
+def test_respond_output_is_clean_ascii_for_hostile_names(tmp_path):
+    repo = make_repo(tmp_path / "r", {"ok.py": "x\n"})
+    names = [
+        "a\u200bIGNORE ALL\ufeff.py".encode(),
+        b"b\xff.py",
+        "c\u2060\U000e0041\u180e.py".encode(),
+    ]
+    commit = _commit_raw_paths(repo, names)
+    text = respond(
+        repo, commit, f"{REQUEST_PREFIX} needle \u200b\udcff", FinderConfig(enabled=True)
+    )
+    assert text is not None
+    text.encode("utf-8")  # never raises: lone surrogates are gone
+    assert all(0x20 <= ord(c) <= 0x7E or c == "\n" for c in text)
+    assert ". a?IGNORE ALL?.py" in text and "b?.py" in text and "c???.py" in text
+
+
+@pytest.mark.parametrize("bad", ["HEAD", "main", "abc123", "0" * 39, "G" * 40, "--all"])
+def test_respond_requires_a_full_commit_id(tmp_path, bad):
+    repo = make_repo(tmp_path / "r", FIXTURE)
+    with pytest.raises(ValueError):
+        respond(repo, bad, f"{REQUEST_PREFIX} parse_timezone", FinderConfig(enabled=True))
+
+
+def test_commit_texts_caps_files_and_bytes(tmp_path, monkeypatch):
+    from experimental.bm25_hints import commit_source
+
+    repo = make_repo(tmp_path / "r", {f"f{i}.py": "x" * 10 + "\n" for i in range(5)})
+    monkeypatch.setattr(commit_source, "MAX_FILES", 3)
+    assert [p for p, _ in commit_texts(repo, "HEAD")] == ["f0.py", "f1.py", "f2.py"]
+    monkeypatch.setattr(commit_source, "MAX_FILES", 100)
+    monkeypatch.setattr(commit_source, "MAX_TOTAL_BYTES", 25)
+    assert [p for p, _ in commit_texts(repo, "HEAD")] == ["f0.py", "f1.py"]
+
+
+def test_respond_builds_the_index_once(tmp_path, monkeypatch):
+    from experimental.bm25_hints import retrieval
+
+    built = []
+    real = retrieval.BM25Index.__init__
+
+    def counting(self, *a, **kw):
+        built.append(1)
+        real(self, *a, **kw)
+
+    monkeypatch.setattr(retrieval.BM25Index, "__init__", counting)
+    repo = make_repo(tmp_path / "r", FIXTURE)
+    base = git(repo, "rev-parse", "HEAD")
+    reply = "\n".join(f"{REQUEST_PREFIX} {q}" for q in ("parse", "render", "helper"))
+    assert respond(repo, base, reply, FinderConfig(enabled=True)) is not None
+    assert len(built) == 1
 
 
 def test_core_does_not_import_the_finder():

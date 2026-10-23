@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .commit_source import commit_texts
-from .find import find_files
+from .find import FileFinder
 
 ENV_FLAG = "CAIRNWORK_EXPERIMENTAL_FILE_FINDER"
 REQUEST_PREFIX = "CAIRNWORK_FIND_FILES:"
@@ -33,9 +33,12 @@ MAX_REQUESTS = 3
 MAX_QUERY_CHARS = 500
 MAX_PATH_CHARS = 200
 _REQUEST = re.compile(r"^[ \t>*`-]*" + re.escape(REQUEST_PREFIX) + r"[ \t]*(.+?)[ \t`]*$", re.M)
-# Control and bidi characters plus angle brackets and backticks: a file name is repository
-# content and must not be able to open or close a fence in the worker's prompt.
-_UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069<>`]")
+# Allowlist: printable ASCII except angle brackets and backticks. File names are repository
+# content and must not be able to open or close a fence in the worker's prompt, nor smuggle
+# invisible (zero-width, BOM, bidi, tag) characters or lone surrogates from a non-UTF-8 name
+# (which would make the answer unencodable). Everything else becomes '?'.
+_UNSAFE = re.compile(r"[^\x20-\x7e]|[<>`]")
+_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 TOOL_DESCRIPTION = (
     "Optional file finder (Cairnwork, experimental): if you cannot tell which files hold the\n"
@@ -77,16 +80,22 @@ def requests_in(reply: str) -> list[str]:
 
 
 def respond(repo: str | Path, base_commit: str, reply: str, config: FinderConfig) -> str | None:
-    """The text to append for the worker's next turn, or None (finder off or no request)."""
+    """The text to append for the worker's next turn, or None (finder off or no request).
+
+    ``base_commit`` must be the task's full base commit id (never a branch or HEAD). The text
+    is printable ASCII only, so it always encodes as UTF-8.
+    """
     if not config.enabled:
         return None
     queries = requests_in(reply)
     if not queries:
         return None
-    texts = list(commit_texts(repo, base_commit))
+    if not _SHA.match(base_commit):
+        raise ValueError("base_commit must be a full 40- or 64-hex commit id")
+    finder = FileFinder(commit_texts(repo, base_commit), config.include_tests)
     lines = ["Cairnwork file finder results (best match first; may be incomplete):"]
     for query in queries:
-        hits = find_files(texts, query, config.k, config.include_tests)
+        hits = finder.find(query, config.k)
         lines.append(f"- for {_clean(query, MAX_QUERY_CHARS)!r}:")
         for i, hit in enumerate(hits, 1):
             lines.append(f"  {i}. {_clean(hit.path, MAX_PATH_CHARS)}")

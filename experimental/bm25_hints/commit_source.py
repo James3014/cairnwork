@@ -17,6 +17,8 @@ from pathlib import Path
 from .retrieval import MAX_FILE_BYTES
 
 _SNIFF_BYTES = 8192
+MAX_FILES = 20_000  # files read per commit, in path order; the rest are not indexed
+MAX_TOTAL_BYTES = 64 * 1024 * 1024  # bytes read per commit (cat-file output is held in memory)
 _TIMEOUT_SECONDS = 120
 _SAFE = (
     "--no-replace-objects",
@@ -50,9 +52,11 @@ def _git(repo: Path, *args: str, stdin: bytes | None = None) -> bytes:
 
 
 def _blobs(repo: Path, commit: str) -> list[tuple[str, str]]:
-    """``(path, oid)`` of regular-file blobs no larger than MAX_FILE_BYTES, path order."""
+    """``(path, oid)`` of regular-file blobs no larger than MAX_FILE_BYTES, path order,
+    stopping before MAX_FILES files or MAX_TOTAL_BYTES bytes (a partial index: the
+    answer already says it may be incomplete)."""
     out = _git(repo, "ls-tree", "-r", "-l", "-z", "--full-tree", commit)
-    blobs = []
+    entries = []
     for entry in out.split(b"\0"):
         if not entry:
             continue
@@ -62,8 +66,15 @@ def _blobs(repo: Path, commit: str) -> list[tuple[str, str]]:
             continue  # symlinks and submodules are never read
         if int(size) > MAX_FILE_BYTES:
             continue
-        blobs.append((raw_path.decode("utf-8", "surrogateescape"), oid.decode()))
-    return sorted(blobs)
+        entries.append((raw_path.decode("utf-8", "surrogateescape"), oid.decode(), int(size)))
+    blobs: list[tuple[str, str]] = []
+    total = 0
+    for path, oid, size in sorted(entries):
+        if len(blobs) >= MAX_FILES or total + size > MAX_TOTAL_BYTES:
+            break
+        blobs.append((path, oid))
+        total += size
+    return blobs
 
 
 def commit_texts(repo: str | Path, commit: str) -> Iterator[tuple[str, str]]:
