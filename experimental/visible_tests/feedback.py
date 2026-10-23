@@ -25,9 +25,17 @@ What the probe reuses and what the worker can see:
   - with an account: a test name is shown only if it starts with one of that verifier's target
     files and matches a strict ASCII charset; outcomes only from a fixed set; the cause only as
     fixed phrases (changed file names dropped); everything else is counted, never quoted.
-  Residual channel (Issue #207): on the account path the code under test can still choose
-  names that pass the filter (charset and target-file prefix), up to MAX_NAMES x MAX_NAME_CHARS
-  per turn; the account's separate uid is what keeps other processes' secrets out of it.
+  Residual channel in account mode (Issue #207, measured in the PR #204 round-2 review): the code
+  under test can still choose names that pass the filter (charset and target-file prefix), so
+  each turn's summary can carry up to MAX_NAMES x MAX_NAME_CHARS = 10 x 160 characters of text of
+  its choosing. In the round-2 review's measurements that text could not carry other processes'
+  secrets on this host: reading another uid's KERN_PROCARGS2 is EPERM for a non-root account,
+  the setuid /bin/ps is denied under the Seatbelt profile, and require_idle keeps other account
+  processes away while a probe runs. The only payload demonstrated was this run's own one-time
+  nonce, which the run already holds; this is a measured result, not a proof.
+  Still open before promotion (Issue #207): a check with a real verifier account, not the
+  same-uid stand-in used in CI; and showing only node ids that the base version collects (one
+  extra collect; judged not worth its cost, see the Issue).
 * No log bytes ever reach the summary. The probe's checkouts and log directories (also under the
   account's run root, also when a run raises midway) and its attempt ref are removed before the
   next turn starts.
