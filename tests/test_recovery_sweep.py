@@ -75,13 +75,13 @@ def test_unavailable_sweep_and_leftovers_are_both_in_the_detail(  # noqa: F811
     assert decision.sweep_unavailable is True
 
 
-def test_route_recover_exits_3_when_the_sweep_was_unavailable(  # noqa: F811
+def test_route_recover_exits_4_when_the_sweep_was_unavailable(  # noqa: F811
     project, tmp_path, unavailable_sweep, capsys
 ):
     _routable(project, tmp_path)
     code = route.main(["--state", str(tmp_path), "recover"])
     out = json.loads(capsys.readouterr().out)
-    assert code == 3
+    assert code == 4
     assert out["sweep_unavailable"] is True and out["leftover_run_dirs"] == 0
     assert out["decisions"][0]["sweep_unavailable"] is True
     assert out["decisions"][0]["killed_processes"] == SWEEP_UNAVAILABLE

@@ -48,23 +48,28 @@ result.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
 import shutil
-import stat
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cairnwork_sandbox
-from cairnwork import confined, pytest_config, report_guard
+from cairnwork import pytest_config, report_guard
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
 from cairnwork.treecompare import tree_differences
 from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lock_wait_seconds
+from cairnwork.verifier_exec import (  # low-level run primitives, split out for the 400-line cap
+    _execute,
+    _file_sha256,
+    _record_digest,
+    _same_directory,
+    _write_new,
+)
 from cairnwork.verifier_spec import (  # re-exported for existing importers
     VerifierRejected,
     VerifierSpec,
@@ -84,6 +89,8 @@ __all__ = [
 ]
 
 DEFAULT_TIMEOUT_SECONDS = 600
+# Kept here (not in verifier_exec) because tests monkeypatch verifiers._ENV_KEEP to inject env vars,
+# and _prepare_run below must read the patched value.
 _ENV_KEEP = ("PATH", "LANG", "LC_ALL")
 
 
@@ -101,6 +108,7 @@ class VerifierRun:
     # a plain test failure: the guard reported a failed test and nothing about the run itself
     # is suspect (no timeout, mutation, survivor or oversized log); p2p.py may re-run only this
     plain_failure: bool = False
+    report_too_big: bool = False  # the guard's report exceeded MAX_REPORT_BYTES: no verdict read
     why: str = ""  # in words, why the run did not pass ("" when it passed): reasons.py
     # facts about the sandbox policy used (e.g. "shm withheld: BWRAP_TMPFS_SIZE_UNSUPPORTED"); not
     # in the observation's artifact hash, so recording them changes no bound digest
@@ -119,6 +127,7 @@ def run_verifiers(
     attempt_id: str = "",
     account: VerifierAccount | None = None,
     base_commit: str | None = None,
+    import_paths: tuple[str, ...] = (),
     note: str = "",
 ) -> tuple[VerifierRun, ...]:
     """Run each spec on a fresh checkout of candidate_commit; a failing test is not an error.
@@ -126,10 +135,14 @@ def run_verifiers(
     If a checkout cannot be created the error propagates and no observation is
     returned (fail closed). With an account, verifiers run as that dedicated user
     (verifier_account.py), in its run root and with its Python (or ``python``), one at a
-    time. With base_commit, pytest settings come from that commit (pytest_config.py). A non-empty
-    note (the P2P selection rule, p2p.py) is bound into each observation's artifact hash.
+    time. With base_commit, pytest settings come from that commit (pytest_config.py).
+    ``import_paths`` (operator state config, #82) are checkout-relative dirs prepended to the
+    verifier's import path so a src-layout project can import its own package. A non-empty note
+    (the P2P selection rule, p2p.py) is bound into each observation's artifact hash.
     """
     settings = pytest_config.base_settings(repo, base_commit)
+    if import_paths:
+        settings = replace(settings, pythonpath=(*import_paths, *settings.pythonpath))
     if account is not None:
         run_root, python = account.run_root, python or account.python
         with account.exclusive(lock_wait_seconds(len(specs), timeout)):
@@ -228,6 +241,34 @@ def _remove_scratch(dirs, account) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def _prepare_run(private: Path, ini: Path, ini_text: bytes):
+    """Create the per-run directory (the only place besides the checkout the child may
+    write), its HOME and TMPDIR, and the scrubbed environment."""
+    run_dir = private / "run"
+    home, tmp = run_dir / "home", run_dir / "tmp"
+    for directory in (run_dir, home, tmp):
+        directory.mkdir()
+    guard = private / "guard"
+    guard.mkdir()
+    report_guard.install_plugin(guard)  # the trusted plugin, read-only to the sandbox
+    guard.chmod(0o750)
+    _write_new(ini, ini_text)
+    env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
+    env.update(
+        HOME=str(home),
+        TMPDIR=str(tmp),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONNOUSERSITE="1",
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONPATH=str(guard),
+    )
+    env[RUN_TOKEN_VAR] = secrets.token_hex(16)
+    verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
+    env[report_guard.PATH_ENV] = str(verdict_path)
+    env[report_guard.NONCE_ENV] = verdict_nonce
+    return run_dir, home, tmp, env, verdict_path, verdict_nonce
+
+
 def _run_one(
     repo, candidate_commit, spec, checkout, python, timeout, attempt_id, account, settings, note
 ) -> VerifierRun:
@@ -273,7 +314,7 @@ def _run_one(
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0
     too_big = log_path.stat().st_size > MAX_LOG_BYTES
-    clean = clean and not too_big
+    clean = clean and not too_big and not verdict.too_big
     passed = profile is not None and returncode == 0 and clean and ran
     plain_failure = (
         profile is not None and returncode == 1 and clean and "failed" in verdict.outcomes.values()
@@ -281,6 +322,7 @@ def _run_one(
     why = "" if passed else why_not_passed(
         ran_sandboxed=profile is not None, returncode=returncode, timed_out=timed_out,
         mutated=mutated, survivors=survivors, log_too_big=too_big, tests_ran=ran,
+        report_too_big=verdict.too_big,
     )  # fmt: skip
     _remove_scratch((home, tmp), account)
     digest = _record_digest(
@@ -303,83 +345,5 @@ def _run_one(
     return VerifierRun(
         spec, returncode, timed_out, mutated, log_path, observation, verdict.outcomes,
         survivors=survivors, ran=ran, plain_failure=plain_failure, why=why,
-        notes=profile.notes if profile else (),
+        report_too_big=verdict.too_big, notes=profile.notes if profile else (),
     )  # fmt: skip
-
-
-def _same_directory(path: Path, before: os.stat_result) -> bool:
-    try:
-        after = os.lstat(path)
-    except OSError:
-        return False
-    same = (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
-    return same and stat.S_ISDIR(after.st_mode)
-
-
-def _execute(argv, profile_path, checkout, env, timeout, log_path, account, backend):
-    """Run argv under the sandbox profile, as the verifier account when one is given.
-    As if the verifier's venv were activated, its bin directory (argv[0] is its Python)
-    leads PATH: tests that spawn plain ``python`` get the same interpreter as pytest."""
-    env["PATH"] = os.pathsep.join(filter(None, (str(Path(argv[0]).parent), env.get("PATH"))))
-    # The verifier account does not own the checkout, so git would refuse it as a
-    # "dubious ownership" repository; trust exactly this checkout, nothing wider.
-    env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory")
-    env["GIT_CONFIG_VALUE_0"] = os.path.realpath(checkout)
-    if account is None:
-        return confined.execute(backend.wrap(argv, profile_path), checkout, env, timeout, log_path)
-    os.chmod(profile_path, 0o640)
-    returncode, timed_out, survivors = confined.execute(
-        account.wrap(argv, profile_path, env),
-        checkout,
-        env,
-        timeout,
-        log_path,
-        reap=account.reap,
-    )
-    return returncode, timed_out, survivors
-
-
-def _prepare_run(private: Path, ini: Path, ini_text: bytes):
-    """Create the per-run directory (the only place besides the checkout the child may
-    write), its HOME and TMPDIR, and the scrubbed environment."""
-    run_dir = private / "run"
-    home, tmp = run_dir / "home", run_dir / "tmp"
-    for directory in (run_dir, home, tmp):
-        directory.mkdir()
-    guard = private / "guard"
-    guard.mkdir()
-    report_guard.install_plugin(guard)  # the trusted plugin, read-only to the sandbox
-    guard.chmod(0o750)
-    _write_new(ini, ini_text)
-    env = {key: os.environ[key] for key in _ENV_KEEP if key in os.environ}
-    env.update(
-        HOME=str(home),
-        TMPDIR=str(tmp),
-        PYTHONDONTWRITEBYTECODE="1",
-        PYTHONNOUSERSITE="1",
-        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
-        PYTHONPATH=str(guard),
-    )
-    env[RUN_TOKEN_VAR] = secrets.token_hex(16)
-    verdict_path, verdict_nonce = run_dir / "verdict.json", secrets.token_hex(16)
-    env[report_guard.PATH_ENV] = str(verdict_path)
-    env[report_guard.NONCE_ENV] = verdict_nonce
-    return run_dir, home, tmp, env, verdict_path, verdict_nonce
-
-
-def _record_digest(**fields) -> str:
-    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _write_new(path: Path, data: bytes) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)

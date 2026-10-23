@@ -13,7 +13,7 @@ Rules (from Nexus-new's experience, see docs/LESSONS_FROM_NEXUS.md):
   environment marker) and remove the attempt's clones. When the process table
   cannot be read (SWEEP_UNAVAILABLE) nothing is known about them: the Decision
   says so (``sweep_unavailable``, detail) and the recovery is not clean (route
-  exits 3, as for leftover directories). The status decision does not change:
+  exits 4, as for leftover directories). The status decision does not change:
   a verdict Core recorded is bound to the candidate commit, and a process that
   outlived the run can neither alter it nor record another, so COMPLETED still
   stands; a task without such a verdict is FAILED either way (#189);
