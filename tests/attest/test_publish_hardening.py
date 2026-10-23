@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -42,9 +43,15 @@ def test_unsafe_remote_rejected(
 ) -> None:
     src, bare, candidate = publish_env
     bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
-    r = publish_bundle(bundle_file, src, candidate, remote=remote)
+    calls = []
+
+    def recording_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
+        calls.append(args)
+        return _git(repo, *args, input=input)
+
+    r = publish_bundle(bundle_file, src, candidate, remote=remote, run=recording_run)
     assert (r.ok, r.code) == (False, "USAGE")
-    assert not (src / "PWNED").exists()
+    assert calls == []
     assert _remote_tip(bare) is None
 
 
@@ -68,7 +75,96 @@ def test_max_attempts_below_one_is_usage(
 ) -> None:
     src, _bare, candidate = publish_env
     bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
-    assert publish_bundle(bundle_file, src, candidate, max_attempts=0).code == "USAGE"
+    calls = []
+
+    def recording_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
+        calls.append(args)
+        return _git(repo, *args, input=input)
+
+    r = publish_bundle(bundle_file, src, candidate, max_attempts=0, run=recording_run)
+    assert r.code == "USAGE"
+    assert calls == [("check-ref-format", _NOTES_REF)]
+
+
+@pytest.mark.parametrize("existing_ref", [False, True])
+def test_failed_push_reports_local_ref_reset_failure(
+    tmp_path: Path,
+    publish_env: tuple[Path, Path, str],
+    key: Ed25519PrivateKey,
+    existing_ref: bool,
+) -> None:
+    src, bare, candidate = publish_env
+    if existing_ref:
+        tree = git(src, "rev-parse", "HEAD^{tree}")
+        git(src, "notes", f"--ref={_NOTES_REF}", "add", "-m", "other", tree)
+        git(src, "push", "origin", _NOTES_REF)
+    old_tip = _remote_tip(bare)
+    calls = []
+
+    def failing_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
+        calls.append(args)
+        if args[0] == "push":
+            return subprocess.CompletedProcess(args, 1, "", "rejected (fetch first)")
+        if args[0] == "update-ref":
+            return subprocess.CompletedProcess(args, 1, "", " local ref locked\n")
+        return _git(repo, *args, input=input)
+
+    bundle_file = _write_bundle(tmp_path, _make_bundle_bytes(candidate, key))
+    r = publish_bundle(bundle_file, src, candidate, run=failing_run)
+
+    assert (r.ok, r.code, r.attempts) == (False, "LOCAL_REF_RESET_FAILED", 1)
+    assert r.detail == "local ref locked"
+    expected = (
+        ("update-ref", _NOTES_REF, old_tip) if existing_ref else ("update-ref", "-d", _NOTES_REF)
+    )
+    assert calls[-1] == expected
+    assert sum(args[0] == "push" for args in calls) == 1
+    assert _remote_tip(bare) == old_tip
+
+
+@pytest.mark.parametrize("via_cli", [False, True])
+def test_successful_push_with_unreadable_notes_tip(
+    tmp_path: Path,
+    publish_env: tuple[Path, Path, str],
+    key: Ed25519PrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    via_cli: bool,
+) -> None:
+    src, bare, candidate = publish_env
+    calls = []
+    tip_args = ("rev-parse", "--verify", "--quiet", f"{_NOTES_REF}^{{commit}}")
+
+    def failing_tip_run(repo: Path, *args: str, input: bytes | None = None):  # noqa: ANN202
+        calls.append(args)
+        if args == tip_args:
+            return subprocess.CompletedProcess(args, 1, "", "cannot read notes tip")
+        return _git(repo, *args, input=input)
+
+    bundle_bytes = _make_bundle_bytes(candidate, key)
+    bundle_file = _write_bundle(tmp_path, bundle_bytes)
+    if via_cli:
+        monkeypatch.setattr("cairnwork_attest.publish._git", failing_tip_run)
+        rc = main(
+            [
+                "publish",
+                "--repo",
+                str(src),
+                "--candidate",
+                candidate,
+                "--bundle",
+                str(bundle_file),
+                "--json",
+            ]
+        )
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert (data["ok"], data["code"], data["notes_tip"]) == (True, "PUBLISHED", None)
+    else:
+        r = publish_bundle(bundle_file, src, candidate, run=failing_tip_run)
+        assert (r.ok, r.code, r.notes_tip) == (True, "PUBLISHED", None)
+    assert calls[-1] == tip_args
+    assert _read_note_from_bare(bare, candidate).encode("utf-8") == bundle_bytes
 
 
 def test_same_candidate_race_ends_in_conflict(
