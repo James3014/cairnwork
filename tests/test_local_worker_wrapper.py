@@ -149,6 +149,15 @@ def test_canary_direct_mode_denies_reads_writes_and_network(tmp_path):
     assert rc == 0 and report["overall"] == "SEATBELT_ONLY_PASS", failed
     for name in ("a_read_denied", "b_write_denied", "c_network_denied", "positive_controls"):
         assert report["checks"][name]["pass"], name
+    escapes = {p["probe"]: p for p in report["checks"]["d_launchd_escape_denied"]["probes"]}
+    assert report["checks"]["d_launchd_escape_denied"]["pass"], escapes
+    for name in ("launchctl_submit", "launchctl_bootstrap_gui_domain"):
+        row = escapes[f"code escape {name}"]
+        assert row["result"] == "DENIED" and row["job_ran_in_sandbox_attempt"] is False
+        assert row["owner_control"]["marker_seen"] is True  # the same job runs outside the sandbox
+    assert escapes["code escape signal_other_sandbox"]["result"] == "DENIED"
+    assert escapes["code escape signal_outside_sandbox"]["result"] == "DENIED"
+    assert escapes["code escape signal_same_sandbox_control"]["result"] == "ALLOWED"
     digest = report_path.with_suffix(".json.sha256").read_text().split()[0]
     import hashlib
 
@@ -160,3 +169,45 @@ def test_wrapper_refuses_a_run_root_without_tmp(runs):
     (runs / TAG / "tmp").rmdir()
     proc = run(runs, "read", str(runs / TAG), "a.txt")
     assert proc.returncode == 64 and b"tmp" in proc.stderr
+
+
+def _escape_fixture(tmp_path):
+    names = canary.probe.LAUNCHCTL_TARGETS
+    markers = {n: str(tmp_path / f"marker-{n}") for n in names}
+    fx = canary.Fixture(tmp_path, tmp_path, tmp_path, "s", {}, {}, markers)
+    rows = [
+        {"kind": "escape", "probe": f"code escape {n}", "result": "DENIED", "pass": True}
+        for n in names
+    ]
+    return fx, rows
+
+
+def test_launchctl_row_needs_denied_job_that_never_ran_and_a_working_control(tmp_path, monkeypatch):
+    fx, rows = _escape_fixture(tmp_path)
+    monkeypatch.setattr(
+        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+    )
+    assert all(r["pass"] for r in canary._launchctl_rows(rows, fx))
+    # The control job did not run for the Owner either: the denial proves nothing.
+    monkeypatch.setattr(
+        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 5, "marker_seen": False}
+    )
+    got = canary._launchctl_rows(rows, fx)
+    assert {r["result"] for r in got} == {"INCONCLUSIVE_OWNER_CONTROL_FAILED"}
+    assert not any(r["pass"] for r in got)
+    # launchctl failed but the job ran anyway: an escape, whatever the exit code said.
+    monkeypatch.setattr(
+        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+    )
+    for marker in fx.escape_markers.values():
+        Path(marker).write_text("ran")
+    got = canary._launchctl_rows(rows, fx)
+    assert {r["result"] for r in got} == {"ESCAPED_JOB_RAN"} and not any(r["pass"] for r in got)
+    assert not any(Path(m).exists() for m in fx.escape_markers.values())
+
+
+def test_probe_source_compiles_and_signal_rows_never_use_pid_zero():
+    victims = {"signal_outside_sandbox": 4242, "signal_other_sandbox": 0}
+    src = canary.probe.source({}, {}, "ab", victims, {"launchctl_submit": "/m"})
+    compile(src, "probe", "exec")
+    assert "pid < 2" in src and "def launchctl_job" in src
