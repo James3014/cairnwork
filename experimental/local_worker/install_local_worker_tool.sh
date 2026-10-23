@@ -6,27 +6,27 @@
 # Undo:
 #   sudo zsh experimental/local_worker/install_local_worker_tool.sh --rollback
 #
-# What it does (idempotent; re-run whenever local-worker-tool changes):
-#   * ROOT/local-runs   owner:_cairnwork_wrun 2770  per-run directories (32-hex names) the Owner creates
-#   * ROOT/python       owner:wheel 0755           the worker's interpreter, filled by
-#                                                    setup_worker_python.sh (as the Owner, no sudo)
-#   * BIN/local-worker-tool  owner, 0755           copy of ./local-worker-tool
+# What it does (idempotent; re-run, with sudo, whenever local-worker-tool changes):
+#   * ROOT/local-runs   owner:_cairnwork_wrun 2710, no ACL: the worker can enter a run root whose
+#                       32-hex name it is given, but cannot list, create, rename or delete entries
+#   * ROOT/python       owner:wheel 0755, no ACL: the worker's interpreter, filled by
+#                       setup_worker_python.sh (as the Owner, no sudo)
+#   * ROOT/local-bin    root:wheel 0755 and local-bin/local-worker-tool root:wheel 0755 (a copy of
+#                       ./local-worker-tool): root-owned, so neither the Owner nor the worker can swap it
 #   * /etc/sudoers.d/cairnwork-local-worker (root:wheel 0440, checked with visudo -c):
-#       <owner> ALL=(_cairnwork_worker) NOPASSWD: BIN/local-worker-tool
-# It never touches the agy wrapper (BIN/agy-worker-exec), its rule (/etc/sudoers.d/cairnwork-worker)
-# or worker-runs. Any failure removes the new rule, so nothing half-installed is ever enabled.
-#
-# Trust: like agy-worker-exec, BIN and the wrapper copy are Owner-owned; anything running as the
-# Owner could replace the wrapper, which is in-model (the rule only lets the Owner start the worker).
+#       <owner> ALL=(_cairnwork_worker) NOPASSWD: ROOT/local-bin/local-worker-tool
+# It never touches the agy wrapper (bin/agy-worker-exec), its rule (/etc/sudoers.d/cairnwork-worker),
+# bin/ or worker-runs. Any failure removes the local worker rule (also one left by an earlier
+# install), so nothing half-installed is ever enabled.
 set -euo pipefail
 
 WORKER="_cairnwork_worker"
 RUNGROUP="_cairnwork_wrun"
 ROOT="/Users/Shared/cairnwork-worker"
-BIN="$ROOT/bin"
+LBIN="$ROOT/local-bin"
 RUNS="$ROOT/local-runs"
 PYROOT="$ROOT/python"
-WRAPPER="$BIN/local-worker-tool"
+WRAPPER="$LBIN/local-worker-tool"
 SUDOERS="/etc/sudoers.d/cairnwork-local-worker"
 SOURCE="${0:A:h}/local-worker-tool"
 
@@ -53,27 +53,27 @@ trap 'rc=$?; rm -f "$TMP_SUDOERS"; if (( rc != 0 )); then rm -f "$SUDOERS"; echo
 
 # ROOT must be a real root-owned directory (only root can then replace what is beneath it).
 [[ ! -L "$ROOT" && -d "$ROOT" && "$(stat -f %Su "$ROOT")" == root ]] || die "$ROOT is not root-owned"
-[[ ! -L "$BIN" && -d "$BIN" && "$(stat -f %Su "$BIN")" == "$OWNER" ]] || die "$BIN not owner-owned"
-[[ "$(stat -f %Lp "$BIN")" == 755 ]] || die "$BIN mode is not 755"
 [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || die "wrapper source missing: $SOURCE"
 sh -n "$SOURCE" || die "wrapper syntax"
 
 # mkdir without -p: fails if something was planted there; a planted symlink is refused below.
-make_dir() {   # $1 path  $2 group  $3 mode (4 digits)
+# ROOT is root-owned, so nothing can be planted between these checks and their use.
+make_dir() {   # $1 path  $2 owner  $3 group  $4 mode (4 digits)
   [[ -e "$1" || -L "$1" ]] || mkdir "$1"
   [[ ! -L "$1" && -d "$1" ]] || die "$1 is not a real directory"
-  chown "$OWNER:$2" "$1"
-  chmod "$3" "$1"
-  [[ "$(stat -f '%Su:%Sg:%Mp%Lp' "$1")" == "$OWNER:$2:$3" ]] || die "$1 has the wrong owner/mode"
+  chown -h "$2:$3" "$1"
+  chmod -h "$4" "$1"
+  chmod -N "$1"
+  [[ "$(stat -f '%Su:%Sg:%Mp%Lp' "$1")" == "$2:$3:$4" ]] || die "$1 has the wrong owner/mode"
+  [[ "$(ls -ld "$1" | cut -c11)" != "+" ]] || die "$1 still has an ACL"
 }
-make_dir "$RUNS" "$RUNGROUP" 2770
-make_dir "$PYROOT" wheel 0755
+make_dir "$RUNS" "$OWNER" "$RUNGROUP" 2710
+make_dir "$PYROOT" "$OWNER" wheel 0755
+make_dir "$LBIN" root wheel 0755
 
-tmp="$WRAPPER.tmp.$$"
+tmp="$WRAPPER.tmp.$$"   # inside the root-owned LBIN: no other user can plant it
 rm -f "$tmp"
-cp "$SOURCE" "$tmp"
-chown "$OWNER:wheel" "$tmp"
-chmod 0755 "$tmp"
+install -o root -g wheel -m 0755 "$SOURCE" "$tmp"
 mv -f "$tmp" "$WRAPPER"
 [[ ! -L "$WRAPPER" ]] && cmp -s "$SOURCE" "$WRAPPER" || die "installed wrapper differs"
 

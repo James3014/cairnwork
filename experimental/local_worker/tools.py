@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -24,11 +25,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 WORKER_USER = "_cairnwork_worker"
-INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/bin/local-worker-tool")
+INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/local-bin/local-worker-tool")
 SUDO = "/usr/bin/sudo"
 REFUSED_EXIT = 64
 DEFAULT_MAX_OUTPUT_BYTES = 20_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
+CAPTURE_LIMIT = 8 * 1024 * 1024  # per stream; output goes to a temp file, never unbounded memory
 
 # (exit code or None on timeout, stdout, stderr)
 Invoked = tuple[int | None, bytes, bytes]
@@ -48,27 +50,46 @@ def direct_argv(wrapper: Path, action: str, run_root: str, args: Sequence[str]) 
     return ["/bin/sh", str(wrapper), action, run_root, *args]
 
 
+def _captured(fh) -> bytes:
+    """At most CAPTURE_LIMIT bytes of a capture file: its head and tail around a marker."""
+    size = os.fstat(fh.fileno()).st_size
+    fh.seek(0)
+    if size <= CAPTURE_LIMIT:
+        return fh.read()
+    half = CAPTURE_LIMIT // 2
+    head = fh.read(half)
+    fh.seek(size - half)
+    return head + f"\n[... {size - 2 * half} bytes not captured ...]\n".encode() + fh.read(half)
+
+
+def _signal(proc: subprocess.Popen, kill: bool) -> None:
+    try:
+        proc.kill() if kill else proc.terminate()
+    except (PermissionError, ProcessLookupError):
+        pass  # setuid sudo may refuse the Owner's signal; the caller sweeps the run instead
+
+
 def subprocess_invoker(env: dict[str, str] | None = None) -> Invoker:
+    """Run argv with stdout/stderr in temp files (bounded memory, and no hang on a grandchild
+    that keeps a pipe open). On timeout: signal, wait briefly, and report exit code None."""
+
     def invoke(argv: list[str], stdin: bytes | None, timeout: float) -> Invoked:
-        proc = subprocess.Popen(  # noqa: S603 - argv is built here from fixed parts
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd="/",
-        )
-        try:
-            out, err = proc.communicate(stdin or b"", timeout=timeout)
-            return proc.returncode, out, err
-        except subprocess.TimeoutExpired:
-            proc.terminate()  # sudo relays SIGTERM to the worker command
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(  # noqa: S603 - argv is built here from fixed parts
+                argv, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env, cwd="/"
+            )
+            rc: int | None
             try:
-                out, err = proc.communicate(timeout=5)
+                proc.communicate(stdin or b"", timeout=timeout)
+                rc = proc.returncode
             except subprocess.TimeoutExpired:
-                proc.kill()
-                out, err = proc.communicate()
-            return None, out, err
+                rc = None
+                _signal(proc, kill=False)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _signal(proc, kill=True)
+            return rc, _captured(out), _captured(err)
 
     return invoke
 
@@ -184,7 +205,9 @@ class WorkerTools:
         started = time.monotonic()
         rc, out, err = self._invoke("read", [path], None)
         if rc != 0:
-            return self._log("edit_file", tool_args, rc, out + err, started)
+            call = self._log("edit_file", tool_args, rc, out + err, started)
+            self._after("read", rc)
+            return call
         try:
             text = out.decode("utf-8")
         except UnicodeDecodeError:
@@ -196,7 +219,9 @@ class WorkerTools:
             return self._log("edit_file", tool_args, 1, note.encode(), started)
         new = text.replace(target, replacement, 1).encode()
         rc, out, err = self._invoke("write", [path], new)
-        return self._log("edit_file", tool_args, rc, out + err, started)
+        call = self._log("edit_file", tool_args, rc, out + err, started)
+        self._after("write", rc)
+        return call
 
     def sweep(self) -> ToolCall:
         return self._call("sweep", "sweep", [], {})
@@ -208,8 +233,9 @@ class WorkerTools:
 
     def _invoke(self, action: str, args: Sequence[str], stdin: bytes | None) -> Invoked:
         rc, out, err = self.invoker(self._argv(action, args), stdin, self.timeout_seconds)
-        if self.mode == "worker" and rc not in (0, None) and err.startswith(b"sudo:"):
-            raise WorkerIsolationError(err.decode("utf-8", errors="replace").strip())
+        if rc in (126, 127) or (self.mode == "worker" and rc == 1 and b"sudo:" in err[:4096]):
+            # The wrapper did not start as the worker (no rule, missing binary): fail closed.
+            raise WorkerIsolationError(err[:4096].decode("utf-8", errors="replace").strip())
         return rc, out, err
 
     def _call(
@@ -223,9 +249,14 @@ class WorkerTools:
         started = time.monotonic()
         rc, out, err = self._invoke(action, args, stdin)
         call = self._log(action_type, tool_args, rc, out + err, started)
-        if rc is None and action != "sweep":
-            self.sweep()  # a timed-out command may leave worker processes behind
+        self._after(action, rc)
         return call
+
+    def _after(self, action: str, rc: int | None) -> None:
+        # Test code can leave processes behind (and a timed-out command certainly may): sweep
+        # after every pytest run and every timeout, so nothing keeps changing the checkout.
+        if action != "sweep" and (action == "pytest" or rc is None):
+            self.sweep()
 
     def _log(
         self, action_type: str, tool_args: dict, rc: int | None, raw: bytes, started: float

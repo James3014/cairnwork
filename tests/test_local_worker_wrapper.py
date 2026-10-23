@@ -24,6 +24,8 @@ TAG = "0123456789abcdef0123456789abcdef"
 def runs(tmp_path):
     runs = (tmp_path / "runs").resolve()
     (runs / TAG / "checkout" / "sub").mkdir(parents=True)
+    (runs / TAG / "tmp").mkdir()
+    (runs / TAG / "checkout" / ".git").mkdir()
     (runs / TAG / "checkout" / "a.txt").write_text("hello\n")
     (runs / ("f" * 32)).mkdir()
     (runs / ("f" * 32) / "secret.txt").write_text("s\n")
@@ -64,6 +66,8 @@ def run(runs, *args, stdin=b""):
         ("list", "{runs}/" + TAG, ".."),
         ("write", "{runs}/" + TAG, ".git/config"),
         ("write", "{runs}/" + TAG, "sub/.git/hooks/x"),
+        ("write", "{runs}/" + TAG, ".GIT/hooks/pre-commit"),
+        ("write", "{runs}/" + TAG, "sub/.Git/config"),
         ("write", "{runs}/" + TAG, "sub"),  # existing directory
         ("read", "{runs}/" + TAG, "a.txt", "extra"),
         ("sweep", "{runs}/" + TAG, "extra"),
@@ -82,6 +86,7 @@ def test_wrapper_refuses_symlinks(runs):
     co = runs / TAG / "checkout"
     (co / "lf").symlink_to(runs / ("f" * 32) / "secret.txt")
     (co / "ld").symlink_to(runs / ("f" * 32))
+    (co / "lg").symlink_to(".git")
     root = str(runs / TAG)
     for args in (
         ("read", root, "lf"),
@@ -89,9 +94,12 @@ def test_wrapper_refuses_symlinks(runs):
         ("list", root, "ld"),
         ("write", root, "lf"),
         ("write", root, "ld/new.txt"),
+        ("write", root, "lg/config"),
+        ("list", root, "lg"),
     ):
         assert run(runs, *args, stdin=b"x").returncode == 64, args
     assert not (runs / ("f" * 32) / "new.txt").exists()
+    assert not (co / ".git" / "config").exists()
     assert (runs / ("f" * 32) / "secret.txt").read_text() == "s\n"
 
 
@@ -146,3 +154,9 @@ def test_canary_direct_mode_denies_reads_writes_and_network(tmp_path):
 
     assert digest == hashlib.sha256(report_path.read_bytes()).hexdigest()
     assert list(runs.iterdir()) == []  # fixture and call log removed
+
+
+def test_wrapper_refuses_a_run_root_without_tmp(runs):
+    (runs / TAG / "tmp").rmdir()
+    proc = run(runs, "read", str(runs / TAG), "a.txt")
+    assert proc.returncode == 64 and b"tmp" in proc.stderr

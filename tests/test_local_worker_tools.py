@@ -180,3 +180,33 @@ def test_tools_module_opens_only_its_log():
             if name in file_access:
                 hits.append(ast.unparse(fn))
     assert hits == ["self.log_path.open"]
+
+
+def test_wrapper_that_did_not_start_fails_closed(tmp_path):
+    t, _ = make(tmp_path, (127, b"", b"env: sandbox-exec: No such file or directory\n"))
+    with pytest.raises(WorkerIsolationError):
+        t.read_file("a.py")
+
+
+def test_every_test_run_is_followed_by_a_sweep(tmp_path):
+    t, inv = make(tmp_path, (0, b"1 passed", b""))
+    t.run_tests(["-q"])
+    t.read_file("a.py")
+    assert [c[0][5] for c in inv.calls] == ["pytest", "sweep", "read"]
+
+
+def test_edit_timeout_sweeps(tmp_path):
+    t, inv = make(tmp_path, (0, b"a = 1\n", b""), (None, b"", b""))
+    call = t.edit_file("m.py", "a = 1", "a = 2")
+    assert call.error_category == "TIMEOUT"
+    assert [c[0][5] for c in inv.calls] == ["read", "write", "sweep"]
+
+
+def test_subprocess_invoker_times_out_and_bounds_capture(monkeypatch):
+    monkeypatch.setattr(tools, "CAPTURE_LIMIT", 1000)
+    invoke = tools.subprocess_invoker()
+    rc, out, err = invoke(["/bin/sh", "-c", "head -c 5000 /dev/zero; echo e >&2"], None, 10)
+    assert rc == 0 and len(out) < 1100 and b"not captured" in out and err == b"e\n"
+    # A grandchild holding stdout open must not hang the Owner after the timeout.
+    rc, _, _ = invoke(["/bin/sh", "-c", "(sleep 30 &) ; sleep 30"], None, 0.5)
+    assert rc is None

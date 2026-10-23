@@ -1,8 +1,9 @@
 #!/bin/sh
 # local-worker-tool: the one command the Owner may start as _cairnwork_worker for the local agent
 # arm's tool calls (Cairnwork #88, isolation half). Installed by install_local_worker_tool.sh to
-# /Users/Shared/cairnwork-worker/bin/local-worker-tool (owner-owned, 0755); the sudoers rule
-#   <owner> ALL=(_cairnwork_worker) NOPASSWD: /Users/Shared/cairnwork-worker/bin/local-worker-tool
+# /Users/Shared/cairnwork-worker/local-bin/local-worker-tool (root:wheel 0755, in a root-owned
+# directory, so neither the Owner nor the worker can swap it); the sudoers rule
+#   <owner> ALL=(_cairnwork_worker) NOPASSWD: /Users/Shared/cairnwork-worker/local-bin/local-worker-tool
 # names that path. experimental/local_worker/tools.py runs it with `sudo -n -u _cairnwork_worker`.
 #
 # Five actions, nothing else (exit 64 = refused before anything ran):
@@ -10,19 +11,21 @@
 #   local-worker-tool read   <run_root> <relpath>        print a regular file of the checkout
 #   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
 #   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
-#   local-worker-tool sweep  <run_root>                  kill worker processes whose cwd is in run_root
+#   local-worker-tool sweep  <run_root>                  kill this run's worker processes
 #
 # <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
-# created by the Owner; the checkout is <run_root>/checkout. <relpath> is relative to the checkout,
-# with no "..", "." (except a bare "." for list), empty or ".git" component.
+# created by the Owner (0750: the worker may not rename or plant entries in it) together with
+# <run_root>/checkout and <run_root>/tmp (0770). <relpath> is relative to the checkout, with no "..",
+# "." (except a bare "." for list), empty or ".git" (any case) component.
 #
 # Every action except sweep runs under a Seatbelt profile built HERE (never supplied by the caller):
 #   * no network at all (the tools do not need it; Splash is the agent loop's business, not theirs);
-#   * no reads under /Users, /Volumes, /private/tmp, /private/var/folders except this run root and
-#     the worker Python tree, so the owner's home, the verifier tree, private test bundles, the
-#     harness and every other run (same uid!) are unreadable;
+#   * no reads under /Users, /Volumes, /private/tmp, /private/var/tmp, /private/var/folders except
+#     this run's checkout, venv and tmp and the worker Python tree, so the owner's home, the
+#     verifier tree, private test bundles, the harness and every other run (same uid!) are unreadable;
 #   * writes only inside <run_root>/checkout and <run_root>/tmp, never into any .git component (a
-#     worker-written hook or config would later run as the Owner).
+#     worker-written hook or config would later run as the Owner);
+#   * signals only to processes in the same sandbox (not the agy worker's runs, which share the uid).
 # The uid boundary (the account cannot enter /Users/<owner>) sits under this as a second layer.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
@@ -39,6 +42,7 @@ if [ "$(id -un)" != "$WORKER" ]; then
 fi
 SANDBOX_EXEC=/usr/bin/sandbox-exec
 WORKER_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+TAG_ENV=CAIRNWORK_LOCAL_RUN_TAG
 
 refuse() {
   printf 'local-worker-tool: refusing: %s\n' "$*" >&2
@@ -74,6 +78,8 @@ require_run_root() {
   [ "${#name}" -eq 32 ] || refuse "run_root name is not a run tag"
   CHECKOUT=$1/checkout
   [ ! -L "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || refuse "run_root has no real checkout directory"
+  [ ! -L "$1/tmp" ] && [ -d "$1/tmp" ] || refuse "run_root has no real tmp directory"
+  [ ! -w "$1" ] || [ "$(id -un)" != "$WORKER" ] || refuse "run_root is writable by the worker"
 }
 
 # relpath: relative, no empty / "." / ".." / ".git" component, no newline, not starting with "-".
@@ -84,7 +90,7 @@ require_relpath() {
 "*) refuse "path has a newline" ;;
   esac
   case "/$1/" in
-    *//* | */./* | */../* | */.git/*) refuse "path has an empty, '.', '..' or '.git' component" ;;
+    *//* | */./* | */../* | */.[gG][iI][tT]/*) refuse "path has an empty, '.', '..' or '.git' component" ;;
   esac
 }
 
@@ -94,6 +100,9 @@ require_dir_inside_checkout() {
   case "$real/" in
     "$CHECKOUT"/*) ;;
     *) refuse "$2 resolves outside the checkout" ;;
+  esac
+  case "$real/" in
+    */.[gG][iI][tT]/*) refuse "$2 resolves into a .git directory" ;;
   esac
 }
 
@@ -110,13 +119,15 @@ profile() {
   printf '(version 1)\n(allow default)\n(deny network*)\n'
   printf '(deny mach-lookup (global-name "com.apple.dnssd.service"))\n'
   printf '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp")'
-  printf ' (subpath "/private/var/folders"))\n'
-  printf '(allow file-read* (subpath "%s") (subpath "%s"))\n' "$RUN_ROOT" "$PYROOT"
-  printf '(allow file-read-metadata%s%s)\n' "$(ancestors "$RUN_ROOT")" "$(ancestors "$PYROOT")"
+  printf ' (subpath "/private/var/tmp") (subpath "/private/var/folders"))\n'
+  printf '(allow file-read* (subpath "%s") (subpath "%s/venv") (subpath "%s/tmp") (subpath "%s"))\n' \
+    "$CHECKOUT" "$RUN_ROOT" "$RUN_ROOT" "$PYROOT"
+  printf '(allow file-read-metadata%s%s)\n' "$(ancestors "$CHECKOUT")" "$(ancestors "$PYROOT")"
   printf '(deny file-write*)\n'
   printf '(allow file-write* (subpath "%s") (subpath "%s/tmp")' "$CHECKOUT" "$RUN_ROOT"
   printf ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))\n'
-  printf '(deny file-write* (regex #"/\\.git(/|$)"))\n'
+  printf '(deny file-write* (regex #"/\\.[gG][iI][tT](/|$)"))\n'
+  printf '(deny signal)\n(allow signal (target same-sandbox))\n'
 }
 
 sandboxed() {
@@ -127,11 +138,20 @@ sandboxed() {
     PATH="$WORKER_PATH" \
     LANG=en_US.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
+    "$TAG_ENV=${RUN_ROOT##*/}" \
     "$SANDBOX_EXEC" -p "$(profile)" "$@"
 }
 
-# Worker-owned pids whose cwd is this run root or inside it.
+# Worker-owned pids of this run: the run tag in their environment, or a cwd inside the run root.
+# (A process that both clears its environment and leaves the run root is not found; it is still
+# inside this run's Seatbelt profile, so the Owner must sweep before reading the checkout back and
+# treat the checkout as untrusted.)
 sweep_pids() {
+  /bin/ps -E -ww -U "$UID_SELF" -o pid= -o command= 2>/dev/null | while read -r pid rest; do
+    case " $rest " in
+      *" $TAG_ENV=${RUN_ROOT##*/} "*) printf '%s\n' "$pid" ;;
+    esac
+  done
   /usr/sbin/lsof -nP -a -u "$UID_SELF" -d cwd -Fpn 2>/dev/null | while read -r line; do
     case "$line" in
       p*) pid=${line#p} ;;
@@ -167,7 +187,6 @@ case "$ACTION" in
     ;;
   *) refuse "unknown action '$ACTION'" ;;
 esac
-[ -d "$RUN_ROOT/tmp" ] || mkdir -- "$RUN_ROOT/tmp"
 
 case "$ACTION" in
   list)

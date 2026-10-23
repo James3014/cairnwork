@@ -21,6 +21,7 @@ import os
 import platform
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -67,19 +68,26 @@ def _mkdir(path: Path, mode: int) -> Path:
 
 def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: list[str]) -> Fixture:
     secret = SECRET_PREFIX + secrets.token_hex(8)
-    run_root = _mkdir(runs / secrets.token_hex(16), 0o770)
+    # Same layout and modes as a real run: run root 0750 (the worker cannot plant entries in it),
+    # checkout and tmp 0770. Group-writable .git and a group-readable sibling secret make Seatbelt,
+    # not file modes, the layer under test for those targets.
+    run_root = _mkdir(runs / secrets.token_hex(16), 0o750)
     checkout = _mkdir(run_root / "checkout", 0o770)
+    _mkdir(run_root / "tmp", 0o770)
     (checkout / "a.txt").write_text("canary-public\n")
     os.chmod(checkout / "a.txt", 0o660)
-    sibling = _mkdir(runs / secrets.token_hex(16), 0o770)
+    _mkdir(_mkdir(checkout / ".git", 0o770) / "hooks", 0o770)
+    sibling = _mkdir(runs / secrets.token_hex(16), 0o750)
     _mkdir(sibling / "checkout", 0o770)
     (sibling / "checkout" / "secret.txt").write_text(secret + "\n")
+    os.chmod(sibling / "checkout" / "secret.txt", 0o660)
     private_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     private = _mkdir(private_parent / f"bundle-{run_root.name[:8]}", 0o700)
     (private / "test_hidden.py").write_text(f"# {secret}\n")
     links = _mkdir(checkout / "links", 0o770)  # not the checkout root: pytest scans that
     (links / "link_private").symlink_to(private / "test_hidden.py")
     (links / "link_dir").symlink_to(sibling / "checkout")
+    (links / "link_git").symlink_to("../.git")
     venv = run_root / "venv"
     subprocess.run(["uv", "venv", "-q", "--python", python, str(venv)], check=True)  # noqa: S607
     subprocess.run(  # noqa: S607
@@ -101,6 +109,8 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
         "private_tmp": f"/private/tmp/cw-canary-{tag}.txt",
         "users_shared": f"/Users/Shared/cw-canary-{tag}.txt",
         "checkout_git_hook": str(checkout / ".git" / "hooks" / "pre-commit"),
+        "checkout_git_hook_upper": str(checkout / ".GIT" / "hooks" / "pre-push"),
+        "checkout_git_config_via_link": str(links / "link_git" / "config"),
     }
     return Fixture(run_root, sibling, private, secret, read_targets, write_targets)
 
@@ -119,6 +129,8 @@ def _wrapper_probes(tools: WorkerTools, fx: Fixture) -> dict[str, list[dict]]:
         "write": [
             ("write_file", "../escape.txt"),
             ("write_file", ".git/hooks/pre-commit"),
+            ("write_file", ".GIT/hooks/pre-push"),
+            ("write_file", "links/link_git/config"),
             ("write_file", "links/link_dir/planted.txt"),
             ("write_file", fx.write_targets["private_tmp"]),
         ],
@@ -149,8 +161,15 @@ def _positive_controls(tools: WorkerTools) -> list[dict]:
 
 
 def _code_probes(tools: WorkerTools, fx: Fixture) -> tuple[list[dict], dict, dict]:
-    tools.write_file("test_canary_probe.py", probe.source(fx.read_targets, fx.write_targets))
-    call = tools.run_tests(["-q", "-s", "test_canary_probe.py"])
+    # A process outside the sandbox the probe must not be able to signal (killed afterwards).
+    victim = subprocess.Popen(["/bin/sleep", "300"])  # noqa: S607
+    try:
+        src = probe.source(fx.read_targets, fx.write_targets, fx.run_root.name[:8], victim.pid)
+        tools.write_file("test_canary_probe.py", src)
+        call = tools.run_tests(["-q", "-s", "test_canary_probe.py"])
+    finally:
+        victim.kill()
+        victim.wait()
     rows = [
         json.loads(line[len(probe.MARK) :])
         for line in call.output.splitlines()
@@ -170,6 +189,43 @@ def _leftovers(fx: Fixture) -> list[str]:
     return [p for p in fx.write_targets.values() if os.path.lexists(p)]
 
 
+def _remove_planted(path: str) -> None:
+    """Remove a planted file as the Owner, but never through a directory symlink the worker made."""
+    parent = os.path.dirname(path)
+    if os.path.realpath(parent) == os.path.normpath(parent) and not os.path.isdir(path):
+        Path(path).unlink(missing_ok=True)
+
+
+def _complete(rows: list[dict], kind: str, names) -> list[dict]:
+    """One row per expected target: a missing row (crash, clipping) is a failure, not a pass."""
+    seen = {r["probe"] for r in rows if r["kind"] == kind}
+    return [
+        {"probe": f"code {kind} {n}", "pass": False, "result": "MISSING_ROW"}
+        for n in names
+        if f"code {kind} {n}" not in seen
+    ]
+
+
+def _owner_resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+    except OSError:
+        return False
+    return True
+
+
+def _dns_needs_owner(rows: list[dict]) -> list[dict]:
+    """A failed lookup only proves denial if the Owner (outside the sandbox) can resolve."""
+    out = []
+    for r in rows:
+        if r["kind"] == "net" and r["probe"].startswith("code net dns_") and r["pass"]:
+            host = r["probe"].removeprefix("code net dns_")
+            if not _owner_resolves(host):
+                r = dict(r, **{"pass": False, "result": "INCONCLUSIVE_OWNER_CANNOT_RESOLVE"})
+        out.append(r)
+    return out
+
+
 def _check(rows: list[dict]) -> dict:
     return {"pass": bool(rows) and all(r["pass"] for r in rows), "probes": rows}
 
@@ -180,19 +236,26 @@ def run_canary(tools: WorkerTools, fx: Fixture) -> dict:
     code_rows, identity, run = _code_probes(tools, fx)
     left = _leftovers(fx)
     for path in left:  # a write that got through: record it, then remove it
-        Path(path).unlink(missing_ok=True)
+        _remove_planted(path)
+    code_rows = _dns_needs_owner(code_rows)
+    code_rows += _complete(code_rows, "read", fx.read_targets)
+    code_rows += _complete(code_rows, "write", fx.write_targets)
+    code_rows += _complete(code_rows, "net", probe.NET_TARGETS)
+    code_rows += _complete(code_rows, "escape", probe.ESCAPE_TARGETS)
     reads = wrapper["read"] + [r for r in code_rows if r["kind"] == "read"]
     writes = wrapper["write"] + [r for r in code_rows if r["kind"] == "write"]
     writes.append(
         {"probe": "no write target exists afterwards", "pass": not left, "leftovers": left}
     )
     nets = [r for r in code_rows if r["kind"] == "net"]
+    escapes = [r for r in code_rows if r["kind"] == "escape"]
     positive.append(run)
     leak = {"probe": "no secret in any tool output", "pass": not run["secret_leaked"]}
     checks = {
         "a_read_denied": _check(reads + [leak]),
         "b_write_denied": _check(writes),
         "c_network_denied": _check(nets),
+        "d_launchd_escape_denied": _check(escapes),
         "positive_controls": _check(positive),
     }
     worker = tools.mode == "worker"
