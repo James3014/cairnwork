@@ -105,7 +105,10 @@ class StatusReader(threading.Thread):
     start with STATUS_PREFIX (at most STATUS_LINES_KEPT of them, each at most
     STATUS_LINE_BYTES), so nothing a chatty child prints reaches the disk or grows in
     memory. Lines the agy child printed are relayed by the dispatcher with a
-    ``[provider]`` prefix and so are never kept.
+    ``[provider]`` prefix and so are never kept. Only a chunk that starts a real line
+    counts: the rest of a line longer than the cap is discarded up to its newline (else a
+    worker could pad a ``[provider]`` line so its tail starts a chunk), and a dispatcher
+    line cut at the cap marks the lines as dropped.
 
     The final status line is the last kept line; with ``run_as_user`` the worker
     receipts before it are read too (agy_receipts.py). Without it only the final status
@@ -119,10 +122,11 @@ class StatusReader(threading.Thread):
         self.last = b""
         self.kept: list[bytes] = []
         self.unknown = False  # a read failed: the status may be missing or stale
-        self.dropped = False  # more lines than STATUS_LINES_KEPT: the oldest were dropped
+        self.dropped = False  # over STATUS_LINES_KEPT lines, or one cut at the cap
 
     def run(self) -> None:
         failures = 0
+        mid_line = False  # the last chunk read did not end the line (it hit the cap)
         while failures < 3:
             try:
                 line = self.stream.readline(STATUS_LINE_BYTES)
@@ -133,12 +137,17 @@ class StatusReader(threading.Thread):
             if not line:
                 return
             failures = 0  # the limit is on consecutive failures, so draining never stops early
-            if line.startswith(STATUS_PREFIX.encode()):
-                self.last = line
-                self.kept.append(line)
-                if len(self.kept) > STATUS_LINES_KEPT:
-                    del self.kept[0]
-                    self.dropped = True
+            starts_line, mid_line = not mid_line, not line.endswith(b"\n")
+            if not starts_line or not line.startswith(STATUS_PREFIX.encode()):
+                continue  # only a real line start counts: never the tail of a cut line
+            self.last = line
+            if mid_line:  # a dispatcher line longer than the cap: cut, so never a receipt
+                self.dropped = True
+                continue
+            self.kept.append(line)
+            if len(self.kept) > STATUS_LINES_KEPT:
+                del self.kept[0]
+                self.dropped = True
 
     def lines(self) -> list[str]:
         """Every kept dispatcher line, in order (the final status line last)."""

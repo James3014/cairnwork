@@ -17,8 +17,10 @@ launch names the configured account and a run root under WORKER_RUNS, the sweep
 says ``clean`` / ``CLEAN`` with nothing left, the run root was removed and no worker
 failure is named; and, for a run that exits 0, the last line is a ``completed``
 status whose attempt has a launch receipt. Anything else fails the attempt
-(fail closed). A post-hoc wrapper ``--sweep`` is run only after the dispatcher was
-killed, for a launched run whose receipts do not show it swept and removed.
+(fail closed). A post-hoc wrapper ``--sweep`` is run only after an abnormal end (the
+dispatcher killed by a signal, its output held, or no final status line), for a launched
+run whose receipts do not show it swept and removed, whose run root still exists and is
+still the directory (dev, ino) its launch receipt named.
 
 Each run with ``run_as_user`` leaves ``<attempt>.agy.worker.json`` (owner-only) next
 to the agy log: the receipts as read, any post-hoc sweep, and the problems found.
@@ -151,14 +153,15 @@ def completion_problem(receipts: Receipts) -> str | None:
     return None
 
 
-def sweep_after_kill(dispatch, receipts: Receipts) -> list[str]:
-    """After the dispatcher was killed: sweep through the wrapper every launched run its
-    receipts do not show swept and removed. Returns what could not be shown gone."""
-    if not receipts.known:
-        return ["WORKER_RECEIPTS_UNKNOWN: worker launches unknown (stderr not all read)"]
-    if not receipts.attempts:
-        return ["WORKER_RECEIPT_MISSING: no WORKER_LAUNCH before the kill; launches unknown"]
-    unswept = []
+def sweep_after_kill(dispatch, receipts: Receipts, *, killed: bool = True) -> list[str]:
+    """After an abnormal dispatcher end (killed by us or anyone else, held output, or no
+    final status line): sweep through the wrapper every launched run its receipts do not
+    show swept and removed, also when other lines were lost. Returns what could not be
+    shown gone. ``killed``: the dispatcher died by a signal, so a missing launch receipt
+    means its launches are unknown (it may have died between launching and writing)."""
+    unswept = [] if receipts.known else ["WORKER_RECEIPTS_UNKNOWN: some dispatcher lines lost"]
+    if killed and not receipts.attempts:
+        unswept.append("WORKER_RECEIPT_MISSING: no WORKER_LAUNCH before the kill; launches unknown")
     for attempt in receipts.attempts.values():
         if problem := launch_problem(attempt, receipts.run_as_user):
             unswept.append(problem)  # no trustworthy run root to sweep
@@ -167,12 +170,25 @@ def sweep_after_kill(dispatch, receipts: Receipts) -> list[str]:
     return unswept
 
 
+def _same_directory(root: str, run_root_id: object) -> bool:
+    """The run root is still the directory the launch receipt's lstat named (dev, ino),
+    so a post-hoc sweep never reaches another run that took the same path later."""
+    try:
+        info = os.lstat(root)
+    except OSError:
+        return False
+    return run_root_id == [info.st_dev, info.st_ino]
+
+
 def _sweep_one(dispatch, receipts: Receipts, attempt: Attempt) -> list[str]:
-    root = attempt.receipts[LAUNCH]["run_root"]
+    launch = attempt.receipts[LAUNCH]
+    root = launch["run_root"]
     if os.path.lexists(root):
+        if not _same_directory(root, launch.get("run_root_id")):
+            return [f"WORKER_SWEEP_UNCLEAN: {root} is not the directory its launch named"]
         clean = agy_dispatch.sweep_worker_run(dispatch, root)
         receipts.post_hoc[root] = "clean" if clean else "unclean"
-        return [] if clean else [f"WORKER_SWEEP_UNCLEAN: {root} (wrapper sweep after the kill)"]
+        return [] if clean else [f"WORKER_SWEEP_UNCLEAN: {root} (wrapper sweep after the end)"]
     if sweep_clean(attempt):
         return []  # swept clean, then removed; only the cleanup line was cut off
     return [f"WORKER_SWEEP_UNCLEAN: {root} gone without a clean WORKER_SWEEP receipt"]
@@ -197,7 +213,10 @@ def write_record(log_path: Path, receipts: Receipts, found: list[str]) -> None:
         "isolated": not found,
     }
     path = record_path(log_path)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError as exc:  # never overwrite: one record per attempt
+        raise agy_dispatch.AgyWorkerAccountFailed(f"WORKER_RECORD_EXISTS: {path}") from exc
     with os.fdopen(fd, "w", encoding="utf-8") as out:
         json.dump(data, out, indent=2, sort_keys=True, default=str)
 

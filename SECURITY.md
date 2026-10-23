@@ -43,9 +43,13 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
   profile）、調度器本身的權限（仍是 owner）、也不會讓 worker 的輸出變得可信（候選仍只靠快照與 verifier 判定）。
   「確實以 worker 帳號執行」只認調度器的 worker 收據（`WORKER_LAUNCH`／`WORKER_SWEEP`／`WORKER_CLEANUP`），
   沒有收據、帳號不符、清掃不乾淨、或最後一行不是 `completed`，attempt 一律失敗，不會退回以 owner 身分執行；
-  owner 無法對 worker uid 送訊號，只在調度器被殺時依 `WORKER_LAUNCH` 收據的 run 目錄請 wrapper `--sweep`，
+  owner 無法對 worker uid 送訊號，調度器不正常結束（被殺、崩潰、沒有最終狀態行）時依 `WORKER_LAUNCH` 收據的 run 目錄
+  （且 `run_root_id` 相符）請 wrapper `--sweep`，
   清不乾淨就是 `WORKER_SWEEP_UNCLEAN`，run 目錄保留；每次的判定留在 `<attempt>.agy.worker.json`。
-  收據本身仍是調度器（owner 身分）寫的，證明的是調度器的說法，不是獨立見證。情境三發生在 worker 帳號下時，先查 `/Users/Shared/cairnwork-worker/worker-runs/` 有沒有留下的 run。
+  收據本身仍是調度器（owner 身分）寫的，證明的是調度器的說法，不是獨立見證。
+  **只能在含 Nexus-new commit `4f526e8ca`（PR 2903）的調度器上啟用**：更舊、但已有 `--run-as-user` 的調度器
+  會把 worker 的 stderr 原樣轉出，worker 能偽造一整組收據而通過；Cairnwork 沒有可靠的版本訊號可擋，這是部署前提。
+  情境三發生在 worker 帳號下時，先查 `/Users/Shared/cairnwork-worker/worker-runs/` 有沒有留下的 run。
   細節與設定見 `docs/ISSUE_INTAKE.md`。
 - **verifier 的通過是證據，不是完成的證明。** 候選程式碼和測試跑在同一個程序，判決在候選碰得到的
   地方產生，能讀環境的候選仍可偽造。一個任務是否真的完成，信任分層在 verifier 以外：Core VERIFIED

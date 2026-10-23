@@ -166,25 +166,13 @@ class AgyWorker:
                 if process.stderr is not None:
                     process.stderr.close()
                 log.close()
-        receipts = None
+        completion = None
         if dispatch is not None and dispatch.run_as_user is not None:
-            known = not (held or reader.unknown or reader.dropped)
-            receipts = agy_receipts.parse(reader.lines(), dispatch.run_as_user, known=known)
-        if receipts is not None and timed_out is not None:
-            unswept = agy_receipts.sweep_after_kill(dispatch, receipts)
-            agy_receipts.write_record(log_path, receipts, unswept or ["TIMED_OUT"])
-            if unswept:
-                raise AgyWorkerError(
-                    f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; "
-                    f"log {log_path}"
-                )
+            completion = _settle_worker_run(dispatch, reader, process, held, timed_out, log_path)
         if timed_out is not None:
             raise AgyWorkerError("agy timed out") from timed_out
         if held:
             raise AgyWorkerError("a process agy started outlived it and holds its output")
-        completion = None
-        if receipts is not None:
-            completion = _judge_receipts(receipts, process.returncode, log_path)
         if reader is not None:
             agy_dispatch.raise_if_exhausted(reader.status(), process.returncode, log_path)
             agy_dispatch.raise_if_worker_refused(reader.status(), log_path)
@@ -195,14 +183,30 @@ class AgyWorker:
             raise agy_dispatch.AgyWorkerAccountFailed(f"{completion}; log {log_path}")
 
 
-def _judge_receipts(receipts, returncode: int, log_path) -> str | None:
-    """Write the attempt's worker record and fail any attempt the receipts do not show
-    isolated and clean; return the completion problem of an exit-0 run (raised after the
-    exit-code checks, so a dispatcher-reported failure keeps its own label)."""
+def _settle_worker_run(dispatch, reader, process, held, timed_out, log_path) -> str | None:
+    """Judge a run under agy_run_as_user from the dispatcher's receipts and write its
+    record. After an abnormal end (a signal, held output, no final status) runs the
+    receipts do not show swept are swept through the wrapper first. Raises for an unswept
+    run and for an attempt the receipts do not show isolated and clean; returns the
+    completion problem of an exit-0 run (raised after the exit-code checks, so a
+    dispatcher-reported failure keeps its own label)."""
+    known = not (held or reader.unknown or reader.dropped)
+    receipts = agy_receipts.parse(reader.lines(), dispatch.run_as_user, known=known)
+    code = process.returncode
+    killed = timed_out is not None or code < 0
+    unswept = []
+    if killed or held or receipts.final is None:
+        unswept = agy_receipts.sweep_after_kill(dispatch, receipts, killed=killed)
     found = agy_receipts.problems(receipts)
-    completion = agy_receipts.completion_problem(receipts) if returncode == 0 else None
-    agy_receipts.write_record(log_path, receipts, found + ([completion] if completion else []))
-    if found:
+    completion = agy_receipts.completion_problem(receipts) if code == 0 else None
+    ended = ["TIMED_OUT"] * (timed_out is not None) + ["HELD"] * held
+    extra = [completion] if completion else []
+    agy_receipts.write_record(log_path, receipts, unswept + ended + found + extra)
+    if unswept:
+        raise AgyWorkerError(
+            f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; log {log_path}"
+        )
+    if found and not ended:
         raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found)}; log {log_path}")
     return completion
 

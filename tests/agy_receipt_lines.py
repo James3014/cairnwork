@@ -4,6 +4,7 @@ one WORKER_LAUNCH, WORKER_SWEEP and WORKER_CLEANUP line per attempt, the final s
 line last, the provider's own dispatcher-shaped lines relayed with ``[provider] ``)."""
 
 import json
+import os
 
 PREFIX = "NEXUS_AGY_DISPATCH "
 WORKER = "_cairnwork_worker"
@@ -15,7 +16,11 @@ def line(obj: dict) -> str:
     return PREFIX + json.dumps(obj, sort_keys=True) + "\n"
 
 
-def launch(run_root: str, *, attempt=1, user=WORKER) -> str:
+def launch(run_root: str, *, attempt=1, user=WORKER, run_root_id=None) -> str:
+    """run_root_id defaults to the directory's real (dev, ino) when it exists."""
+    if run_root_id is None:
+        info = os.lstat(run_root) if os.path.lexists(run_root) else None
+        run_root_id = [info.st_dev, info.st_ino] if info else [16777231, 4242]
     return line(
         {
             "event": "WORKER_LAUNCH",
@@ -23,7 +28,7 @@ def launch(run_root: str, *, attempt=1, user=WORKER) -> str:
             "operation_id": None,
             "run_as_user": user,
             "run_root": run_root,
-            "run_root_id": [16777231, 4242],
+            "run_root_id": run_root_id,
             "pid": None,
             "lstart": None,
             "wrapper_sha256": WRAPPER_SHA,

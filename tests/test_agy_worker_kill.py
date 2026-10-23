@@ -13,7 +13,7 @@ from test_agy_worker import TASK, attempt, expire_once_ready, fake_dispatcher
 
 from cairnwork.workers import agy_dispatch
 from cairnwork.workers.agy import AgyWorker, AgyWorkerError
-from cairnwork.workers.agy_dispatch import Dispatch
+from cairnwork.workers.agy_dispatch import AgyWorkerAccountFailed, Dispatch
 
 
 @pytest.fixture
@@ -150,5 +150,56 @@ def test_a_run_root_gone_without_a_clean_sweep_receipt_counts_as_unswept(
     unclean = sweep(result="unclean", wrapper="UNCLEAN", left=["7"])
     worker, workdir = _hanging(tmp_path, monkeypatch, launch(str(layout)) + unclean)
     with pytest.raises(AgyWorkerError, match="WORKER_SWEEP_UNCLEAN.*gone without a clean"):
+        worker.run(workdir, TASK)
+    assert not seen.exists()
+
+
+def test_a_launch_receipt_for_another_directory_at_that_path_is_not_swept(
+    tmp_path, monkeypatch, layout
+):
+    seen = _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP clean')")
+    stale = launch(str(layout), run_root_id=[1, 2])  # the path now holds another directory
+    worker, workdir = _hanging(tmp_path, monkeypatch, stale)
+    with pytest.raises(AgyWorkerError, match="WORKER_SWEEP_UNCLEAN.*not the directory"):
+        worker.run(workdir, TASK)
+    assert not seen.exists() and layout.exists()
+
+
+def _dying(tmp_path, before: str, how: str):
+    """A dispatcher that writes `before` and then ends abnormally on its own."""
+    body = f"sys.stdin.read()\nsys.stderr.write({before!r}); sys.stderr.flush()\n{how}"
+    path = fake_dispatcher(tmp_path, body)
+    workdir = tmp_path / attempt(1)
+    workdir.mkdir()
+    worker = AgyWorker(
+        model="m-1", timeout_seconds=900, dispatch=Dispatch(path, run_as_user=WORKER)
+    )
+    return worker, workdir
+
+
+@pytest.mark.parametrize(
+    "how",
+    [
+        "import signal; os.kill(os.getpid(), signal.SIGKILL)",  # killed by someone else: -9
+        "sys.exit(1)",  # crashed: no final status line
+    ],
+)
+def test_an_abnormal_end_not_caused_by_our_timeout_is_swept_too(tmp_path, monkeypatch, layout, how):
+    seen = _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP clean')")
+    worker, workdir = _dying(tmp_path, launch(str(layout)), how)
+    with pytest.raises(AgyWorkerAccountFailed, match="^WORKER_RECEIPT_INCOMPLETE: attempt 1"):
+        worker.run(workdir, TASK)  # swept clean, and still a failed attempt
+    assert json.loads(seen.read_text())[-2:] == ["--sweep", str(layout)]
+    assert not layout.exists()
+    assert _record(workdir)["post_hoc_sweeps"] == {str(layout): "clean"}
+
+
+def test_a_dispatcher_killed_by_someone_else_before_any_launch_counts_as_unswept(
+    tmp_path, monkeypatch, layout
+):
+    seen = _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP clean')")
+    kill = "import signal; os.kill(os.getpid(), signal.SIGKILL)"
+    worker, workdir = _dying(tmp_path, "starting\n", kill)
+    with pytest.raises(AgyWorkerError, match="WORKER_SWEEP_UNCLEAN.*no WORKER_LAUNCH"):
         worker.run(workdir, TASK)
     assert not seen.exists()

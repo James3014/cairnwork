@@ -115,3 +115,47 @@ def test_a_clean_earlier_attempt_and_a_clean_retry_are_both_required():
     assert _verdict(unclean_first + retry + status(attempts=2))[0].startswith(
         "WORKER_SWEEP_UNCLEAN: attempt 1"
     )
+
+
+def test_the_tail_of_a_padded_provider_line_never_starts_a_receipt():
+    pad = "[provider] " + "x" * (agy_dispatch.STATUS_LINE_BYTES - len("[provider] "))
+    forged = launch(f"{agy_dispatch.WORKER_RUNS}/{'f' * 32}", attempt=7)
+    for cut in (0, 1, 5):  # the forged prefix at, or just past, a chunk boundary
+        text = good_run(ROOT).replace(status(), pad + "y" * cut + forged + status())
+        receipts = _read(text)
+        assert list(receipts.attempts) == ["1"], cut
+        assert _verdict(text) == []
+
+
+def test_a_dispatcher_line_cut_at_the_cap_makes_the_receipts_unknown():
+    long_line = launch(ROOT).replace('"pid": null', '"pad": "' + "z" * 70000 + '", "pid": null')
+    text = long_line + sweep() + cleanup() + status()
+    reader = StatusReader(io.BytesIO(text.encode()))
+    reader.run()
+    assert reader.dropped and len(reader.lines()) == 3  # the cut line is not kept
+    assert _verdict(text)[0].startswith("WORKER_RECEIPTS_UNKNOWN:")
+
+
+def test_a_worker_record_is_never_overwritten(tmp_path):
+    log = tmp_path / "a1.agy.log"
+    receipts = _read(good_run(ROOT))
+    agy_receipts.write_record(log, receipts, [])
+    with pytest.raises(agy_dispatch.AgyWorkerAccountFailed, match="WORKER_RECORD_EXISTS"):
+        agy_receipts.write_record(log, receipts, [])
+    assert (tmp_path / "a1.agy.worker.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_lost_lines_still_sweep_the_runs_the_kept_receipts_name(tmp_path, monkeypatch):
+    runs = tmp_path / "worker-runs"
+    root = runs / RUN_TAG
+    root.mkdir(parents=True)
+    monkeypatch.setattr(agy_dispatch, "WORKER_RUNS", str(runs))
+    swept = []
+    monkeypatch.setattr(
+        agy_dispatch, "sweep_worker_run", lambda _d, r: swept.append(r) or root.rmdir() or True
+    )
+    lines = [launch(str(root)).rstrip("\n")]
+    receipts = agy_receipts.parse(lines, WORKER, known=False)
+    unswept = agy_receipts.sweep_after_kill(None, receipts)
+    assert swept == [str(root)] and receipts.post_hoc == {str(root): "clean"}
+    assert unswept == ["WORKER_RECEIPTS_UNKNOWN: some dispatcher lines lost"]  # still fails
