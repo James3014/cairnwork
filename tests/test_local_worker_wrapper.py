@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from experimental.local_worker import canary
+from experimental.local_worker import canary, escapes
 
 WRAPPER = Path(canary.__file__).with_name("local-worker-tool")
 TAG = "0123456789abcdef0123456789abcdef"
@@ -185,23 +185,23 @@ def _escape_fixture(tmp_path):
 def test_launchctl_row_needs_denied_job_that_never_ran_and_a_working_control(tmp_path, monkeypatch):
     fx, rows = _escape_fixture(tmp_path)
     monkeypatch.setattr(
-        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
     )
-    assert all(r["pass"] for r in canary._launchctl_rows(rows, fx))
+    assert all(r["pass"] for r in escapes.launchctl_rows(rows, fx))
     # The control job did not run for the Owner either: the denial proves nothing.
     monkeypatch.setattr(
-        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 5, "marker_seen": False}
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 5, "marker_seen": False}
     )
-    got = canary._launchctl_rows(rows, fx)
+    got = escapes.launchctl_rows(rows, fx)
     assert {r["result"] for r in got} == {"INCONCLUSIVE_OWNER_CONTROL_FAILED"}
     assert not any(r["pass"] for r in got)
     # launchctl failed but the job ran anyway: an escape, whatever the exit code said.
     monkeypatch.setattr(
-        canary, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
+        escapes, "_owner_launchctl_control", lambda fx, name: {"rc": 0, "marker_seen": True}
     )
     for marker in fx.escape_markers.values():
         Path(marker).write_text("ran")
-    got = canary._launchctl_rows(rows, fx)
+    got = escapes.launchctl_rows(rows, fx)
     assert {r["result"] for r in got} == {"ESCAPED_JOB_RAN"} and not any(r["pass"] for r in got)
     assert not any(Path(m).exists() for m in fx.escape_markers.values())
 

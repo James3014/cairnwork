@@ -15,9 +15,8 @@ tools still work. The JSON report and its sha256 go into the addendum's §10 fre
 A signal to an unsandboxed process of the worker uid cannot be set up without a second sudoers
 rule: that case (Owner process, same uid) runs in the ``direct`` report, so the §10 table also
 cites a ``direct`` report whose ``wrapper_sha256`` equals the installed wrapper's. Likewise the
-worker account may have no launchd domain at all, so in worker mode a failed launchctl cannot
-tell a missing domain from a Seatbelt denial; the direct report (Owner has the domain) shows the
-Seatbelt cause, the worker report shows that no job ran.
+worker account may have no launchd domain, so a failed launchctl in worker mode cannot tell that
+from a Seatbelt denial: the direct report shows the cause, the worker report that no job ran.
 
     python -m experimental.local_worker.canary --mode worker --out <dir>
 """
@@ -30,24 +29,20 @@ import json
 import os
 import platform
 import secrets
-import select
 import shutil
 import socket
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from experimental.local_worker import probe
+from experimental.local_worker import escapes, probe
 from experimental.local_worker.tools import (
     INSTALLED_WRAPPER,
     REFUSED_EXIT,
     WORKER_USER,
     WorkerTools,
-    direct_argv,
-    sudo_argv,
 )
 
 SCHEMA = "cairnwork.local_worker.canary/v1"
@@ -58,12 +53,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Real places the worker must never read (the verifier tree, the agy worker's runs), when present.
 DEFAULT_FORBID = ("/Users/Shared/cairnwork", "/Users/Shared/cairnwork-worker/worker-runs")
 SECRET_PREFIX = "CW-CANARY-SECRET-"
-OWNER_SUFFIX = "-owner"  # marker of the Owner's positive-control job
-VICTIM_TEST = "test_victim.py"
-VICTIM_SOURCE = (
-    "import os, time\n\n\ndef test_victim():\n"
-    '    print("VICTIM_PID", os.getpid(), flush=True)\n    time.sleep(300)\n'
-)
 
 
 @dataclass
@@ -80,8 +69,8 @@ class Fixture:
         for path in (self.run_root, self.sibling, self.private):
             shutil.rmtree(path, ignore_errors=True)
         for marker in self.escape_markers.values():
-            for path in (marker, marker + OWNER_SUFFIX):
-                _unlink_quiet(path)
+            for path in (marker, marker + escapes.OWNER_SUFFIX):
+                escapes.unlink_quiet(path)
 
 
 def _mkdir(path: Path, mode: int) -> Path:
@@ -111,8 +100,8 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
     sibling = _mkdir(runs / secrets.token_hex(16), 0o750)
     _mkdir(sibling / "checkout", 0o770)
     _mkdir(sibling / "tmp", 0o770)
-    (sibling / "checkout" / VICTIM_TEST).write_text(VICTIM_SOURCE)
-    os.chmod(sibling / "checkout" / VICTIM_TEST, 0o660)
+    (sibling / "checkout" / escapes.VICTIM_TEST).write_text(escapes.VICTIM_SOURCE)
+    os.chmod(sibling / "checkout" / escapes.VICTIM_TEST, 0o660)
     (sibling / "checkout" / "secret.txt").write_text(secret + "\n")
     os.chmod(sibling / "checkout" / "secret.txt", 0o660)
     private_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -194,70 +183,13 @@ def _positive_controls(tools: WorkerTools) -> list[dict]:
     ]
 
 
-def _start_sibling_victim(tools: WorkerTools, fx: Fixture, env: dict | None):
-    """A process running as the worker in ANOTHER sandbox (a pytest run of the sibling attempt,
-    started through the wrapper). Same uid as the probe, so only Seatbelt can stop the signal.
-    Returns (popen, pid or 0)."""
-    build = sudo_argv if tools.mode == "worker" else direct_argv
-    argv = build(tools.wrapper, "pytest", str(fx.sibling), ["-q", "-s", VICTIM_TEST])
-    proc = subprocess.Popen(  # noqa: S603 - argv is built from fixed parts
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        cwd="/",
-    )
-    assert proc.stdout is not None
-    deadline = time.monotonic() + 60
-    buf = b""
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([proc.stdout], [], [], 1.0)
-        if ready:
-            chunk = os.read(proc.stdout.fileno(), 4096)
-            if not chunk:
-                break
-            buf += chunk
-            for line in buf.decode(errors="replace").splitlines():
-                if line.startswith("VICTIM_PID "):
-                    return proc, int(line.split()[1])
-        elif proc.poll() is not None:
-            break
-    return proc, 0
-
-
-def _stop_sibling_victim(tools: WorkerTools, fx: Fixture, proc: subprocess.Popen) -> None:
-    sweeper = WorkerTools(
-        fx.sibling,
-        fx.private / "victim.calls.jsonl",
-        mode=tools.mode,
-        wrapper=tools.wrapper,
-        invoker=tools.invoker,
-        timeout_seconds=60,
-    )
-    sweeper.sweep()  # kills the worker-side pytest; the Owner's sudo/wrapper then exits by itself
-    try:
-        proc.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except (PermissionError, ProcessLookupError):
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass  # a refused signal; the sweep above already killed the worker side
-    if proc.stdout:
-        proc.stdout.close()
-
-
 def _code_probes(
     tools: WorkerTools, fx: Fixture, env: dict | None = None
 ) -> tuple[list[dict], dict, dict]:
     # Two processes the probe must not be able to signal. The first is the Owner's (killed
     # afterwards); the second runs as the worker in another sandbox.
     owner_victim = subprocess.Popen(["/bin/sleep", "300"])  # noqa: S607
-    sibling_proc, sibling_pid = _start_sibling_victim(tools, fx, env)
+    sibling_proc, sibling_pid = escapes.start_sibling_victim(tools, fx, env)
     victims = {"signal_outside_sandbox": owner_victim.pid, "signal_other_sandbox": sibling_pid}
     try:
         src = probe.source(
@@ -268,7 +200,7 @@ def _code_probes(
     finally:
         owner_victim.kill()
         owner_victim.wait()
-        _stop_sibling_victim(tools, fx, sibling_proc)
+        escapes.stop_sibling_victim(tools, fx, sibling_proc)
     rows = [
         json.loads(line[len(probe.MARK) :])
         for line in call.output.splitlines()
@@ -282,71 +214,6 @@ def _code_probes(
         "secret_leaked": fx.secret in call.output,
     }
     return [r for r in rows if r["kind"] != "identity"], identity, run
-
-
-def _owner_launchctl_control(fx: Fixture, name: str) -> dict:
-    """The same launchd job, started by the Owner outside any sandbox: it must run (its marker
-    appears), or a missing marker after the sandboxed attempt would prove nothing."""
-    tag = fx.run_root.name[:8]
-    label = f"com.cairnwork.canary.{tag}.{name}{OWNER_SUFFIX}"
-    marker = fx.escape_markers[name] + OWNER_SUFFIX
-    uid = os.getuid()
-    argv, plist, text = probe.launchctl_job(name, label, marker, str(fx.private), uid)
-    if plist and text:
-        Path(plist).write_text(text)
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
-    seen = False
-    if proc.returncode == 0:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not (seen := os.path.lexists(marker)):
-            time.sleep(0.2)
-    for cleanup in (["remove", label], ["bootout", f"gui/{uid}/{label}"]):
-        subprocess.run(["/bin/launchctl", *cleanup], capture_output=True, timeout=20, check=False)
-    Path(marker).unlink(missing_ok=True)
-    if plist:
-        Path(plist).unlink(missing_ok=True)
-    return {"rc": proc.returncode, "marker_seen": seen}
-
-
-def _unlink_quiet(path: str) -> None:
-    """A marker an escaped job made belongs to the worker in sticky /private/tmp: not removable."""
-    try:
-        Path(path).unlink(missing_ok=True)
-    except PermissionError:
-        pass
-
-
-def _launchctl_rows(rows: list[dict], fx: Fixture) -> list[dict]:
-    """Pass only if the sandboxed launchctl failed, its job never ran, and the Owner's control
-    job did run. (launchctl prints nothing when sandboxed, so the denial is shown by outcome.)"""
-    out = []
-    for r in rows:
-        name = r["probe"].removeprefix("code escape ")
-        if r["kind"] != "escape" or name not in probe.LAUNCHCTL_TARGETS:
-            out.append(r)
-            continue
-        control = _owner_launchctl_control(fx, name)
-        marker = fx.escape_markers[name]
-        ran = os.path.lexists(marker)
-        _unlink_quiet(marker)
-        r = dict(r, owner_control=control, job_ran_in_sandbox_attempt=ran)
-        if not control["marker_seen"]:
-            r.update({"pass": False, "result": "INCONCLUSIVE_OWNER_CONTROL_FAILED"})
-        elif ran:
-            r.update({"pass": False, "result": "ESCAPED_JOB_RAN"})
-        out.append(r)
-    return out
-
-
-SIGNAL_LAYERS = {
-    "signal_outside_sandbox": "worker mode: uid (Owner process); direct mode: Seatbelt (same uid)",
-    "signal_other_sandbox": "Seatbelt only (worker uid, another sandbox)",
-}
-
-
-def _signal_layers(rows: list[dict]) -> list[dict]:
-    layers = {f"code escape {k}": v for k, v in SIGNAL_LAYERS.items()}
-    return [dict(r, layers=layers[r["probe"]]) if r["probe"] in layers else r for r in rows]
 
 
 def _leftovers(fx: Fixture) -> list[str]:
@@ -401,7 +268,7 @@ def run_canary(tools: WorkerTools, fx: Fixture, env: dict | None = None) -> dict
     left = _leftovers(fx)
     for path in left:  # a write that got through: record it, then remove it
         _remove_planted(path)
-    code_rows = _signal_layers(_launchctl_rows(code_rows, fx))
+    code_rows = escapes.signal_layers(escapes.launchctl_rows(code_rows, fx))
     code_rows = _dns_needs_owner(code_rows)
     code_rows += _complete(code_rows, "read", fx.read_targets)
     code_rows += _complete(code_rows, "write", fx.write_targets)
@@ -413,14 +280,14 @@ def run_canary(tools: WorkerTools, fx: Fixture, env: dict | None = None) -> dict
         {"probe": "no write target exists afterwards", "pass": not left, "leftovers": left}
     )
     nets = [r for r in code_rows if r["kind"] == "net"]
-    escapes = [r for r in code_rows if r["kind"] == "escape"]
+    escape_rows = [r for r in code_rows if r["kind"] == "escape"]
     positive.append(run)
     leak = {"probe": "no secret in any tool output", "pass": not run["secret_leaked"]}
     checks = {
         "a_read_denied": _check(reads + [leak]),
         "b_write_denied": _check(writes),
         "c_network_denied": _check(nets),
-        "d_launchd_escape_denied": _check(escapes),
+        "d_launchd_escape_denied": _check(escape_rows),
         "positive_controls": _check(positive),
     }
     worker = tools.mode == "worker"
