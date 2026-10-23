@@ -16,6 +16,7 @@ GhHttp = Callable[[str, str, dict[str, str], bytes], tuple[int, bytes]]
 _API_PREFIX = "https://api.github.com/"
 _TIMEOUT_SECONDS = 30
 _PASSED_HEADERS = ("Accept", "X-GitHub-Api-Version")
+_TOKEN_ENV = "CAIRNWORK_GITHUB_TOKEN"  # never handed to the gh child
 
 
 def gh_problem(gh: Path) -> str | None:
@@ -54,7 +55,12 @@ def gh_http(gh: Path) -> GhHttp:
         argv += ["--input", "-"]
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, operator-chosen gh
-                argv, input=body, capture_output=True, timeout=_TIMEOUT_SECONDS, check=False
+                argv,
+                input=body,
+                capture_output=True,
+                timeout=_TIMEOUT_SECONDS,
+                check=False,
+                env={k: v for k, v in os.environ.items() if k != _TOKEN_ENV},
             )
         except subprocess.TimeoutExpired as exc:
             raise OSError("gh api timed out") from exc

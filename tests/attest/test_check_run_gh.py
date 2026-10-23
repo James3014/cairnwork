@@ -18,7 +18,7 @@ _FAKE_GH = """#!/bin/sh
 printf '%s\\n' "$@" > "{log}/argv"
 cat > "{log}/stdin"
 env > "{log}/env"
-printf '{head}\\r\\nContent-Type: application/json\\r\\n\\r\\n{body}'
+printf '{head}\\nContent-Type: application/json\\r\\n\\r\\n{body}'
 exit {code}
 """
 
@@ -43,6 +43,8 @@ def test_gh_mode_posts_without_any_token(tmp_path, monkeypatch):
     assert argv[:5] == ["api", "--method", "POST", "--include", f"repos/{SLUG}/check-runs"]
     assert argv[-2:] == ["--input", "-"]
     assert not any("Authorization" in a for a in argv)
+    assert ["-H", "Accept: application/vnd.github+json"] == argv[5:7]
+    assert ["-H", "X-GitHub-Api-Version: 2022-11-28"] == argv[7:9]
     sent = json.loads((tmp_path / "stdin").read_text())
     assert (sent["head_sha"], sent["conclusion"]) == (CAND, "neutral")
 
@@ -53,6 +55,8 @@ def test_gh_mode_ignores_env_token(tmp_path, monkeypatch):
     result = post_check_run(_bundle(tmp_path, key), SLUG, token="bad token!", gh=_gh(tmp_path))
     assert result.ok
     assert "ghs_SHOULDNOTLEAK" not in (tmp_path / "argv").read_text()
+    assert "bad token!" not in (tmp_path / "argv").read_text()
+    assert "ghs_SHOULDNOTLEAK" not in (tmp_path / "env").read_text()
 
 
 def test_gh_http_error_is_reported(tmp_path):
@@ -91,6 +95,11 @@ def test_bad_gh_path_is_usage(tmp_path, make):
 def test_parse_include_rejects_bad_output(out):
     with pytest.raises(OSError):
         _parse_include(out)
+
+
+def test_parse_include_splits_at_first_blank_line():
+    out = b'HTTP/2.0 201 Created\nA: b\r\n\r\n{\n\n  "id": 1\r\n\r\n}'
+    assert _parse_include(out) == (201, b'{\n\n  "id": 1\r\n\r\n}')
 
 
 def test_parse_include_lf_only():
