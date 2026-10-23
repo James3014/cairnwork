@@ -112,6 +112,7 @@ def verify_candidate(
         "core_status": verdict.status if verdict else "",
         "candidate_commit": candidate,
         "judged_commit": judged,
+        "task_id": result.task_id,
         "attempt_id": result.attempt_id,
         "logs": result.logs,
         "p2p": result.p2p,
@@ -222,6 +223,10 @@ def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifyin
         judged, test_files = candidate, ()
         if task.test_commit:
             _burn(intake, task.test_commit, record=True)  # before the tests are fetched
+            mode = "bundle" if task.test_store and task.test_store.required else "auto"
+            # the same journal and row the worker path writes; cairnwork-attest reads it by
+            # (task_id, attempt_id), both in this run's output
+            intake.journal.record(result.task_id, result.attempt_id, "TEST_SOURCE", mode)
             test_files = tests_with_teeth(task, specs, run_root, result, verifying)
             judged = lay_tests_over(
                 task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
