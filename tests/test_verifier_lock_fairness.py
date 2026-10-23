@@ -64,6 +64,17 @@ def _waiter(root, label, acquired):
         time.sleep(0.3)
 
 
+def _acquire_once(root):
+    with VerifierAccount(root=root).exclusive(timeout=0.5):
+        pass
+
+
+def _reject_unsafe_queue(root):
+    with pytest.raises(VerifierAccountError, match="queue"):
+        with VerifierAccount(root=root).exclusive(timeout=0.5):
+            pytest.fail("an unsafe queue must not be acquired")
+
+
 @pytest.fixture
 def processes():
     ctx = multiprocessing.get_context("spawn")
@@ -131,7 +142,7 @@ def test_unlocked_stale_ticket_is_removed_and_other_names_are_ignored(tmp_path):
     queue.mkdir(mode=0o700)
     stale = queue / "00000000000000000001.12345"
     stale.touch(mode=0o600)
-    ignored = [queue / ".tmp-unpublished", queue / "notes", queue / "1.12345"]
+    ignored = [queue / "notes", queue / "1.12345"]
     for path in ignored:
         path.touch()
     started = time.monotonic()
@@ -239,3 +250,88 @@ def test_symlinked_allocator_is_rejected_without_touching_target(tmp_path):
             pytest.fail("the allocator must not follow symlinks")
     assert not target.exists()
     assert _tickets(tmp_path) == []
+
+
+def test_fifo_older_ticket_is_removed_without_blocking(tmp_path, processes):
+    _, start = processes
+    queue = tmp_path / ".verifier.queue"
+    queue.mkdir(mode=0o700)
+    fifo = queue / "00000000000000000001.12345"
+    os.mkfifo(fifo, 0o600)
+    child = start(_acquire_once, tmp_path)
+    child.join(10)
+    assert not child.is_alive(), "opening an older FIFO ticket blocked acquisition"
+    assert child.exitcode == 0
+    assert not fifo.exists()
+    assert _tickets(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_nonregular_allocator_is_rejected_without_blocking(tmp_path, processes, kind):
+    _, start = processes
+    queue = tmp_path / ".verifier.queue"
+    queue.mkdir(mode=0o700)
+    alloc = queue / ".alloc"
+    if kind == "fifo":
+        os.mkfifo(alloc, 0o600)
+    else:
+        alloc.mkdir()
+    child = start(_reject_unsafe_queue, tmp_path)
+    child.join(10)
+    assert not child.is_alive(), "opening a nonregular allocator blocked acquisition"
+    assert child.exitcode == 0
+    assert list(queue.iterdir()) == [alloc]
+
+
+def test_unpublished_temp_debris_is_reclaimed(tmp_path):
+    queue = tmp_path / ".verifier.queue"
+    queue.mkdir(mode=0o700)
+    (queue / ".tmp-xxx").touch(mode=0o600)
+    os.mkfifo(queue / ".tmp-fifo", 0o600)
+    target = tmp_path / "elsewhere"
+    target.write_text("untouched")
+    (queue / ".tmp-symlink").symlink_to(target)
+    with VerifierAccount(root=tmp_path).exclusive(timeout=0.5):
+        assert sorted(p.name for p in queue.iterdir()) == [".alloc"]
+    assert target.read_text() == "untouched"
+
+
+def test_locked_temp_is_retained_until_its_lock_is_released(tmp_path):
+    queue = tmp_path / ".verifier.queue"
+    queue.mkdir(mode=0o700)
+    temporary = queue / ".tmp-locked"
+    fd = os.open(temporary, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with VerifierAccount(root=tmp_path).exclusive(timeout=0.5):
+            assert temporary.exists()
+    finally:
+        os.close(fd)
+    with VerifierAccount(root=tmp_path).exclusive(timeout=0.5):
+        assert not temporary.exists()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_published_ticket_uses_original_directory_after_path_substitution(tmp_path, replacement):
+    queue = tmp_path / ".verifier.queue"
+    queue.mkdir(mode=0o700)
+    stale_name = "00000000000000000001.12345"
+    (queue / stale_name).touch(mode=0o600)
+    moved = tmp_path / "original-queue"
+    with ticket(queue, time.monotonic() + 0.5) as is_my_turn:
+        own_name = next(p.name for p in _tickets(tmp_path) if p.name != stale_name)
+        queue.rename(moved)
+        if replacement == "symlink":
+            target = tmp_path / "elsewhere"
+            target.mkdir(mode=0o700)
+            queue.symlink_to(target, target_is_directory=True)
+        else:
+            queue.mkdir(mode=0o700)
+        for name in (stale_name, own_name):
+            (queue / name).write_text("untouched")
+        assert is_my_turn()
+        assert not (moved / stale_name).exists()
+        assert (moved / own_name).exists()
+    assert sorted(p.name for p in moved.iterdir()) == [".alloc"]
+    assert sorted(p.name for p in queue.iterdir()) == sorted([stale_name, own_name])
+    assert all(p.read_text() == "untouched" for p in queue.iterdir())
