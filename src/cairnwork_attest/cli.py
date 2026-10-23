@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.bundle import BundleError, write_bundle
+from cairnwork_attest.checkrun import add_subparser as _add_check_run
+from cairnwork_attest.checkrun import cmd_check_run
 from cairnwork_attest.dsse import sign_statement
 from cairnwork_attest.keys import (
     KeyFileError,
@@ -339,6 +341,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pub.add_argument("--max-attempts", type=int, default=5, help="Max push retry attempts")
     p_pub.add_argument("--json", action="store_true", help="JSON output")
 
+    _add_check_run(subparsers)
+
     return parser
 
 
@@ -356,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_verify(args)
     if args.command == "publish":
         return _cmd_publish(args)
+    if args.command == "check-run":
+        return cmd_check_run(args)
     return 2
 
 
