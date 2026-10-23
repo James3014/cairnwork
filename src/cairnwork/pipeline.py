@@ -14,33 +14,27 @@ from __future__ import annotations
 
 import os
 import secrets
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from cairnwork import runlock
-from cairnwork.core_request import AcceptanceSpec
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.deferred_tests import (
     TestCommitRejected,
     check_roots_on_base,
-    ensure_test_commit,
-    failed_on_base,
     lay_tests_over,
     never_seen,
-    new_tests,
-    test_paths,
 )
 from cairnwork.gitcmd import OID
 from cairnwork.journal import AlreadyDispatched, Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
-from cairnwork.p2p import P2PPlan, p2p_for, run_plan
+from cairnwork.p2p import p2p_for
 from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, DIRECT_MODE
+from cairnwork.pipeline_judge import judge_candidate, tests_with_teeth
 from cairnwork.protected_paths import path_refusal
-from cairnwork.reasons import explain, verdict_reason
 from cairnwork.snapshot import snapshot_candidate
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import (
@@ -48,7 +42,6 @@ from cairnwork.verifiers import (
     VerifierSpec,
     parse_verifier,
     protected_verifier_inputs,
-    run_verifiers,
 )
 from cairnwork.workspace import (
     CandidateRejected,
@@ -259,82 +252,6 @@ class _Steps:
         self.journal.record(self.task_id, self.attempt_id, phase, detail)
         if os.environ.get(FAULT_ENV) == phase:
             os._exit(137)
-
-
-def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
-    """Check a task's deferred tests once the worker is done: plain test files on the
-    base whose test cases really fail there. Returns their paths."""
-    check_roots_on_base(task.repo, task.base_commit, task.test_roots)  # before any base run
-    ensure_test_commit(task.repo, task.test_commit, task.test_store)
-    paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
-    targets = new_tests(task.repo, task.base_commit, task.test_commit, paths)  # may refuse
-    runs = run_verifiers(
-        task.repo,
-        task.test_commit,
-        specs,
-        run_root,
-        f"{result.attempt_id}-b",
-        attempt_id=result.attempt_id,
-        account=verifying[0],
-        python=verifying[1],
-        base_commit=task.base_commit,
-        import_paths=task.import_paths,
-    )
-    teeth = failed_on_base(runs, targets)
-    for run in runs:  # not evidence for Core; would show the tests to later workers
-        shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
-    if not teeth:
-        codes = [run.returncode for run in runs]
-        raise TestCommitRejected("TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
-    return paths
-
-
-def judge_candidate(
-    task, specs, digest, notary, run_root, result, test_files, verifying, reach,
-    p2p: P2PPlan | None = None,
-) -> None:  # fmt: skip
-    """Verify result.candidate_commit and have Core notarise it; sets result.verified,
-    result.reason and result.logs. Shared by the worker pipeline and ``verify_candidate``;
-    reach(phase) records progress."""
-    judged = result.candidate_commit
-    task_id = result.task_id
-    reach("VERIFYING")
-    runs = run_verifiers(
-        task.repo,
-        judged,
-        specs,
-        run_root,
-        f"{result.attempt_id}-v",
-        attempt_id=result.attempt_id,
-        account=verifying[0],
-        python=verifying[1],
-        base_commit=task.base_commit,
-        import_paths=task.import_paths,
-    )
-    if p2p is not None:
-        p2p_runs, result.p2p = run_plan(p2p, task, judged, run_root, result, verifying)
-        runs += p2p_runs
-    result.logs = [str(run.log_path) for run in runs]
-    spec = AcceptanceSpec(
-        task_id,
-        digest,
-        tuple(run.spec.verifier_id for run in runs),
-        tuple(task.allowed_files) + test_files,
-        task.allow_deletions,
-    )
-    reach("NOTARIZING")
-    verdict = notary.notarize(
-        task_id,
-        result.attempt_id,
-        spec,
-        task.repo,
-        task.base_commit,
-        judged,
-        tuple(run.observation for run in runs),
-    )
-    recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
-    result.verified = bool(verdict.verified and recorded and recorded.verified)
-    result.reason = verdict_reason(result.verified, verdict, recorded) + explain(runs)
 
 
 def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verifying) -> None:
