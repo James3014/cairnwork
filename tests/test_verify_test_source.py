@@ -4,7 +4,6 @@ so ``cairnwork-attest`` can state it for a deferred-verification run too."""
 import json
 
 import pytest
-from conftest import git
 from test_deferred_store import make_bundle, used_dir
 from test_deferred_tests import CHECK, REGRESSION, make_test_commit
 from verify_helpers import FIX, base_of, candidate, verify
