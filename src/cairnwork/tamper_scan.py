@@ -75,7 +75,7 @@ _SYS_MODULES_STUB = (
     rf"^\s*(?:sys\s*\.\s*modules\s*{_STUB_KEY}\s*=(?!=){_STUB_RHS}"
     rf"|del\s+sys\s*\.\s*modules\s*{_STUB_KEY}"
     rf"|sys\s*\.\s*modules\s*\.\s*pop\s*\(\s*{_STUB_NAME}\s*(?:,\s*None\s*)?\)"
-    rf"|sys\s*\.\s*modules\s*\.\s*setdefault\s*\(\s*{_STUB_NAME}\s*,{_STUB_RHS})\s*(?:#.*)?$"
+    rf"|sys\s*\.\s*modules\s*\.\s*setdefault\s*\(\s*{_STUB_NAME}\s*,{_STUB_RHS}\))\s*(?:#.*)?$"
 )
 _TEST_DIRS = frozenset({"tests", "test", "testing"})
 

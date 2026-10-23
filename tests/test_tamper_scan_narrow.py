@@ -103,6 +103,7 @@ def test_is_test_path(path, expected):
         ("sys.modules['dep'] = (sys.modules.update({'pytest': f}), m)[1]", True),
         ("sys.modules['dep'] = sys.modules.clear()", True),
         ("sys.modules.setdefault('dep', sys.modules.pop('pytest'))", True),
+        ("sys.modules.setdefault('dep', 1", True),  # not one complete call
     ],
 )
 def test_sys_modules_stubs_of_unrelated_modules_pass(line, caught):
