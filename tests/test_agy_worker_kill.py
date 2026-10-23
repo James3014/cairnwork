@@ -203,3 +203,25 @@ def test_a_dispatcher_killed_by_someone_else_before_any_launch_counts_as_unswept
     with pytest.raises(AgyWorkerError, match="WORKER_SWEEP_UNCLEAN.*no WORKER_LAUNCH"):
         worker.run(workdir, TASK)
     assert not seen.exists()
+
+
+def test_a_final_failed_status_without_a_sweep_receipt_is_swept(tmp_path, monkeypatch, layout):
+    seen = _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP clean')")
+    stderr = launch(str(layout)) + status("failed", failure_kind="AGY_PROVIDER_FAILED")
+    worker, workdir = _dying(tmp_path, stderr, "sys.exit(1)")
+    with pytest.raises(AgyWorkerAccountFailed, match="^WORKER_RECEIPT_INCOMPLETE: attempt 1"):
+        worker.run(workdir, TASK)
+    assert json.loads(seen.read_text())[-2:] == ["--sweep", str(layout)]
+    assert not layout.exists()
+    assert _record(workdir)["isolated"] is False
+
+
+def test_lost_lines_with_a_final_status_still_sweep_the_known_root(tmp_path, monkeypatch, layout):
+    seen = _sudo(tmp_path, monkeypatch, "print('AGY_WORKER_SWEEP clean')")
+    monkeypatch.setattr(agy_dispatch, "STATUS_LINES_KEPT", 2)  # the oldest line is dropped
+    stderr = status("running") + launch(str(layout)) + status("failed")
+    worker, workdir = _dying(tmp_path, stderr, "sys.exit(1)")
+    with pytest.raises(AgyWorkerAccountFailed, match="^WORKER_RECEIPTS_UNKNOWN"):
+        worker.run(workdir, TASK)
+    assert json.loads(seen.read_text())[-2:] == ["--sweep", str(layout)]
+    assert not layout.exists()

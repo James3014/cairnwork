@@ -43,7 +43,7 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
   profile）、調度器本身的權限（仍是 owner）、也不會讓 worker 的輸出變得可信（候選仍只靠快照與 verifier 判定）。
   「確實以 worker 帳號執行」只認調度器的 worker 收據（`WORKER_LAUNCH`／`WORKER_SWEEP`／`WORKER_CLEANUP`），
   沒有收據、帳號不符、清掃不乾淨、或最後一行不是 `completed`，attempt 一律失敗，不會退回以 owner 身分執行；
-  owner 無法對 worker uid 送訊號，調度器不正常結束（被殺、崩潰、沒有最終狀態行）時依 `WORKER_LAUNCH` 收據的 run 目錄
+  owner 無法對 worker uid 送訊號，收據沒證明已乾淨清掃並刪除的 run，不論調度器怎麼結束，都依 `WORKER_LAUNCH` 收據的 run 目錄
   （且 `run_root_id` 相符）請 wrapper `--sweep`，
   清不乾淨就是 `WORKER_SWEEP_UNCLEAN`，run 目錄保留；每次的判定留在 `<attempt>.agy.worker.json`。
   收據本身仍是調度器（owner 身分）寫的，證明的是調度器的說法，不是獨立見證。

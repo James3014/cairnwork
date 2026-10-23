@@ -1,6 +1,7 @@
 """Worker receipts read from recorded dispatcher stderr (Issue #183, Nexus-new #2888)."""
 
 import io
+import json
 
 import pytest
 from agy_receipt_lines import RUN_TAG, WORKER, cleanup, good_run, launch, status, sweep
@@ -159,3 +160,9 @@ def test_lost_lines_still_sweep_the_runs_the_kept_receipts_name(tmp_path, monkey
     unswept = agy_receipts.sweep_after_kill(None, receipts)
     assert swept == [str(root)] and receipts.post_hoc == {str(root): "clean"}
     assert unswept == ["WORKER_RECEIPTS_UNKNOWN: some dispatcher lines lost"]  # still fails
+
+
+def test_a_record_without_any_launched_attempt_is_never_isolated(tmp_path):
+    log = tmp_path / "a2.agy.log"
+    agy_receipts.write_record(log, _read(status()), [])
+    assert json.loads((tmp_path / "a2.agy.worker.json").read_text())["isolated"] is False

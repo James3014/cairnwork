@@ -185,29 +185,28 @@ class AgyWorker:
 
 def _settle_worker_run(dispatch, reader, process, held, timed_out, log_path) -> str | None:
     """Judge a run under agy_run_as_user from the dispatcher's receipts and write its
-    record. After an abnormal end (a signal, held output, no final status) runs the
-    receipts do not show swept are swept through the wrapper first. Raises for an unswept
-    run and for an attempt the receipts do not show isolated and clean; returns the
+    record. However the dispatcher ended, every launched run whose receipts do not prove
+    a clean sweep and removal is swept through the wrapper first (a removed root after a
+    clean sweep receipt needs nothing). Raises for an attempt the receipts do not show
+    isolated and clean and for an unswept run; returns the
     completion problem of an exit-0 run (raised after the exit-code checks, so a
     dispatcher-reported failure keeps its own label)."""
     known = not (held or reader.unknown or reader.dropped)
     receipts = agy_receipts.parse(reader.lines(), dispatch.run_as_user, known=known)
     code = process.returncode
     killed = timed_out is not None or code < 0
-    unswept = []
-    if killed or held or receipts.final is None:
-        unswept = agy_receipts.sweep_after_kill(dispatch, receipts, killed=killed)
+    unswept = agy_receipts.sweep_after_kill(dispatch, receipts, killed=killed)
     found = agy_receipts.problems(receipts)
     completion = agy_receipts.completion_problem(receipts) if code == 0 else None
     ended = ["TIMED_OUT"] * (timed_out is not None) + ["HELD"] * held
     extra = [completion] if completion else []
     agy_receipts.write_record(log_path, receipts, unswept + ended + found + extra)
+    if found and not ended:
+        raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found + unswept)}; log {log_path}")
     if unswept:
         raise AgyWorkerError(
             f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; log {log_path}"
         )
-    if found and not ended:
-        raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found)}; log {log_path}")
     return completion
 
 

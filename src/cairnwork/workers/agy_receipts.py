@@ -17,10 +17,9 @@ launch names the configured account and a run root under WORKER_RUNS, the sweep
 says ``clean`` / ``CLEAN`` with nothing left, the run root was removed and no worker
 failure is named; and, for a run that exits 0, the last line is a ``completed``
 status whose attempt has a launch receipt. Anything else fails the attempt
-(fail closed). A post-hoc wrapper ``--sweep`` is run only after an abnormal end (the
-dispatcher killed by a signal, its output held, or no final status line), for a launched
-run whose receipts do not show it swept and removed, whose run root still exists and is
-still the directory (dev, ino) its launch receipt named.
+(fail closed). On every exit path a post-hoc wrapper ``--sweep`` is run for a launched
+run whose receipts do not prove it swept clean and removed, whose run root still exists
+and is still the directory (dev, ino) its launch receipt named.
 
 Each run with ``run_as_user`` leaves ``<attempt>.agy.worker.json`` (owner-only) next
 to the agy log: the receipts as read, any post-hoc sweep, and the problems found.
@@ -154,9 +153,8 @@ def completion_problem(receipts: Receipts) -> str | None:
 
 
 def sweep_after_kill(dispatch, receipts: Receipts, *, killed: bool = True) -> list[str]:
-    """After an abnormal dispatcher end (killed by us or anyone else, held output, or no
-    final status line): sweep through the wrapper every launched run its receipts do not
-    show swept and removed, also when other lines were lost. Returns what could not be
+    """On every exit path: sweep through the wrapper every launched run its receipts do
+    not show swept and removed, also when other lines were lost. Returns what could not be
     shown gone. ``killed``: the dispatcher died by a signal, so a missing launch receipt
     means its launches are unknown (it may have died between launching and writing)."""
     unswept = [] if receipts.known else ["WORKER_RECEIPTS_UNKNOWN: some dispatcher lines lost"]
@@ -210,7 +208,8 @@ def write_record(log_path: Path, receipts: Receipts, found: list[str]) -> None:
         "attempts": [_attempt_record(a) for a in receipts.attempts.values()],
         "post_hoc_sweeps": receipts.post_hoc,
         "problems": found,
-        "isolated": not found,
+        # at least one launched attempt, and nothing wrong with any of them
+        "isolated": not found and any(LAUNCH in a.receipts for a in receipts.attempts.values()),
     }
     path = record_path(log_path)
     try:
