@@ -25,7 +25,8 @@ is selected. On a flat layout `tests/test_base.py` therefore brings in `tests/te
 
 | Situation | Result |
 |---|---|
-| base probe times out (or reports nothing usable) in `whole-suite` | degrade once to `module-dir`; recorded as `degraded: base-probe-timeout` / `base-probe-failed` |
+| base probe times out, reports nothing usable, or its report exceeds the 4 MiB report cap (a suite too large for one guard report; #184) in `whole-suite` | degrade once to `module-dir`; recorded as `degraded: base-probe-timeout` / `base-probe-failed` / `base-probe-report-over-cap` |
+| degraded to `module-dir` but it would run the same files (flat layout) | task REFUSED, `P2P_BASE_PROBE_UNUSABLE: <reason>; module-dir selects the same files` (no second probe) |
 | `module-dir` (or the degraded run) cannot be probed either | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` |
 | degraded to `module-dir` and it selects no test file, or none of them passes on the base | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` (a failed probe is never "nothing to run") |
 | candidate P2P run exceeds the budget | the observation is not a pass, Core says not verified (no re-run) |

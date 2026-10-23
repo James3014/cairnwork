@@ -26,7 +26,7 @@ from cairnwork_attest.keys import (
     public_key_pem,
 )
 from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
-from cairnwork_attest.statement import Producer, build_statement
+from cairnwork_attest.statement import TEST_SOURCES, Producer, build_statement, run_test_source
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
 
@@ -82,6 +82,7 @@ def _cmd_statement(args: argparse.Namespace) -> int:
             version = "0.0.1.dev0"
         producer = Producer(name="cairnwork", version=version, git_commit="")
         timestamp = datetime.now(UTC).isoformat()
+        test_source = run_test_source(state_dir, args.task_id, args.attempt_id)
 
         out_path = Path(args.out)
         if args.sign:
@@ -91,10 +92,13 @@ def _cmd_statement(args: argparse.Namespace) -> int:
                 producer=producer,
                 timestamp=timestamp,
                 private_key=private_key,
+                test_source=test_source,
             )
             write_bundle(out_path, envelope)
         else:
-            stmt = build_statement(verified, producer=producer, timestamp=timestamp)
+            stmt = build_statement(
+                verified, producer=producer, timestamp=timestamp, test_source=test_source
+            )
             _write_unsigned_statement(out_path, stmt)
     except AttestError as exc:
         print(exc.code, file=sys.stderr)
@@ -112,6 +116,7 @@ def _bundle_facts(path: Path) -> dict[str, Any]:
         "statement_sha256": None,
         "core_status": None,
         "keyid": None,
+        "test_source": None,
     }
     try:
         content = path.read_bytes()
@@ -121,6 +126,7 @@ def _bundle_facts(path: Path) -> dict[str, Any]:
         base = None
         core_status = None
         keyid_val = None
+        source = None
         if isinstance(envelope, dict):
             sigs = envelope.get("signatures")
             if isinstance(sigs, list) and sigs and isinstance(sigs[0], dict):
@@ -136,7 +142,10 @@ def _bundle_facts(path: Path) -> dict[str, Any]:
                 st = pred.get("status")
                 if isinstance(st, str):
                     core_status = st
+                if pred.get("test_source") in TEST_SOURCES:
+                    source = pred["test_source"]
         return {
+            "test_source": source,
             "base": base,
             "statement_sha256": hashlib.sha256(raw_payload).hexdigest(),
             "core_status": core_status,
@@ -156,6 +165,7 @@ def _print_json(
     statement_sha256: str | None = None,
     core_status: str | None = None,
     keyid: str | None = None,
+    test_source: str | None = None,
 ) -> None:
     obj = {
         "base": base,
@@ -166,6 +176,7 @@ def _print_json(
         "keyid": keyid,
         "ok": ok,
         "statement_sha256": statement_sha256,
+        "test_source": test_source,
     }
     print(json.dumps(obj, sort_keys=True, separators=(",", ":")))
 
@@ -224,6 +235,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             statement_sha256=facts["statement_sha256"],
             core_status=facts["core_status"],
             keyid=facts["keyid"],
+            test_source=facts["test_source"],
         )
         return 0 if result.ok else 1
 

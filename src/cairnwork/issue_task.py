@@ -38,6 +38,9 @@ TASK_FENCE = re.compile(r"```eia-task[ \t]*\n(.*?)\n```", re.DOTALL)
 ANY_FENCE = re.compile(r"```[A-Za-z0-9_-]*-contract\b")
 DEFAULT_TEST_ROOTS = ("tests",)
 _ROOT = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_\-]*/)*(?:tests|test)")
+# An import path (#82): one or more plain-name segments, any last part (it points at source, not
+# tests); no glob, dot, empty or leading-dash part, so it cannot escape the checkout.
+_IMPORT_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-]*(?:/[A-Za-z0-9_][A-Za-z0-9_\-]*)*")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 MAX_ALLOWED_FILES = 10
 KEYS = frozenset(
@@ -144,6 +147,20 @@ def check_test_roots(roots: Any) -> tuple[str, ...]:
         if not (isinstance(root, str) and _ROOT.fullmatch(root)) or is_protected(root):
             raise ValueError(f"test_roots entry {root!r} is not a clean unprotected directory")
     return tuple(roots)
+
+
+def check_import_paths(paths: Any) -> tuple[str, ...]:
+    """The state config's ``import_paths`` (#82): 0 to 8 distinct directories prepended to the
+    verifier's import path so a ``src``-layout project can import its own package. Unlike test
+    roots these point at production code, so the ``tests``/``test`` last-part rule does not apply;
+    each is still a clean relative path of plain names (no glob, dot, empty or ``-`` leading part),
+    inside the checkout and outside protected paths."""
+    if not isinstance(paths, list) or len(paths) > 8 or len(set(map(str, paths))) < len(paths):
+        raise ValueError(f"import_paths must be 0-8 distinct directory paths, got {paths!r}")
+    for path in paths:
+        if not (isinstance(path, str) and _IMPORT_PATH.fullmatch(path)) or is_protected(path):
+            raise ValueError(f"import_paths entry {path!r} is not a clean unprotected directory")
+    return tuple(paths)
 
 
 def pytest_argv(command: Any, roots: tuple[str, ...] = DEFAULT_TEST_ROOTS) -> tuple[str, ...]:

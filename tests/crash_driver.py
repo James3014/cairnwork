@@ -3,6 +3,7 @@
 Usage: python crash_driver.py <repo> <state dir> <fix text> [orphan]
 With 'orphan', the worker starts a detached child tagged CAIRNWORK_ATTEMPT and
 sleeps, so the test can SIGKILL this process mid-worker.
+Env CRASH_TEST_COMMIT gives the task a hidden-test commit.
 """
 
 import os
@@ -49,6 +50,7 @@ task = TaskSpec(
     base,
     ("src/calc.py",),
     (("pytest", ("python3", "-m", "pytest", "-q", "tests/test_calc.py")),),
+    test_commit=os.environ.get("CRASH_TEST_COMMIT", ""),
 )
 run_task(
     task,

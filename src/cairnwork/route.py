@@ -3,10 +3,12 @@
 Every command prints one JSON object on stdout. Exit codes: 0 done; 2 refused
 (``{"error": code, "detail": ...}``: not accepting, bad request, not cancellable,
 recovery busy, key reused, card already active, REPLAY_FORBIDDEN,
-RECONCILIATION_REQUIRED); 3 unknown task; 1 anything else,
-including a recovery that could not settle every task. Only NOT_ACCEPTING means
-"not taken, the old system may run it"; after any other answer the caller must
-not run the task elsewhere (exit 1 and 3 mean "unknown", never "failed").
+RECONCILIATION_REQUIRED); 3 unknown task; 4 ``recover`` settled every task but
+it is not a clean success (``leftover_run_dirs`` > 0, or ``sweep_unavailable``: the dead
+run's processes could not be checked; no ``error``: someone must clean up or check);
+1 anything else, including a recovery that could not settle every task. Only
+NOT_ACCEPTING means "not taken, the old system may run it"; after any other answer the
+caller must not run the task elsewhere (exit 1, 3 and 4 mean "unknown", never "failed").
 
     cairnwork-route --state DIR check < request.json   # shadow mode: validate only
     cairnwork-route --state DIR submit < request.json
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     except TaskRejected as exc:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except RunLockBusy as exc:
-        return _emit({"error": exc.code, "detail": "a runner is still working"}, 2)
+        return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except (
         KeyReusedWithDifferentRequest,
         DuplicateLogicalTask,
@@ -75,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     stuck = [d for d in result.get("decisions", []) if d["reason"].startswith("RECOVERY_ERROR")]
     if stuck:
         return _emit(result, 1)
-    return _emit(result, 3 if result.get("leftover_run_dirs") else 0)  # not a clean success
+    unclean = result.get("leftover_run_dirs") or result.get("sweep_unavailable")
+    return _emit(result, 4 if unclean else 0)  # settled, but not a clean success
 
 
 def _dispatch(intake: Intake, args) -> Any:
@@ -113,6 +116,7 @@ def _dispatch(intake: Intake, args) -> Any:
         return {
             "decisions": [d.__dict__ for d in decisions],
             "leftover_run_dirs": sum(d.leftover_run_dirs for d in decisions),
+            "sweep_unavailable": any(d.sweep_unavailable for d in decisions),
         }
     return _run(intake, args.task_id)
 

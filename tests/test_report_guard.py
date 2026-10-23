@@ -54,7 +54,18 @@ def test_an_oversized_verdict_is_rejected(tmp_path):
         tmp_path, {"nonce": NONCE, "collected": ["t.py::a"], "outcomes": {"t.py::a": "passed"}}
     )
     path.write_text(path.read_text() + " " * (MAX_REPORT_BYTES + 1))  # candidate pads it huge
-    assert not report_guard.read_verdict(path, NONCE).ran
+    verdict = report_guard.read_verdict(path, NONCE)
+    assert not verdict.ran and verdict.outcomes == {}
+    assert verdict.too_big  # #184: the caller can say why nothing was read
+
+
+@pytest.mark.parametrize("nonce", [NONCE, "other"])
+def test_a_record_within_the_cap_is_not_too_big_whatever_else_is_wrong(tmp_path, nonce):
+    path = _write(
+        tmp_path, {"nonce": nonce, "collected": ["t.py::a"], "outcomes": {"t.py::a": "passed"}}
+    )
+    verdict = report_guard.read_verdict(path, NONCE)
+    assert verdict.ran is (nonce == NONCE) and not verdict.too_big
 
 
 def test_a_collected_test_with_no_result_is_not_a_pass(tmp_path):

@@ -3,6 +3,11 @@
 Recovery (recovery.py) reads the last phase of each attempt to decide what a crash
 left behind. Rows are never updated or deleted (triggers), so a crash can only
 lose the step it was in, never rewrite history.
+
+TEST_SOURCE stays a journal phase (Issue #175): recovery treats it like any phase between
+CANDIDATE and VERIFYING (a crash right after it settles FAILED, INTERRUPTED_AFTER_TEST_SOURCE;
+no Core verdict can exist yet), and cairnwork_attest reads it. Opening a journal that predates it
+migrates the table, the append-only triggers and the indexes inside one transaction.
 """
 
 from __future__ import annotations
@@ -16,27 +21,32 @@ PHASES = (
     "DISPATCHED",  # attempt id chosen, ledger moved to DISPATCHED
     "WORKER_STARTED",  # clone created, worker about to run
     "CANDIDATE",  # candidate commit created and checked (detail = commit id)
+    "TEST_SOURCE",  # hidden-test mode this run used (detail = bundle | auto); read by attest
     "VERIFYING",  # verifiers about to run on the candidate
     "NOTARIZING",  # Core about to be called
     "FINISHED",  # ledger status about to be written (detail = COMPLETED or FAILED)
 )
 
-_SCHEMA = """
+_TABLE = """
 CREATE TABLE IF NOT EXISTS attempt_journal (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    TEXT NOT NULL,
     attempt_id TEXT NOT NULL,
     phase      TEXT NOT NULL CHECK (phase IN
-        ('DISPATCHED', 'WORKER_STARTED', 'CANDIDATE', 'VERIFYING', 'NOTARIZING', 'FINISHED')),
+        ('DISPATCHED', 'WORKER_STARTED', 'CANDIDATE', 'TEST_SOURCE', 'VERIFYING', 'NOTARIZING',
+         'FINISHED')),
     detail     TEXT NOT NULL DEFAULT '',
     at         TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS attempt_journal_task ON attempt_journal (task_id);
-CREATE TRIGGER IF NOT EXISTS attempt_journal_no_update BEFORE UPDATE ON attempt_journal
-    BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_journal
-    BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END;
+)
 """
+
+_SCHEMA = (
+    "CREATE INDEX IF NOT EXISTS attempt_journal_task ON attempt_journal (task_id)",
+    """CREATE TRIGGER IF NOT EXISTS attempt_journal_no_update BEFORE UPDATE ON attempt_journal
+    BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS attempt_journal_no_delete BEFORE DELETE ON attempt_journal
+    BEGIN SELECT RAISE(ABORT, 'attempt_journal is append-only'); END""",
+)
 
 _ONE_DISPATCH = (
     "CREATE UNIQUE INDEX IF NOT EXISTS attempt_journal_one_dispatch"
@@ -67,9 +77,12 @@ class Journal:
         self._path = Path(path)
         conn = self._connect()
         try:
-            conn.executescript(_SCHEMA)
-            conn.execute("BEGIN IMMEDIATE")  # the check and the index share one write lock
+            conn.execute("BEGIN IMMEDIATE")  # migration, triggers and indexes: one write lock
             try:
+                _widen_phase_check(conn)
+                conn.execute(_TABLE)
+                for statement in _SCHEMA:
+                    conn.execute(statement)
                 _refuse_double_dispatch(conn)
                 conn.execute(_ONE_DISPATCH)
                 conn.execute("COMMIT")
@@ -114,6 +127,30 @@ class Journal:
         finally:
             conn.close()
         return [Entry(*row) for row in rows]
+
+
+def _widen_phase_check(conn: sqlite3.Connection) -> None:
+    """A journal created before TEST_SOURCE has the old CHECK: rebuild it, keeping rows.
+
+    Runs inside the caller's BEGIN IMMEDIATE, so the check below cannot go stale; the caller then
+    recreates the triggers and indexes before the same COMMIT.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attempt_journal'"
+    ).fetchone()
+    if row is None or "'TEST_SOURCE'" in row[0]:
+        return
+    conn.execute("ALTER TABLE attempt_journal RENAME TO attempt_journal_old")
+    conn.execute("DROP TRIGGER IF EXISTS attempt_journal_no_update")
+    conn.execute("DROP TRIGGER IF EXISTS attempt_journal_no_delete")
+    conn.execute("DROP INDEX IF EXISTS attempt_journal_task")
+    conn.execute("DROP INDEX IF EXISTS attempt_journal_one_dispatch")
+    conn.execute(_TABLE)
+    conn.execute(
+        "INSERT INTO attempt_journal (seq, task_id, attempt_id, phase, detail, at)"
+        " SELECT seq, task_id, attempt_id, phase, detail, at FROM attempt_journal_old"
+    )
+    conn.execute("DROP TABLE attempt_journal_old")
 
 
 def _refuse_double_dispatch(conn: sqlite3.Connection) -> None:

@@ -49,8 +49,8 @@ Pass `--keep` to keep the throwaway tree and inspect the isolated clone and logs
 
 The demo verifies a ready-made (deterministic) candidate so it is repeatable and needs no AI
 worker. In the **real** Issue flow (below) the worker fixes the bug against **deferred tests it
-never sees** — the governance Cairnwork adds — and only a Core VERIFIED verdict marks the task
-done. The demo shows that verification machinery, not the test-hiding, which the real flow adds.
+never sees** (only with `test_source: "bundle"`; the default `auto` makes no such claim) — the
+governance Cairnwork adds — and only a Core VERIFIED verdict marks the task done. The demo shows that verification machinery, not the test-hiding, which the real flow adds.
 
 ## 3. Point it at a real repository
 
@@ -60,6 +60,11 @@ Create a state directory (one per target repository) and run the Issue intake:
 cairnwork init --dir ~/.cairnwork/<repo>            # writes config.json
 cairnwork-issues --state ~/.cairnwork/<repo> --repo OWNER/NAME --clone <mirror> run-once
 ```
+
+The default `test_source` is `"auto"` (demo / compatibility): it may fetch the deferred tests
+from the target repository's public branch, so it makes **no** hidden-test confidentiality claim.
+Set `"test_source": "bundle"` in `config.json` and import the tests with `cairnwork-verify
+import-tests` to get the strict mode (see ISSUE_INTAKE.md).
 
 See [ISSUE_INTAKE.md](ISSUE_INTAKE.md) for how a task Issue is written (the `eia-task` block,
 deferred `test_commit`, the `cairnwork:queue` label and the trusted-identity rules).

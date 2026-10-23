@@ -28,30 +28,48 @@ def base(repo):
     return repo, git(repo, "rev-parse", "HEAD")
 
 
-def refusal(base, files, targets=(), tests=()):
+def refusal(base, files, targets=()):
     repo, commit = base
     with pytest.raises(TaskRejected) as caught:
-        check_task_paths(repo, commit, tuple(files), tuple(targets), tuple(tests))
-    return caught.value.code
+        check_task_paths(repo, commit, tuple(files), tuple(targets))
+    return caught.value
 
 
 def test_a_symlink_as_an_allowed_file_is_refused(base):
-    assert refusal(base, ["src/link.py"]) == "TASK_PATH_NOT_REGULAR_FILE"
+    assert refusal(base, ["src/link.py"]).code == "TASK_PATH_NOT_REGULAR_FILE"
 
 
 def test_a_directory_as_an_allowed_file_is_refused(base):
-    assert refusal(base, ["src"]) == "TASK_PATH_NOT_REGULAR_FILE"
+    assert refusal(base, ["src"]).code == "TASK_PATH_NOT_REGULAR_FILE"
 
 
 def test_a_file_or_a_symlink_as_a_parent_is_refused(base):
-    assert refusal(base, ["plain/y.py"]) == "TASK_PATH_PARENT_INVALID"
-    assert refusal(base, ["linkdir/a.py"]) == "TASK_PATH_PARENT_INVALID"
-    assert refusal(base, ["src/a.py/y.py"]) == "TASK_PATH_PARENT_INVALID"
+    assert refusal(base, ["plain/y.py"]).code == "TASK_PATH_PARENT_INVALID"
+    assert refusal(base, ["linkdir/a.py"]).code == "TASK_PATH_PARENT_INVALID"
+    assert refusal(base, ["src/a.py/y.py"]).code == "TASK_PATH_PARENT_INVALID"
 
 
-def test_a_missing_parent_directory_is_refused(base):
-    assert refusal(base, ["src/new_dir_missing/y.py"]) == "TASK_PATH_PARENT_INVALID"
-    assert refusal(base, ["nope/deeper/y.py"]) == "TASK_PATH_PARENT_INVALID"
+def test_a_new_directory_is_refused_even_inside_an_existing_directory(base):
+    """#149: fail closed. A task may not create a directory, even a plain one under an
+    existing, non-symlinked parent; the refusal says how to fix it."""
+    for path, parent in (
+        ("src/new_dir_missing/y.py", "src/new_dir_missing"),
+        ("nope/deeper/y.py", "nope"),
+    ):
+        refused = refusal(base, [path])
+        assert refused.code == "TASK_PATH_PARENT_INVALID"
+        assert f"{parent} does not exist on the base" in str(refused)
+        assert "create the directory in the base commit" in str(refused)
+    refused = refusal(base, ["plain/y.py"])
+    assert "plain is 100644, not a directory, on the base" in str(refused)
+
+
+def test_the_check_has_no_test_paths_parameter(base):
+    """#149: no caller ever passed ``test_paths``; a test-commit task skips the verifier
+    target comparison instead (check_submitted_paths)."""
+    repo, commit = base
+    with pytest.raises(TypeError):
+        check_task_paths(repo, commit, ("src/a.py",), (), test_paths=("tests/test_new.py",))  # type: ignore[call-arg]
 
 
 def test_regular_files_and_a_new_file_in_an_existing_directory_pass(base):
@@ -66,18 +84,17 @@ def test_an_unreadable_base_is_refused(base):
     assert caught.value.code == "TASK_PATH_UNREADABLE"
 
 
-def test_a_missing_verifier_target_needs_an_allowed_file_or_the_test_commit(base):
+def test_a_missing_verifier_target_needs_an_allowed_file(base):
     target = "tests/test_new.py::test_x"
-    assert refusal(base, ["src/a.py"], [target]) == "TASK_VERIFIER_TARGET_MISSING"
+    assert refusal(base, ["src/a.py"], [target]).code == "TASK_VERIFIER_TARGET_MISSING"
     repo, commit = base
-    check_task_paths(repo, commit, ("src/a.py",), (target,), ("tests/test_new.py",))
     check_task_paths(repo, commit, ("tests/test_new.py",), (target,))
 
 
 def test_an_existing_verifier_target_passes_and_a_symlinked_one_is_refused(base):
     repo, commit = base
     check_task_paths(repo, commit, ("src/a.py",), ("tests/test_a.py::test_a",))
-    assert refusal(base, ["src/a.py"], ["src/link.py"]) == "TASK_PATH_NOT_REGULAR_FILE"
+    assert refusal(base, ["src/a.py"], ["src/link.py"]).code == "TASK_PATH_NOT_REGULAR_FILE"
 
 
 def payload(repo, **changes):

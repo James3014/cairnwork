@@ -129,19 +129,37 @@ def test_symlink_and_deleted_tracked_file_are_skipped(tmp_path):
     assert rank_files(repo, "needle") == ["a.py"]
 
 
-def test_cli_prints_json(tmp_path, capsys):
+def test_cli_find_prints_ranked_json(tmp_path, capsys):
     repo = make_repo(tmp_path / "r", FIXTURE)
-    issue = tmp_path / "issue.md"
-    issue.write_text("parse_timezone is wrong")
-    assert cli_main([str(repo), str(issue), "-k", "1"]) == 0
-    assert json.loads(capsys.readouterr().out) == ["app/parser.py"]
+    assert (
+        cli_main(["find", "--repo", str(repo), "--query", "parse_timezone is wrong", "-k", "1"])
+        == 0
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert [r["path"] for r in out["results"]] == ["app/parser.py"]
+    assert out["results"][0]["reason"] == "bm25" and out["results"][0]["score"] > 0
+
+
+def test_cli_find_reads_query_file_and_commit(tmp_path, capsys):
+    repo = make_repo(tmp_path / "r", FIXTURE)
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "app" / "render.py").write_text("parse_timezone parse_timezone parse_timezone\n")
+    query = tmp_path / "q.txt"
+    query.write_text("parse_timezone")
+    argv = ["find", "--repo", str(repo), "--query-file", str(query), "--commit", base]
+    assert cli_main(argv) == 0
+    paths = [r["path"] for r in json.loads(capsys.readouterr().out)["results"]]
+    assert paths == ["app/parser.py"]  # the working-tree edit to render.py is not read
 
 
 def test_cli_rejects_missing_repo(tmp_path):
-    issue = tmp_path / "i.md"
-    issue.write_text("x")
     with pytest.raises(subprocess.CalledProcessError):
-        cli_main([str(tmp_path / "nope"), str(issue)])
+        cli_main(["find", "--repo", str(tmp_path / "nope"), "--query", "x"])
+
+
+def test_cli_requires_a_query(tmp_path):
+    with pytest.raises(SystemExit):
+        cli_main(["find", "--repo", str(tmp_path)])
 
 
 def _bank(tmp_path: Path) -> Path:

@@ -43,6 +43,15 @@ An attestation statement is an unsigned in-toto v1 Statement containing:
   - `core_identity`: Reported Core identity from the verification response.
   - `verifier_observations`: Exact list of observations from the evidence bundle.
   - `hidden_test_commit`: Null in Phase 1 (not carried in the notary record).
+  - `test_source`: `"bundle"`, `"auto"` or `"none"`, the hidden-test mode the run itself used
+    (the pipeline journals a `TEST_SOURCE` row in `journal.sqlite` before it checks the deferred
+    tests; `statement` reads that row read-only by task and attempt, never `config.json`).
+    `cairnwork-verify` writes the same row, in the same `journal.sqlite`, under its one-off
+    `verify-...` task id (printed as `task_id` next to `attempt_id` in its JSON output); pass
+    those two to `cairnwork-attest statement`.
+    No row (the task had no hidden tests, or the run predates this change) is `none`.
+    Confidentiality of the hidden tests is claimed only for `bundle`; `auto` and `none` make no
+    such claim. A config changed after the run does not change the recorded value.
   - `producer`: Software identity and version generating the statement.
   - `recorded_at`: Timestamp when the notary recorded the verdict in SQLite.
   - `timestamp`: Caller-supplied UTC ISO-8601 generation timestamp.
@@ -186,6 +195,10 @@ cairnwork-attest verify bundle.json --public-key <public-key.pem> --repo <git-re
 `--candidate <sha>` is required with no default. The caller must decide and pass the candidate commit explicitly (for example, `--candidate "$(git rev-parse HEAD)"`). The tool refuses to guess the candidate from HEAD or the local environment because an attacker-controlled checkout must never be trusted to choose the candidate commit under evaluation.
 
 Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces a usage error, prints a message to stderr, and exits 2. The CLI prints which candidate it is checking against (`Candidate: <sha>`). On success, `verify` prints `OK <candidate>` and exits 0. On failure, it prints `<CODE>: <detail>` and exits 1.
+
+`verify --json` also prints `test_source` (`"bundle"`, `"auto"`, `"none"`, or `null` when the bundle
+lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
+not yet refuse `auto` bundles.
 
 ## Planned Follow-ups (Phase 2+)
 
