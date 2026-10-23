@@ -9,7 +9,6 @@ environment only and never reaches any output.
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import json
 import os
 import re
@@ -24,8 +23,8 @@ from cairnwork_attest.checkrun import _SLUG, TOKEN_ENV, post_check_run
 from cairnwork_attest.dsse import sign_statement
 from cairnwork_attest.keys import load_private_key, public_key_pem
 from cairnwork_attest.publish import publish_bundle
-from cairnwork_attest.record import AttestError, verify_record
-from cairnwork_attest.statement import Producer, run_test_source
+from cairnwork_attest.record import AttestError, VerifiedRecord, verify_record
+from cairnwork_attest.statement import default_producer, run_test_source
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
 
@@ -59,23 +58,12 @@ def _usage(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _build_envelope(args: argparse.Namespace) -> dict[str, Any]:
+def _build_envelope(args: argparse.Namespace, verified: VerifiedRecord) -> dict[str, Any]:
     """Build and sign the statement exactly as ``statement --sign`` does."""
     state_dir = Path(args.state)
-    verified = verify_record(
-        state_dir / "notary.sqlite",
-        args.task_id,
-        args.attempt_id,
-        expected_candidate=args.candidate,
-    )
-    try:
-        version = importlib.metadata.version("cairnwork")
-    except importlib.metadata.PackageNotFoundError:
-        version = "0.0.1.dev0"
-    producer = Producer(name="cairnwork", version=version, git_commit="")
     return sign_statement(
         verified,
-        producer=producer,
+        producer=default_producer(),
         timestamp=datetime.now(UTC).isoformat(),
         private_key=load_private_key(state_dir),
         test_source=run_test_source(state_dir, args.task_id, args.attempt_id),
@@ -94,7 +82,9 @@ def _write_private(path: Path, envelope: dict[str, Any]) -> None:
         raise BundleError(f"cannot create bundle file: {exc}", code="BUNDLE_UNWRITABLE") from exc
     try:
         os.fchmod(fd, 0o600)
-        os.write(fd, data)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)
@@ -103,25 +93,40 @@ def _write_private(path: Path, envelope: dict[str, Any]) -> None:
     os.close(fd)
 
 
-def _existing_is_ours(path: Path, args: argparse.Namespace, pubkey: Path) -> bool:
-    """A bundle left by an earlier run is reused only if it fully verifies for this candidate."""
+def _existing_is_ours(
+    path: Path, args: argparse.Namespace, pubkey: Path, verified: VerifiedRecord
+) -> bool:
+    """Reuse a bundle left by an earlier run only if it fully verifies for this candidate and
+    was signed for this very notary record (same request hash, so same task and attempt)."""
     result = verify_bundle(
         path, public_key_pem=pubkey, repo=Path(args.repo), expected_candidate=args.candidate
     )
-    return result.ok
+    if not result.ok or result.statement is None:
+        return False
+    predicate = result.statement.get("predicate")
+    return (
+        isinstance(predicate, dict)
+        and predicate.get("request_hash") == verified.record.request_hash
+    )
 
 
 def _statement_step(args: argparse.Namespace, bundle: Path, pubkey: Path) -> _Step:
     try:
         pubkey.write_text(public_key_pem(load_private_key(Path(args.state)).public_key()))
+        verified = verify_record(
+            Path(args.state) / "notary.sqlite",
+            args.task_id,
+            args.attempt_id,
+            expected_candidate=args.candidate,
+        )
         if bundle.is_symlink():
             raise BundleError(f"bundle path is a symlink: {bundle}", code="BUNDLE_EXISTS")
         if bundle.exists():
-            if _existing_is_ours(bundle, args, pubkey):
+            if _existing_is_ours(bundle, args, pubkey, verified):
                 return _Step("statement", "OK", "reused existing bundle")
             raise BundleError(f"bundle already exists: {bundle}", code="BUNDLE_EXISTS")
         bundle.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(bundle, _build_envelope(args))
+        _write_private(bundle, _build_envelope(args, verified))
     except AttestError as exc:
         return _Step("statement", exc.code, exc.message)
     except (OSError, ValueError) as exc:

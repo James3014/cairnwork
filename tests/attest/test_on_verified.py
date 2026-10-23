@@ -249,3 +249,90 @@ def test_symlinked_bundle_path_is_refused(
     assert rc == 2
     assert _codes(obj)[0] == ("statement", "BUNDLE_EXISTS")
     assert env.bundle.is_symlink()
+
+
+def test_valid_bundle_for_another_attempt_is_not_reused(
+    env: Env, http: FakeHttp, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from cairnwork.core_request import AcceptanceSpec, VerifierObservation
+    from cairnwork.notary import Notary
+    from tests.attest.test_attest_cli import CORE_IDENTITY, fake_core_verify
+
+    notary = Notary(
+        env.state / "notary.sqlite", core_verify=fake_core_verify, core_identity=CORE_IDENTITY
+    )
+    base = git(env.repo, "rev-parse", f"{env.candidate}^")
+    spec = AcceptanceSpec("task-1", "sha256:" + "c" * 64, ("pytest",), ("src/a.py",), False)
+    obs = (VerifierObservation("pytest", "artifact-1", "sha256:" + "e" * 64, True),)
+    notary.notarize("task-1", "a2", spec, env.repo, base, env.candidate, obs)
+    env.bundle.parent.mkdir(parents=True)
+    signed = main(
+        [
+            "statement",
+            "--state",
+            str(env.state),
+            "--task-id",
+            "task-1",
+            "--attempt-id",
+            "a2",
+            "--candidate",
+            env.candidate,
+            "--out",
+            str(env.bundle),
+            "--sign",
+        ]  # fmt: skip
+    )
+    assert signed == 0
+    other = env.bundle.read_bytes()
+    capsys.readouterr()
+    rc, _, obj = _run(capsys, env.argv())
+    assert rc == 2
+    assert _codes(obj)[0] == ("statement", "BUNDLE_EXISTS")
+    assert env.bundle.read_bytes() == other
+    assert _remote_tip(env.bare) is None
+
+
+def test_signed_statement_matches_statement_command(
+    env: Env, http: FakeHttp, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import base64
+
+    assert _run(capsys, env.argv("--no-check-run"))[0] == 0
+    ref = tmp_path / "ref.bundle.json"
+    assert (
+        main(
+            [
+                "statement",
+                "--state",
+                str(env.state),
+                "--task-id",
+                "task-1",
+                "--attempt-id",
+                "a1",
+                "--candidate",
+                env.candidate,
+                "--out",
+                str(ref),
+                "--sign",
+            ]  # fmt: skip
+        )
+        == 0
+    )
+
+    def statement(path: Path) -> dict:
+        stmt = json.loads(base64.b64decode(json.loads(path.read_text())["payload"]))
+        stmt["predicate"].pop("timestamp")
+        return stmt
+
+    assert statement(env.bundle) == statement(ref)
+
+
+def test_missing_notary_is_a_step_code(
+    env: Env, http: FakeHttp, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (env.state / "notary.sqlite").unlink()
+    rc, _, obj = _run(capsys, env.argv())
+    assert rc == 2
+    assert obj["steps"][0]["step"] == "statement"
+    assert obj["steps"][0]["code"] not in ("OK", "ERROR")
+    assert http.calls == [] and not env.bundle.exists()

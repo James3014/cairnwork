@@ -6,7 +6,6 @@ import argparse
 import base64
 import binascii
 import hashlib
-import importlib.metadata
 import json
 import os
 import re
@@ -31,7 +30,12 @@ from cairnwork_attest.on_verified import add_subparser as _add_on_verified
 from cairnwork_attest.on_verified import cmd_on_verified
 from cairnwork_attest.publish import publish_bundle
 from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
-from cairnwork_attest.statement import TEST_SOURCES, Producer, build_statement, run_test_source
+from cairnwork_attest.statement import (
+    TEST_SOURCES,
+    build_statement,
+    default_producer,
+    run_test_source,
+)
 from cairnwork_attest.verify import verify_bundle
 from cairnwork_protocol import canonical_json
 
@@ -81,11 +85,7 @@ def _cmd_statement(args: argparse.Namespace) -> int:
             args.attempt_id,
             expected_candidate=args.candidate,
         )
-        try:
-            version = importlib.metadata.version("cairnwork")
-        except importlib.metadata.PackageNotFoundError:
-            version = "0.0.1.dev0"
-        producer = Producer(name="cairnwork", version=version, git_commit="")
+        producer = default_producer()
         timestamp = datetime.now(UTC).isoformat()
         test_source = run_test_source(state_dir, args.task_id, args.attempt_id)
 
