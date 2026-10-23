@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 import sqlite3
 from collections.abc import Mapping
@@ -34,6 +35,15 @@ class Producer:
     name: str = "cairnwork"
     version: str = "0.0.1.dev0"
     git_commit: str = ""
+
+
+def default_producer() -> Producer:
+    """The producer every signed statement names: this package's installed version."""
+    try:
+        version = importlib.metadata.version("cairnwork")
+    except importlib.metadata.PackageNotFoundError:
+        version = "0.0.1.dev0"
+    return Producer(name="cairnwork", version=version, git_commit="")
 
 
 def run_test_source(state_dir: Path, task_id: str, attempt_id: str) -> str:
