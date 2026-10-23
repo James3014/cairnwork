@@ -54,6 +54,13 @@ class GitChangeSet:
     base_tree: str
     candidate_tree: str
     entries: tuple[ManifestEntry, ...]
+    tree_target: bool = False  # #229: bound to candidate_tree itself (read_tree_change_set)
+
+    @property
+    def target_revision(self) -> str:
+        if self.tree_target:
+            return f"git-tree:{self.candidate_tree}"
+        return f"git-commit:{self.candidate_commit}"
 
     @property
     def paths(self) -> list[str]:
@@ -80,6 +87,21 @@ def read_change_set(repo: Path, base_commit: str, candidate_commit: str) -> GitC
     if not entries:
         raise ChangeSetError("candidate changes no files")
     return GitChangeSet(base_commit, candidate_commit, base_tree, candidate_tree, entries)
+
+
+def read_tree_change_set(repo: Path, base_commit: str, target: str) -> GitChangeSet:
+    """#229: the change from base to the tree of target (a tree, or a commit's tree), bound to
+    that tree (``git-tree:``) rather than to a commit; candidate_commit is empty."""
+    if not OID.fullmatch(base_commit) or not OID.fullmatch(target):
+        raise ChangeSetError("base_commit and target must be 40-hex ids")
+    tree = _git(repo, "rev-parse", "--verify", "--end-of-options", f"{target}^{{tree}}").strip()
+    base_tree = _tree_of(repo, base_commit)
+    entries = _parse_raw(
+        _git(repo, "diff-tree", "-r", "-z", "--raw", "--no-renames", base_tree, tree)
+    )
+    if not entries:
+        raise ChangeSetError("target changes no files")
+    return GitChangeSet(base_commit, "", base_tree, tree, entries, tree_target=True)
 
 
 def _tree_of(repo: Path, commit: str) -> str:

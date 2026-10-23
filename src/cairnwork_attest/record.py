@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork.notary import Notary, NotaryInputError, NotarySchemaMismatch, Verdict
+from cairnwork.notary_verify import _columns_match
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
 _VERIFIED_TOKEN = object()
@@ -121,8 +122,12 @@ class VerdictRecord:
     recorded_at: str
     request: dict[str, Any] = field(default_factory=dict)
     response: dict[str, Any] = field(default_factory=dict)
+    binding_json: str | None = None  # #229: an external candidate's binding (schema 3)
+    binding: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.binding_json is not None and self.binding is None:
+            object.__setattr__(self, "binding", _parse_json_dict(self.binding_json, "binding"))
         if self.request_json:
             parsed_req = _parse_json_dict(self.request_json, "request")
             if not self.request:
@@ -163,12 +168,14 @@ def _fetch_row(uri: str, task_id: str, attempt_id: str) -> tuple[Any, ...]:
         raise RecordNotFound(f"failed to open database: {exc}", code="RECORD_NOT_FOUND") from exc
 
     try:
-        query = (
-            "SELECT task_id, attempt_id, base_commit, candidate_commit, request_hash,"
-            " request_json, http_status, status, integrity, response_json, recorded_at"
-            " FROM core_verifications WHERE task_id = ? AND attempt_id = ?"
-        )
-        try:
+        try:  # a schema-2 ledger (not yet migrated) has no binding_json: read it as NULL
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(core_verifications)")}
+            binding = "binding_json" if "binding_json" in columns else "NULL"
+            query = (
+                "SELECT task_id, attempt_id, base_commit, candidate_commit, request_hash,"
+                " request_json, http_status, status, integrity, response_json, recorded_at,"
+                f" {binding} FROM core_verifications WHERE task_id = ? AND attempt_id = ?"
+            )
             row = conn.execute(query, (task_id, attempt_id)).fetchone()
         except sqlite3.Error as exc:
             raise RecordNotFound(f"query failed: {exc}", code="RECORD_NOT_FOUND") from exc
@@ -202,6 +209,7 @@ def read_record(notary_sqlite: Path, task_id: str, attempt_id: str) -> VerdictRe
             integrity,
             response_json,
             recorded_at,
+            binding_json,
         ) = row
     except (TypeError, ValueError) as exc:
         raise RecordMalformed(f"malformed database row: {exc}", code="RECORD_MALFORMED") from exc
@@ -218,6 +226,7 @@ def read_record(notary_sqlite: Path, task_id: str, attempt_id: str) -> VerdictRe
         integrity=integrity,
         response_json=response_json,
         recorded_at=recorded_at,
+        binding_json=binding_json,
     )
 
 
@@ -235,6 +244,14 @@ def check_record_bindings(record: VerdictRecord) -> None:
     source_rev = change_set.get("source_revision")
     if not isinstance(target_rev, str) or not isinstance(source_rev, str):
         raise RecordMalformed("change_set revisions must be strings", code="RECORD_MALFORMED")
+    if record.binding is not None:  # #229: the target is the executed tree the binding names
+        if not _columns_match(
+            record.request, record.task_id, record.attempt_id, record.base_commit,
+            record.candidate_commit, record.binding,
+        ):  # fmt: skip
+            raise RecordMalformed("binding is not the one the request was built for",
+                                  code="BINDING_HASH_MISMATCH")  # fmt: skip
+        return
     req_candidate = target_rev.removeprefix("git-commit:")
     req_base = source_rev.removeprefix("git-commit:")
     if record.candidate_commit != req_candidate:

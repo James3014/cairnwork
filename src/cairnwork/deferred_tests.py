@@ -29,6 +29,7 @@ from cairnwork.workspace import ATTEMPT_REF_PREFIX
 
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
 _REGULAR = ("100644", "100755")
+OVERLAY_RULE = "overlay-v1"  # how the tests are laid over a candidate (#229); bound in receipts
 # pytest reads these on its own; a test commit carries tests, not configuration.
 # Same names the candidate may not touch (verifiers.protected_verifier_inputs). __init__.py
 # stays allowed: it runs only when the tests themselves import their package.
@@ -208,6 +209,33 @@ def failed_on_base(runs, targets: frozenset[str]) -> bool:
     return False
 
 
+def overlay_tree(
+    repo: Path, head: str, test_commit: str, paths: tuple[str, ...], index: Path
+) -> str:  # fmt: skip
+    """``overlay-v1`` (#229): head's tree with each test path replaced or added by its regular
+    file (100644/100755) in test_commit; symlinks, gitlinks and paths with ``..`` or ``.git`` are
+    refused. Plumbing only, in the private index ``index`` (read-tree, update-index --cacheinfo,
+    write-tree), so worktree, attributes and config play no part: the verifier and the receiver
+    (cairnwork_attest.verify_binding) rebuild the same tree id. Returns it."""
+    try:
+        run_git(repo, "read-tree", head, index_file=index)
+        for path in paths:
+            parts = path.split("/")
+            if {"", ".", ".."} & set(parts) or ".git" in {p.casefold() for p in parts}:
+                raise TestCommitRejected("OVERLAY_UNSUPPORTED_ENTRY", repr(path))
+            meta, _, name = run_git(repo, "ls-tree", "-z", test_commit, "--", path).partition("\t")
+            mode, kind, blob = (meta.split() + ["", "", ""])[:3]
+            if name.rstrip("\0") != path or kind != "blob" or mode not in _REGULAR:
+                raise TestCommitRejected("OVERLAY_UNSUPPORTED_ENTRY", f"{mode or '-'} {path!r}")
+            run_git(
+                repo, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}",
+                index_file=index,
+            )  # fmt: skip
+        return run_git(repo, "write-tree", index_file=index).strip()
+    except GitCommandError as exc:
+        raise TestCommitRejected("TEST_OVERLAY_FAILED", str(exc)) from exc
+
+
 def lay_tests_over(
     repo: Path, candidate: str, test_commit: str, paths: tuple[str, ...], attempt_id: str,
     run_root: Path,
@@ -217,14 +245,7 @@ def lay_tests_over(
     if index.exists() or index.is_symlink():
         raise TestCommitRejected("TEST_OVERLAY_FAILED", f"{index} already exists")
     try:
-        run_git(repo, "read-tree", candidate, index_file=index)
-        for path in paths:
-            mode, _kind, blob = run_git(repo, "ls-tree", test_commit, "--", path).split()[:3]
-            run_git(
-                repo, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}",
-                index_file=index,
-            )  # fmt: skip
-        tree = run_git(repo, "write-tree", index_file=index).strip()
+        tree = overlay_tree(repo, candidate, test_commit, paths, index)
         message = f"Cairnwork attempt {attempt_id}: tests from {test_commit}"
         head = run_git(repo, *_IDENTITY, "commit-tree", tree, "-p", candidate, "-m", message)
         head = head.strip()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,33 +13,14 @@ from cairnwork_attest.bundle import BundleError, read_bundle
 from cairnwork_attest.dsse import verify_envelope
 from cairnwork_attest.keys import KeyFileError, load_public_key_pem
 from cairnwork_attest.record import _digest, parse_strict_json
-from cairnwork_attest.statement import PREDICATE_TYPE, STATEMENT_TYPE
-from cairnwork_protocol import (
-    acceptance_contract_hash,
-    canonical_json,
-    change_manifest_hash,
-    change_set_hash,
-    evidence_bundle_hash,
-    response_binding_problem,
-    verification_plan_hash,
-)
+from cairnwork_attest.statement import PREDICATE_TYPE, PREDICATE_TYPE_BOUND, STATEMENT_TYPE
+from cairnwork_attest.verify_binding import verify_bound
+from cairnwork_attest.verify_response import VerifyResult, _check_response_verified, _fail
+from cairnwork_protocol import change_manifest_hash
+
+__all__ = ["VerifyResult", "verify_bundle"]
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
-
-
-@dataclass(frozen=True)
-class VerifyResult:
-    ok: bool
-    code: str
-    detail: str = ""
-    statement: dict[str, Any] | None = None
-
-    def __bool__(self) -> bool:
-        return self.ok
-
-
-def _fail(code: str, detail: str = "") -> VerifyResult:
-    return VerifyResult(ok=False, code=code, detail=detail)
 
 
 def _verify_envelope_and_payload(
@@ -92,7 +72,7 @@ def _parse_statement_payload(
 
     if parsed.get("_type") != STATEMENT_TYPE:
         return None, _fail("STATEMENT_SHAPE", f"_type is not {STATEMENT_TYPE}")
-    if parsed.get("predicateType") != PREDICATE_TYPE:
+    if parsed.get("predicateType") not in (PREDICATE_TYPE, PREDICATE_TYPE_BOUND):
         return None, _fail("STATEMENT_SHAPE", f"predicateType is not {PREDICATE_TYPE}")
     if not isinstance(parsed.get("predicate"), dict):
         return None, _fail("STATEMENT_SHAPE", "predicate is not an object")
@@ -259,85 +239,6 @@ def _check_manifest(
     return None
 
 
-def _check_response_verified(
-    predicate: dict[str, Any],
-    core_identity_pin: Mapping[str, Any] | None = None,
-) -> VerifyResult | None:
-    response = predicate.get("response")
-    if not isinstance(response, dict):
-        return _fail("RESPONSE_NOT_VERIFIED", "response is not an object")
-
-    verif = response.get("verification")
-    if not isinstance(verif, dict):
-        return _fail("RESPONSE_NOT_VERIFIED", "response missing verification object")
-
-    if verif.get("status") != "VERIFIED" or verif.get("integrity") != "VALID":
-        return _fail(
-            "RESPONSE_NOT_VERIFIED",
-            f"status={verif.get('status')!r}, integrity={verif.get('integrity')!r}",
-        )
-
-    if predicate.get("status") != "VERIFIED" or predicate.get("integrity") != "VALID":
-        st = predicate.get("status")
-        integ = predicate.get("integrity")
-        return _fail("RESPONSE_NOT_VERIFIED", f"predicate status={st!r}, integrity={integ!r}")
-
-    if predicate.get("http_status") != 200:
-        return _fail("RESPONSE_NOT_VERIFIED", f"http_status={predicate.get('http_status')!r}")
-
-    pred_core_id = predicate.get("core_identity")
-    resp_core_id = response.get("core_identity")
-    if not isinstance(pred_core_id, Mapping) or not isinstance(resp_core_id, Mapping):
-        return _fail("RESPONSE_NOT_VERIFIED", "response or predicate missing core_identity")
-
-    try:
-        if canonical_json(pred_core_id) != canonical_json(resp_core_id):
-            return _fail("RESPONSE_NOT_VERIFIED", "predicate and response core_identity mismatch")
-    except TypeError:
-        return _fail("RESPONSE_NOT_VERIFIED", "core_identity not canonical JSON serializable")
-
-    if core_identity_pin is not None:
-        if not isinstance(core_identity_pin, Mapping):
-            return _fail("CORE_IDENTITY_MISMATCH", "core_identity_pin must be a Mapping")
-        try:
-            if canonical_json(core_identity_pin) != canonical_json(resp_core_id):
-                return _fail(
-                    "CORE_IDENTITY_MISMATCH",
-                    "response core_identity does not match pin: "
-                    f"{resp_core_id!r} != {core_identity_pin!r}",
-                )
-        except TypeError:
-            return _fail(
-                "CORE_IDENTITY_MISMATCH", "core_identity_pin not canonical JSON serializable"
-            )
-
-    request = predicate["request"]
-    binding_problem = response_binding_problem(request, response, resp_core_id)
-    if binding_problem is not None:
-        return _fail("RESPONSE_NOT_VERIFIED", f"response binding problem: {binding_problem}")
-
-    hashes = response.get("hashes")
-    if not isinstance(hashes, dict):
-        return _fail("RESPONSE_NOT_VERIFIED", "response missing hashes object")
-
-    try:
-        expected = {
-            "acceptance_contract_hash": acceptance_contract_hash(request["acceptance_contract"]),
-            "change_set_hash": change_set_hash(request["change_set"]),
-            "verification_plan_hash": verification_plan_hash(request["verification_plan"]),
-            "evidence_bundle_hash": evidence_bundle_hash(request["evidence_bundle"]),
-            "change_manifest_hash": change_manifest_hash(request["change_manifest"]),
-        }
-    except (KeyError, TypeError, ValueError) as exc:
-        return _fail("RESPONSE_NOT_VERIFIED", f"malformed request for hashes: {exc}")
-
-    for key, exp_val in expected.items():
-        if hashes.get(key) != exp_val:
-            return _fail("RESPONSE_NOT_VERIFIED", f"hash mismatch for {key}: expected {exp_val}")
-
-    return None
-
-
 def verify_bundle(
     bundle_path: Path,
     *,
@@ -346,8 +247,13 @@ def verify_bundle(
     expected_candidate: str,
     core_identity_pin: Mapping[str, Any] | None = None,
     expected_base: str | None = None,
+    policy: Mapping[str, Any] | None = None,
 ) -> VerifyResult:
     """Verify an attestation bundle against local git objects and a trusted public key.
+
+    A v0.2 statement (an external candidate with deferred tests, #229) goes through
+    verify_binding.verify_bound, which checks it against the receiver's own ``policy`` (see
+    verify_binding.load_policy). A policy expects tests, so a v0.1 statement fails under one.
 
     All verification and input errors (missing or unreadable bundle files,
     oversize bundles, non-regular files, strict-JSON decode failures, envelope
@@ -368,6 +274,14 @@ def verify_bundle(
         return err
     if statement is None:
         return _fail("STATEMENT_SHAPE")
+    if statement["predicateType"] == PREDICATE_TYPE_BOUND:
+        return verify_bound(
+            statement, repo=Path(repo), expected_candidate=expected_candidate,
+            public_key_pem=Path(public_key_pem), core_identity_pin=core_identity_pin,
+            expected_base=expected_base, policy=policy,
+        )  # fmt: skip
+    if policy is not None:
+        return _fail("TEST_SOURCE_MISMATCH", "the policy pins a test commit; this receipt has none")
 
     candidate, base, err = _check_subject_and_commits(
         statement, repo, expected_candidate, expected_base

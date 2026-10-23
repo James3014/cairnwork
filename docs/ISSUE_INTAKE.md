@@ -33,6 +33,7 @@
    - repo 是公開的，所以會逐一檢查：Issue 作者、最後一次貼標籤的人、貼標籤之後所有的標題和內文修改，都必須是可信身分。
    - 編輯歷史不完整也一律拒絕。
 3. 執行 `cairnwork-issues --state <Cairnwork state> --repo James3014/<repo> --clone <專用 clone> run-once`。
+   - **`--clone` 必須就是 state 設定的 `mirror`**（`config.json` 的 `mirror`，Gateway 路徑用的同一個 clone）。worker 在 mirror 裡跑，延後測試疊上去的 commit（journal 的 `CANDIDATE`、Core 公證的那個 commit）只存在於 mirror（`refs/cairnwork/attempts/<id>-tested`）；指向另一個 clone 時找不到這個物件，開 PR 前的 `merge-base` 檢查就失敗，不會推出任何東西（#229）。
    - **專用 clone(mirror)一定要單分支**：用 `git clone --single-branch --branch main <url>` 建立。整包 clone 會把放延後(隱藏)測試的單 commit 分支也抓進 mirror,讓 worker 本機就讀得到。runner 啟動時會檢查 `remote.origin.fetch` 只含 main,否則以 `LINEAGE_MIRROR_NOT_SINGLE_BRANCH` 拒絕(#76)。
    - **接手**：符合條件的 Issue 交給 Cairnwork，改標成 `cairnwork:running`，並留言附上 task id。
    - **收尾**：
@@ -95,7 +96,8 @@ cairnwork-verify --state DIR cleanup     # 某次執行被強制結束後，在 
 ```
 
 - 檢查和 worker 的產出完全相同：候選必須是 base 上的單一 commit、只動 `allowed_files`（不能刪檔、不能有 symlink 或 submodule）；給了 `--test-commit` 就在 worker 之後才疊上延後測試（同樣的「從未出現過」和單一父 commit 規則）；verifier 在沙盒裡跑（同樣的白名單，任何 skipped 都算失敗）；最後交給 Core 公證，回應必須綁定這個 commit。
-- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`（疊了延後測試時和候選不同）。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤，1 內部錯誤。
+- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`、`executed_tree`、`binding`。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤，1 內部錯誤。
+- **收據綁定（#229）**：給了 `--test-commit` 時，verifier 跑的是暫存 clone 裡「候選＋延後測試」的 commit（`judged_commit`）。這個 commit 只存在於暫存 clone，跑完就刪，而且它的 id 含 commit 時間，別人重算不出來。所以 Core 公證的對象改成它的 **tree**（`target_revision = git-tree:<executed_tree>`），收據主體是 **PR head（候選本身）**，`binding` 記下 `rule`（疊合規則 `overlay-v1`）、`base`、`head`、`test_commit`、`test_paths`、`executed_tree`、verifier 指令（`verifiers`，不含 P2P 選出的額外測試）。`sha256(binding)` 取代 Core 請求的 `acceptance_contract.requirements_hash`，Core 回應會回傳這份 contract 的 hash，換掉或拼接 binding 都對不上。notary 紀錄升到 schema 3，多一欄可為 NULL 的 `binding_json`（用 `ALTER` 遷移，舊列是 NULL、照舊驗）。之後 `cairnwork-attest statement --candidate <候選>` 簽出 v0.2 收據，收件方離線驗證的方式見 `docs/ATTESTATION.md`「External candidates」。沒給 `--test-commit` 時 `judged_commit` 就是候選，`binding` 是 `null`，一切照舊（綁 commit、v0.1 收據）。這個變更之前簽的外部候選收據（主體是暫存 commit）依然驗不了。
 - 和 `submit` 一樣：state 沒有 `ACCEPTING`（drain 中）就拒絕（`VERIFY_NOT_ACCEPTING`），拿到執行鎖之後會再檢查一次。
 - 所有檢查都在這次執行專用的暫存 clone（`<state>/verify-scratch/`，結束就刪）裡跑：從 state 設定的 `mirror`（沒設就從 `--repo-path`）clone，再把 base 和候選從 `--repo-path` fetch 進暫存 clone。外部的候選**不會**進共用的 mirror，也不會寫進呼叫者的 repo（所以不會讓之後的測試 commit 看起來「已出現過」）。
 - `--test-commit` 的處理和 worker 路徑相同：先對 mirror（沒設就是 `--repo-path`）做「從未出現過」檢查，已存在就拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）；測試 commit 從該 repo 的 `origin`（相對路徑會先換成絕對路徑）抓進暫存 clone，疊在候選上後一起驗證，暫存 clone 結束時刪除。**測試 commit 一旦被一次 verify 取用（抓取之前就先用 `O_EXCL` 建立 `<state>/verify-used-tests/<sha>`，所以任何候選程式碼執行之前就登記了，崩潰或之後被拒絕也算用過），就視為已外洩（候選的程式碼和 log 看得到它），之後同一個 commit 一律拒絕 `TEST_COMMIT_ALREADY_EXPOSED`，要換新的測試 commit。只遮掉 log 不夠，因為通過或失敗本身就會洩漏測試內容，所以測試 commit 只能用一次；父 commit 不對的候選在登記之前就被拒絕，燒不掉它。**
