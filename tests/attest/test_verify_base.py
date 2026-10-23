@@ -57,6 +57,17 @@ def test_different_base_fails_with_base_mismatch(
     assert data["base"] == base
 
 
+def test_candidate_mismatch_is_reported_before_base_mismatch(tmp_path: Path, repo: Path) -> None:
+    bundle, pub, base, cand = setup_verified_bundle_fixture(tmp_path / "s", repo)
+    other_base, other_cand = "1" * 40, "2" * 40
+    assert other_base != base and other_cand != cand
+    res = verify_bundle(
+        bundle, public_key_pem=pub, repo=repo, expected_candidate=other_cand,
+        expected_base=other_base,
+    )  # fmt: skip
+    assert (res.ok, res.code) == (False, "CANDIDATE_MISMATCH")
+
+
 def test_base_mismatch_not_reached_without_valid_signature(tmp_path: Path, repo: Path) -> None:
     bundle, pub, _, cand = setup_verified_bundle_fixture(tmp_path / "s", repo)
     other_dir = tmp_path / "other"
