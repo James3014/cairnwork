@@ -91,7 +91,7 @@ def _fail(
 
 
 def _check_args(
-    repo: Path, candidate: str, remote: str, notes_ref: str, attempts: int
+    run: Runner, repo: Path, candidate: str, remote: str, notes_ref: str, attempts: int
 ) -> str | None:
     """Return a USAGE detail for unsafe or malformed arguments, else None."""
     if not _OID.fullmatch(candidate):
@@ -100,7 +100,7 @@ def _check_args(
         return f"remote must be a configured remote name: {remote!r}"
     if not notes_ref.startswith("refs/notes/") or notes_ref == "refs/notes/":
         return f"notes ref must be under refs/notes/: {notes_ref!r}"
-    if _git(repo, "check-ref-format", notes_ref).returncode != 0:
+    if run(repo, "check-ref-format", notes_ref).returncode != 0:
         return f"invalid notes ref: {notes_ref!r}"
     if attempts < 1:
         return f"max attempts must be >= 1: {attempts}"
@@ -175,15 +175,17 @@ def _existing_note(run: Runner, repo: Path, notes_ref: str, candidate: str) -> s
 def _restore_ref(run: Runner, repo: Path, notes_ref: str, old_tip: str | None) -> None:
     """Undo our local note commit so the local ref never shows an unpublished note."""
     if old_tip is None:
-        run(repo, "update-ref", "-d", notes_ref)
+        proc = run(repo, "update-ref", "-d", notes_ref)
     else:
-        run(repo, "update-ref", notes_ref, old_tip)
+        proc = run(repo, "update-ref", notes_ref, old_tip)
+    if proc.returncode != 0:
+        raise _GitFailure("LOCAL_REF_RESET_FAILED", proc.stderr.strip())
 
 
 def _try_push(
     run: Runner, repo: Path, remote: str, notes_ref: str, candidate: str, blob: str
-) -> str | object:
-    """Add the note and push. Return the new notes tip, or _RETRY when another push won."""
+) -> str | None | object:
+    """Add the note and push. Return the tip if readable, or _RETRY when another push won."""
     probe = run(repo, "rev-parse", "--verify", "--quiet", notes_ref)
     old_tip = probe.stdout.strip() if probe.returncode == 0 else None
     added = run(repo, "notes", f"--ref={notes_ref}", "add", "-C", blob, candidate)
@@ -191,7 +193,11 @@ def _try_push(
         raise _GitFailure("NOTE_ADD_FAILED", added.stderr.strip())
     proc = run(repo, "push", "--", remote, f"{notes_ref}:{notes_ref}")
     if proc.returncode == 0:
-        return _rev_parse(run, repo, notes_ref)
+        try:
+            return _rev_parse(run, repo, notes_ref)
+        except _GitFailure:
+            # The push succeeded; the tip is optional result metadata.
+            return None
     _restore_ref(run, repo, notes_ref, old_tip)
     if "rejected" in proc.stderr and any(m in proc.stderr for m in _RETRYABLE):
         return _RETRY
@@ -215,7 +221,7 @@ def publish_bundle(
 ) -> PublishResult:
     """Publish a signed bundle as a git note on ``notes_ref`` and push it to ``remote``."""
     git = run or _git
-    usage = _check_args(repo, candidate, remote, notes_ref, max_attempts)
+    usage = _check_args(git, repo, candidate, remote, notes_ref, max_attempts)
     if usage is not None:
         return _fail("USAGE", usage, candidate, notes_ref, remote, 0)
     try:
@@ -239,7 +245,7 @@ def publish_bundle(
                 tip = _rev_parse(git, repo, notes_ref)
                 return _ok("NOOP", candidate, notes_ref, remote, attempt, blob, tip)
             tip = _try_push(git, repo, remote, notes_ref, candidate, blob)
-            if isinstance(tip, str):
+            if tip is None or isinstance(tip, str):
                 return _ok("PUBLISHED", candidate, notes_ref, remote, attempt, blob, tip)
             if attempt < max_attempts:
                 _backoff(attempt)
@@ -250,7 +256,13 @@ def publish_bundle(
 
 
 def _ok(
-    code: str, candidate: str, notes_ref: str, remote: str, attempts: int, blob: str, tip: str
+    code: str,
+    candidate: str,
+    notes_ref: str,
+    remote: str,
+    attempts: int,
+    blob: str,
+    tip: str | None,
 ) -> PublishResult:
     return PublishResult(
         ok=True,
