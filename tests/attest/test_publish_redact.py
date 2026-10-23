@@ -27,6 +27,14 @@ SECRET = "ghs_SeCrEt0123456789"
         ),
         ("error: failed to push some refs to 'https://github.com/o/r.git'", None),
         ("git@github.com:o/r.git rejected", None),
+        ("https://user:p@ss@host/r.git", "https://***@host/r.git"),
+        (f"HTTPS://{SECRET}@host/r", "HTTPS://***@host/r"),
+        (f"https://{SECRET}@[::1]:8080/r.git", "https://***@[::1]:8080/r.git"),
+        ("https://host/repo@v1 and mail a@b.com", None),
+        (
+            f"To https://a:{SECRET}@h/x\nfatal: https://b:{SECRET}@h/y",
+            "To https://***@h/x\nfatal: https://***@h/y",
+        ),
     ],
 )
 def test_redact(text: str, expected: str | None) -> None:
@@ -57,3 +65,10 @@ def test_publish_failure_detail_hides_url_credentials(tmp_path: Path, failing: s
     }
     assert r.code == code[failing]
     assert SECRET not in (r.detail or "") and "***@github.com" in (r.detail or "")
+
+
+def test_a_url_passed_as_remote_is_redacted_in_the_usage_error(tmp_path: Path) -> None:
+    src, _bare, candidate = make_publish_env(tmp_path)
+    bundle = _write_bundle(tmp_path, _make_bundle_bytes(candidate, Ed25519PrivateKey.generate()))
+    r = publish_bundle(bundle, src, candidate, remote=f"https://{SECRET}@github.com/o/r.git")
+    assert r.code == "USAGE" and SECRET not in (r.detail or "") and SECRET not in r.remote

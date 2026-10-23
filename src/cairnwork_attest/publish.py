@@ -60,8 +60,9 @@ def _git(repo: Path, *args: str, input: bytes | None = None) -> subprocess.Compl
     )
 
 
-# userinfo in a URL (https://user:token@host, https://token@host) that git may echo on stderr
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
+# userinfo in a URL (https://user:token@host, https://token@host) that git may echo on stderr;
+# greedy up to the last @ before the first / so an unencoded @ in a password is hidden too
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s]*@")
 
 
 def _redact(text: str) -> str:
@@ -107,7 +108,7 @@ def _check_args(
     if not _OID.fullmatch(candidate):
         return f"malformed candidate: {candidate!r} (must be 40-hex)"
     if not _REMOTE.fullmatch(remote):
-        return f"remote must be a configured remote name: {remote!r}"
+        return f"remote must be a configured remote name: {_redact(remote)!r}"
     if not notes_ref.startswith("refs/notes/") or notes_ref == "refs/notes/":
         return f"notes ref must be under refs/notes/: {notes_ref!r}"
     if run(repo, "check-ref-format", notes_ref).returncode != 0:
@@ -236,7 +237,7 @@ def publish_bundle(
     git = run or _git
     usage = _check_args(git, repo, candidate, remote, notes_ref, max_attempts)
     if usage is not None:
-        return _fail("USAGE", usage, candidate, notes_ref, remote, 0)
+        return _fail("USAGE", usage, candidate, notes_ref, _redact(remote), 0)
     try:
         raw = _read_and_check_bundle(bundle, candidate)
     except AttestError as exc:
