@@ -37,11 +37,15 @@ def test_every_rule_has_a_case():
     assert {rule.name for rule in RULES} == set(CASES)
 
 
+TESTS_ONLY = {rule.name for rule in RULES if rule.tests_only}
+
+
 @pytest.mark.parametrize("rule", sorted(CASES))
 def test_a_rule_catches_its_api_and_not_a_lookalike(rule):
     bad, good = CASES[rule]
-    assert [f.rule for f in scan_added_lines("src/a.py", [(3, bad)])] == [rule]
-    assert scan_added_lines("src/a.py", [(3, good)]) == []
+    path = "tests/test_a.py" if rule in TESTS_ONLY else "src/a.py"
+    assert [f.rule for f in scan_added_lines(path, [(3, bad)])] == [rule]
+    assert scan_added_lines(path, [(3, good)]) == []
 
 
 def test_more_forms_of_the_same_rules_are_caught():
@@ -50,20 +54,20 @@ def test_more_forms_of_the_same_rules_are_caught():
         "os . _exit(1)",
         "v = os.getenv('CAIRNWORK_VERDICT_NONCE')",
         "gc.get_referrers(x)",
-        "del sys.modules['x']",
-        "sys.modules.pop('x')",
+        "del sys.modules['pytest']",
+        "sys.modules.pop('_pytest.runner')",
         "def f(config): config.pluginmanager.unregister(p)",
         "@pytest.hookimpl(tryfirst=True)",
         "open('/dev/fd/3')",
     ]
     for form in forms:
-        assert scan_added_lines("src/a.py", [(1, form)]), form
+        assert scan_added_lines("tests/test_a.py", [(1, form)]), form
 
 
 def test_hook_implementations_are_normal_in_a_conftest_but_other_rules_still_apply():
     hook = (1, "def pytest_configure(config):")
     assert scan_added_lines("tests/conftest.py", [hook]) == []
-    assert scan_added_lines("src/a.py", [hook])
+    assert scan_added_lines("tests/test_a.py", [hook])
     assert scan_added_lines("tests/conftest.py", [(2, "os._exit(0)")])
 
 
