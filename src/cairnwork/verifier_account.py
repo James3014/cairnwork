@@ -54,9 +54,13 @@ DEFAULT_ROOT = Path(
 # holds the lock across every spec (each bounded by its timeout, 600 s by default), so it does
 # not use this fixed floor alone: lock_wait_seconds() sizes the wait from the spec count.
 # Waiters poll, so there is no FIFO order: under steady contention one can starve until its
-# own timeout, which is the bound.
+# own timeout, which is the bound (Issue #140: a cross-process ticket queue would add stale
+# tickets and crashed-holder recovery for a starvation that already fails closed).
 LOCK_TIMEOUT_SECONDS = 900.0
 _LOCK_MARGIN_SECONDS = 300.0
+# The derived wait never exceeds this (4 h, about 23 specs at the 600 s default): a huge spec
+# count or timeout must not turn a waiter into one that queues for days (Issue #140).
+LOCK_WAIT_CAP_SECONDS = 14400.0
 _LOCK_POLL_SECONDS = 0.05
 # One budget for every process-list probe and kill of a single reap or idle check (Issue #114);
 # past it the answer is "survivor / unknown", never "clean".
@@ -69,8 +73,13 @@ def _remaining(deadline: float | None) -> float:
 
 def lock_wait_seconds(spec_count: int, spec_timeout: float) -> float:
     """How long a waiter should queue for a holder like itself: every spec at its full timeout,
-    plus a margin, never below LOCK_TIMEOUT_SECONDS (read at call time)."""
-    return max(LOCK_TIMEOUT_SECONDS, max(spec_count, 0) * spec_timeout + _LOCK_MARGIN_SECONDS)
+    plus a margin, never below LOCK_TIMEOUT_SECONDS nor above LOCK_WAIT_CAP_SECONDS (both read
+    at call time; the cap wins). ``spec_timeout`` must be a finite number >= 0: a negative or nan
+    one would otherwise vanish into the floor and hide a caller bug (ValueError)."""
+    if not math.isfinite(spec_timeout) or spec_timeout < 0:
+        raise ValueError(f"spec timeout must be a finite number >= 0, got {spec_timeout!r}")
+    wanted = max(spec_count, 0) * spec_timeout + _LOCK_MARGIN_SECONDS
+    return min(LOCK_WAIT_CAP_SECONDS, max(LOCK_TIMEOUT_SECONDS, wanted))
 
 
 class VerifierAccountError(Exception):
