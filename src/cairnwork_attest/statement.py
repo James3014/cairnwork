@@ -37,12 +37,17 @@ class Producer:
 
 
 def run_test_source(state_dir: Path, task_id: str, attempt_id: str) -> str:
-    """The hidden-test mode the run journaled (read-only); no row -> ``"none"``."""
+    """The hidden-test mode the run journaled (read-only).
+
+    ``"none"`` only when there is no journal file (a pre-change state) or the journal has no
+    TEST_SOURCE row for this run (it had no hidden tests). An unreadable or locked journal, or
+    contradictory or unknown rows, raise: no statement is signed on a guess.
+    """
     path = Path(state_dir) / "journal.sqlite"
     if not path.is_file():
         return "none"
     try:
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
         try:
             rows = conn.execute(
                 "SELECT detail FROM attempt_journal"
@@ -51,10 +56,14 @@ def run_test_source(state_dir: Path, task_id: str, attempt_id: str) -> str:
             ).fetchall()
         finally:
             conn.close()
-    except sqlite3.Error:
-        return "none"
+    except sqlite3.Error as exc:
+        raise AttestError(f"cannot read the journal's TEST_SOURCE row: {exc}") from exc
     modes = {row[0] for row in rows}
-    return modes.pop() if len(modes) == 1 and modes <= set(TEST_SOURCES) else "none"
+    if not modes:
+        return "none"
+    if len(modes) != 1 or not modes <= set(TEST_SOURCES):
+        raise AttestError(f"contradictory or unknown TEST_SOURCE rows: {sorted(modes)}")
+    return modes.pop()
 
 
 def _validate_verified_record(verified: VerifiedRecord) -> None:
