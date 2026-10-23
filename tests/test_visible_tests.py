@@ -129,6 +129,8 @@ class FakeAccount:
 
 def _with_account(monkeypatch, account):
     def run_as_account(repo, commit, specs, _root, run_id, **kw):
+        # The wrapper hands the account to run_verifiers; core then swaps in account.run_root
+        # itself (verifiers.run_verifiers), which this stand-in does without sudo.
         assert kw.pop("account") is account
         return run_verifiers(repo, commit, specs, account.run_root, run_id, **kw)
 

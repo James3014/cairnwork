@@ -25,6 +25,9 @@ What the probe reuses and what the worker can see:
   - with an account: a test name is shown only if it starts with one of that verifier's target
     files and matches a strict ASCII charset; outcomes only from a fixed set; the cause only as
     fixed phrases (changed file names dropped); everything else is counted, never quoted.
+  Residual channel (Issue #207): on the account path the code under test can still choose
+  names that pass the filter (charset and target-file prefix), up to MAX_NAMES x MAX_NAME_CHARS
+  per turn; the account's separate uid is what keeps other processes' secrets out of it.
 * No log bytes ever reach the summary. The probe's checkouts and log directories (also under the
   account's run root, also when a run raises midway) and its attempt ref are removed before the
   next turn starts.
@@ -174,13 +177,27 @@ class VisibleTestsWorker:
 
 def _sweep(run_root: Path, run_id: str, account: VerifierAccount) -> None:
     """Remove every checkout and log directory of this probe from the account's run root,
-    including those of runs that finished before a later one raised."""
+    including those of runs that finished before a later one raised. Only names that are exactly
+    this probe's (``<run_id>-v<n>`` then ``.`` or end), so another probe's are never touched. Each
+    entry is tried even if an earlier one fails; the first error is re-raised afterwards. A
+    symlink is unlinked, never followed (account.remove skips symlinks by design)."""
     if not run_root.is_dir():
         return
+    mine = re.compile(rf"{re.escape(run_id)}-v\d+(\.|$)")
+    first: BaseException | None = None
     for entry in run_root.iterdir():
-        if entry.name.startswith(f"{run_id}-v") and not entry.is_symlink():
-            account.remove(entry)
-            shutil.rmtree(entry, ignore_errors=True)
+        if not mine.match(entry.name):
+            continue
+        try:
+            if entry.is_symlink():
+                entry.unlink()
+            else:
+                account.remove(entry)
+                shutil.rmtree(entry, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001 - keep sweeping; re-raised below
+            first = first or exc
+    if first is not None:
+        raise first
 
 
 def visible_specs(task) -> tuple[VerifierSpec, ...]:

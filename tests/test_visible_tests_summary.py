@@ -4,7 +4,9 @@ wording, or names that pass a strict filter; everything else is counted, never q
 from pathlib import Path
 from types import SimpleNamespace
 
-from experimental.visible_tests.feedback import _set_aside_log, summarize
+import pytest
+
+from experimental.visible_tests.feedback import _set_aside_log, _sweep, summarize
 
 
 def _run(vid, passed, why="", outcomes=None, targets=("tests/t.py",)):
@@ -88,3 +90,52 @@ def test_the_log_is_left_alone_when_the_kept_name_exists_or_it_is_a_symlink(tmp_
     (tmp_path / "b1.agy.log").symlink_to(tmp_path / "target")
     _set_aside_log(other, 1)
     assert (tmp_path / "b1.agy.log").is_symlink() and not (tmp_path / "b1.turn1.agy.log").exists()
+
+
+class _Account:
+    def __init__(self, fail=()):
+        self.removed, self.fail = [], set(fail)
+
+    def remove(self, path):
+        self.removed.append(path.name)
+        if path.name in self.fail:
+            raise OSError(f"cannot remove {path.name}")
+
+
+def _entries(root, names):
+    for name in names:
+        (root / name).mkdir()
+        (root / name / "verifier.log").write_text("x")
+
+
+def test_the_sweep_takes_only_this_probes_entries(tmp_path):
+    names = ["a1-vis1-v0.work", "a1-vis1-v0.xyz", "a1-vis1-v12", "a1-vis1-vx", "a1-vis10-v0.w",
+             "a1-vis1-v0x", "b-a1-vis1-v0.w"]  # fmt: skip
+    _entries(tmp_path, names)
+    account = _Account()
+    _sweep(tmp_path, "a1-vis1", account)
+    assert sorted(account.removed) == ["a1-vis1-v0.work", "a1-vis1-v0.xyz", "a1-vis1-v12"]
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert left == ["a1-vis1-v0x", "a1-vis1-vx", "a1-vis10-v0.w", "b-a1-vis1-v0.w"]
+
+
+def test_the_sweep_tries_every_entry_and_reraises_the_first_error(tmp_path):
+    _entries(tmp_path, ["a1-vis1-v0.a", "a1-vis1-v1.a", "a1-vis1-v2.a"])
+    account = _Account(fail={"a1-vis1-v0.a", "a1-vis1-v1.a"})
+    with pytest.raises(OSError, match="cannot remove"):
+        _sweep(tmp_path, "a1-vis1", account)
+    assert sorted(account.removed) == ["a1-vis1-v0.a", "a1-vis1-v1.a", "a1-vis1-v2.a"]
+    assert not (tmp_path / "a1-vis1-v2.a").exists()
+
+
+def test_the_sweep_unlinks_symlinks_without_following_them(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x")
+    root = tmp_path / "runs"
+    root.mkdir()
+    (root / "a1-vis1-v0.a").symlink_to(outside)
+    account = _Account()
+    _sweep(root, "a1-vis1", account)
+    assert not (root / "a1-vis1-v0.a").is_symlink() and account.removed == []
+    assert (outside / "keep").read_text() == "x"
