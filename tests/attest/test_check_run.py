@@ -126,8 +126,9 @@ def test_http_error_no_token_in_detail(tmp_path: Path, status: int) -> None:
     http = FakeHttp(status, {"message": f"bad <b>creds</b> {TOKEN}"[:60]})
     res = _post(_bundle(tmp_path, Ed25519PrivateKey.generate()), http)
     assert (res.ok, res.code) == (False, "HTTP_ERROR")
-    assert res.detail.startswith(f"HTTP {status}")
-    assert "<" not in res.detail and ">" not in res.detail
+    detail = res.detail or ""
+    assert detail.startswith(f"HTTP {status}")
+    assert "<" not in detail and ">" not in detail
     http2 = FakeHttp(status, {"message": "nope"})
     res2 = _post(_bundle(tmp_path, Ed25519PrivateKey.generate()), http2)
     assert res2.detail == f"HTTP {status}: nope"

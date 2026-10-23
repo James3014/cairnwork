@@ -116,7 +116,7 @@ def test_http_error_detail_never_contains_token(tmp_path: Path) -> None:
     http = FakeHttp(401, {"message": f"Bad credentials {TOKEN}"})
     res = _post(_bundle(tmp_path, Ed25519PrivateKey.generate()), http)
     assert res.code == "HTTP_ERROR"
-    assert TOKEN[4:] not in res.detail
+    assert TOKEN[4:] not in (res.detail or "")
 
 
 def test_cli_created_without_html_url(tmp_path: Path, capsys, monkeypatch) -> None:
