@@ -12,11 +12,11 @@ another model.
 With ``run_as_user`` set (state config ``agy_run_as_user``, Issue #183) the
 dispatcher gets ``--run-as-user=<account>`` and runs only the agy process as that
 account, through ``sudo`` and the wrapper ``agy-worker-exec`` in a per-run copy of
-the clone; account selection and leasing stay with the dispatcher. When the
-dispatcher reports that the account, wrapper or copy-back refused, the attempt
-fails with ``WORKER_ACCOUNT_FAILED``; agy is never run as the owner instead. The
-owner cannot signal the worker account's processes, so after the dispatcher is
-killed its run is swept through the wrapper's ``--sweep`` mode.
+the clone; account selection and leasing stay with the dispatcher. Whether the run
+really ran as that account, and was swept clean, is read from the dispatcher's
+worker receipts (agy_receipts.py), never guessed; when the dispatcher reports that
+the account, wrapper or copy-back refused, the attempt fails with
+``WORKER_ACCOUNT_FAILED``. Agy is never run as the owner instead.
 """
 
 from __future__ import annotations
@@ -30,12 +30,11 @@ import subprocess
 import threading
 from dataclasses import dataclass
 
-from cairnwork.confined import PS_TIMEOUT_SECONDS
-
 STATUS_PREFIX = "NEXUS_AGY_DISPATCH "
 TUNING_ENV_PREFIX = "NEXUS_AGY_"  # the pool's own tuning; passed through, nothing else is
 EXHAUSTED_EXIT = 75
 STATUS_LINE_BYTES = 64 << 10
+STATUS_LINES_KEPT = 64  # status line plus the worker receipts (three per attempt)
 TERM_GRACE_SECONDS = 15
 # The worker-account layout of scripts/setup_worker_user.sh and the dispatcher (Nexus-new
 # #2884): the owner starts the wrapper as the worker through one sudoers rule; a run lives
@@ -68,6 +67,16 @@ class Dispatch:
     run_as_user: str | None = None  # agy runs as this account (dispatcher --run-as-user)
 
 
+def valid_run_as_user(config: dict) -> bool:
+    """State config ``agy_run_as_user``: unset, or an account name with ``agy_dispatch`` set
+    (only the dispatcher can change account)."""
+    user = config.get("agy_run_as_user")
+    if user is None:
+        return True
+    name = isinstance(user, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user)
+    return bool(name and config.get("agy_dispatch"))
+
+
 def argv(dispatch: Dispatch, workdir, model: str, timeout_seconds: int, allowed_files) -> list[str]:
     """Every value is attached with '=' so a value that starts with '-' is never an option."""
     out = [
@@ -92,20 +101,25 @@ def tuning_env() -> dict[str, str]:
 
 
 class StatusReader(threading.Thread):
-    """Reads the dispatcher's stderr as it comes and keeps only the last status line (at
-    most STATUS_LINE_BYTES of it), so nothing a chatty child prints reaches the disk or
-    grows in memory, and the status line is found however much diagnostics follow it.
+    """Reads the dispatcher's stderr as it comes and keeps only its own lines: those that
+    start with STATUS_PREFIX (at most STATUS_LINES_KEPT of them, each at most
+    STATUS_LINE_BYTES), so nothing a chatty child prints reaches the disk or grows in
+    memory. Lines the agy child printed are relayed by the dispatcher with a
+    ``[provider]`` prefix and so are never kept.
 
-    Only the final status line counts. The dispatcher prints it last on every exit-75 path
-    and the agy child's stderr cannot follow it; a forged earlier or later line could at
-    worst change the failure label (pool exhausted or not), never turn a failure into
-    success: the exit code and the snapshot of the clone still decide everything else."""
+    The final status line is the last kept line; with ``run_as_user`` the worker
+    receipts before it are read too (agy_receipts.py). Without it only the final status
+    counts, and a forged line could at worst change the failure label (pool exhausted
+    or not), never turn a failure into success: the exit code and the snapshot of the
+    clone still decide everything else."""
 
     def __init__(self, stream) -> None:
         super().__init__(daemon=True)
         self.stream = stream
         self.last = b""
+        self.kept: list[bytes] = []
         self.unknown = False  # a read failed: the status may be missing or stale
+        self.dropped = False  # more lines than STATUS_LINES_KEPT: the oldest were dropped
 
     def run(self) -> None:
         failures = 0
@@ -121,6 +135,14 @@ class StatusReader(threading.Thread):
             failures = 0  # the limit is on consecutive failures, so draining never stops early
             if line.startswith(STATUS_PREFIX.encode()):
                 self.last = line
+                self.kept.append(line)
+                if len(self.kept) > STATUS_LINES_KEPT:
+                    del self.kept[0]
+                    self.dropped = True
+
+    def lines(self) -> list[str]:
+        """Every kept dispatcher line, in order (the final status line last)."""
+        return [line.decode("utf-8", "replace").rstrip("\n") for line in self.kept]
 
     def describe(self) -> str:
         """For error messages: the dispatcher's final status and failure kind, bounded."""
@@ -163,49 +185,14 @@ def raise_if_worker_refused(status: dict, log_path) -> None:
         )
 
 
-def worker_run_roots(dispatcher_pid: int) -> set[str] | None:
-    """Run directories of the worker launches the dispatcher has running, read from the
-    process list: ``sudo -n -u <account> <wrapper> <run_root> ...`` with the dispatcher as
-    parent. Read while the dispatcher is alive (its launches are re-parented once it
-    dies); None when the process list could not be read, which must count as unknown."""
-    try:
-        done = subprocess.run(  # noqa: S603 - fixed argv
-            ["/bin/ps", "-axwwo", "pid=,ppid=,command="],
-            capture_output=True,
-            text=True,
-            timeout=PS_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if done.returncode != 0 or not done.stdout.strip():
-        return None
-    roots = set()
-    for line in done.stdout.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) != 3 or fields[1] != str(dispatcher_pid):
-            continue
-        args = fields[2].split()
-        if WORKER_WRAPPER not in args:
-            continue
-        at = args.index(WORKER_WRAPPER)
-        if at >= 2 and args[at - 2] == "-u" and at + 1 < len(args) and _is_run_root(args[at + 1]):
-            roots.add(args[at + 1])
-    return roots
-
-
-def _is_run_root(path: str) -> bool:
-    return re.fullmatch(re.escape(WORKER_RUNS) + r"/[0-9a-f]{32}", path) is not None
-
-
 def sweep_worker_run(dispatch: Dispatch, run_root: str) -> bool:
     """Kill the run's worker-account processes through the wrapper (the owner cannot
-    signal another uid) and remove the run directory the killed dispatcher left behind.
-    True when nothing of the run is left: the dispatcher already removed the directory
-    (it does so only after its own clean sweep), or the wrapper reports a clean sweep and
-    the directory is gone. The wrapper's own report is the only evidence accepted."""
-    if not os.path.lexists(run_root):
-        return True
+    signal another uid) and remove the run directory a killed dispatcher left behind.
+    Used only after the dispatcher was killed and only for a run root its own launch
+    receipt named: after a graceful end the dispatcher has removed the directory and the
+    wrapper refuses to sweep a missing one (exit 64), so its WORKER_SWEEP receipt is the
+    verdict then. True only when the wrapper reports a clean sweep (exit 0, last line
+    ``AGY_WORKER_SWEEP clean``) and the directory is then gone."""
     argv = [SUDO, "-n", "-u", str(dispatch.run_as_user), WORKER_WRAPPER, "--sweep", run_root]
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv

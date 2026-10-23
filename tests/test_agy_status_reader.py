@@ -38,5 +38,4 @@ def test_a_reader_that_is_still_alive_counts_as_holding_the_output(tmp_path):
     stuck = threading.Thread(target=time.sleep, args=(3,), daemon=True)
     stuck.start()
     stuck.join = lambda timeout=None: None  # type: ignore[method-assign]
-    held, unswept = _stop(P(), copier, "attempt-x", stuck)
-    assert held is True and unswept == []
+    assert _stop(P(), copier, "attempt-x", stuck) is True

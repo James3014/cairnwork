@@ -41,9 +41,11 @@ push protection 已經開啟，可以擋下大部分常見格式。但它擋不�
   `_cairnwork_worker` 帳號下（經調度器、`sudo` 與 `agy-worker-exec` wrapper），讀不到 owner 的家目錄、agy 帳號池、
   Cairnwork 的 repo／log 和其他 attempt。它**不**保證：run 之間的分隔（同一個 uid，靠調度器的 per-run Seatbelt
   profile）、調度器本身的權限（仍是 owner）、也不會讓 worker 的輸出變得可信（候選仍只靠快照與 verifier 判定）。
-  調度器回報帳號或 wrapper 失敗時 attempt 直接失敗（`WORKER_ACCOUNT_FAILED`），不會退回以 owner 身分執行；
-  owner 無法對 worker uid 送訊號，殺掉調度器後靠 wrapper 的 `--sweep` 清掃，清不乾淨就是 `WORKER_SWEEP_UNCLEAN`，
-  run 目錄保留。情境三發生在 worker 帳號下時，先查 `/Users/Shared/cairnwork-worker/worker-runs/` 有沒有留下的 run。
+  「確實以 worker 帳號執行」只認調度器的 worker 收據（`WORKER_LAUNCH`／`WORKER_SWEEP`／`WORKER_CLEANUP`），
+  沒有收據、帳號不符、清掃不乾淨、或最後一行不是 `completed`，attempt 一律失敗，不會退回以 owner 身分執行；
+  owner 無法對 worker uid 送訊號，只在調度器被殺時依 `WORKER_LAUNCH` 收據的 run 目錄請 wrapper `--sweep`，
+  清不乾淨就是 `WORKER_SWEEP_UNCLEAN`，run 目錄保留；每次的判定留在 `<attempt>.agy.worker.json`。
+  收據本身仍是調度器（owner 身分）寫的，證明的是調度器的說法，不是獨立見證。情境三發生在 worker 帳號下時，先查 `/Users/Shared/cairnwork-worker/worker-runs/` 有沒有留下的 run。
   細節與設定見 `docs/ISSUE_INTAKE.md`。
 - **verifier 的通過是證據，不是完成的證明。** 候選程式碼和測試跑在同一個程序，判決在候選碰得到的
   地方產生，能讀環境的候選仍可偽造。一個任務是否真的完成，信任分層在 verifier 以外：Core VERIFIED

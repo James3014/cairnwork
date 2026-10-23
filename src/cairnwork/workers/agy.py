@@ -15,9 +15,10 @@ process it started outside its group is killed if it still carries the attempt
 marker, and one that still holds the output afterwards fails the run.
 With an account-pool dispatcher configured (agy_dispatch.py) the worker runs that
 instead of agy, prompt on stdin, same environment plus the pool's tuning variables.
-With ``agy_run_as_user`` set as well, the dispatcher runs agy as that worker account;
-the owner cannot signal its processes, so a run left behind by a killed dispatcher
-is swept through the wrapper, and a refused account fails the attempt (agy_dispatch.py).
+With ``agy_run_as_user`` set as well, the dispatcher runs agy as that worker account,
+and the attempt succeeds only if the dispatcher's worker receipts prove it ran as that
+account and was swept clean; a run left behind by a killed dispatcher is swept through
+the wrapper (agy_receipts.py).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cairnwork.confined import ATTEMPT_ENV, copy_capped, sweep_marked
-from cairnwork.workers import agy_dispatch
+from cairnwork.workers import agy_dispatch, agy_receipts
 
 ENV_KEEP = (
     "HOME",
@@ -152,37 +153,58 @@ class AgyWorker:
     def _await(self, process, copier, reader, attempt: str, log, log_path) -> None:
         dispatch = self.dispatch
         timed_out = None
-        roots: set[str] | None = set()  # the dispatcher's own exit cleans its worker runs
         try:
             process.wait(timeout=self.timeout_seconds + 60)
         except subprocess.TimeoutExpired as exc:
             timed_out = exc
             if dispatch is not None:
-                if dispatch.run_as_user is not None:  # while it lives: its launches name their run
-                    roots = agy_dispatch.worker_run_roots(process.pid)
                 agy_dispatch.ask_to_stop(process)  # lets it release its lease and sweep itself
         finally:
-            held, unswept = _stop(process, copier, attempt, reader, dispatch, roots)
+            held = _stop(process, copier, attempt, reader)
             if not held:  # else the copier still reads: leave both open rather than hang
                 process.stdout.close()
                 if process.stderr is not None:
                     process.stderr.close()
                 log.close()
-        if unswept:
-            raise AgyWorkerError(
-                f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; "
-                f"log {log_path}"
-            )
+        receipts = None
+        if dispatch is not None and dispatch.run_as_user is not None:
+            known = not (held or reader.unknown or reader.dropped)
+            receipts = agy_receipts.parse(reader.lines(), dispatch.run_as_user, known=known)
+        if receipts is not None and timed_out is not None:
+            unswept = agy_receipts.sweep_after_kill(dispatch, receipts)
+            agy_receipts.write_record(log_path, receipts, unswept or ["TIMED_OUT"])
+            if unswept:
+                raise AgyWorkerError(
+                    f"WORKER_SWEEP_UNCLEAN: worker-account processes may survive: {unswept}; "
+                    f"log {log_path}"
+                )
         if timed_out is not None:
             raise AgyWorkerError("agy timed out") from timed_out
         if held:
             raise AgyWorkerError("a process agy started outlived it and holds its output")
+        completion = None
+        if receipts is not None:
+            completion = _judge_receipts(receipts, process.returncode, log_path)
         if reader is not None:
             agy_dispatch.raise_if_exhausted(reader.status(), process.returncode, log_path)
             agy_dispatch.raise_if_worker_refused(reader.status(), log_path)
         if process.returncode != 0:
             why = f"; {reader.describe()}" if reader is not None else ""
             raise AgyWorkerError(f"agy exited {process.returncode}{why}; log {log_path}")
+        if completion is not None:
+            raise agy_dispatch.AgyWorkerAccountFailed(f"{completion}; log {log_path}")
+
+
+def _judge_receipts(receipts, returncode: int, log_path) -> str | None:
+    """Write the attempt's worker record and fail any attempt the receipts do not show
+    isolated and clean; return the completion problem of an exit-0 run (raised after the
+    exit-code checks, so a dispatcher-reported failure keeps its own label)."""
+    found = agy_receipts.problems(receipts)
+    completion = agy_receipts.completion_problem(receipts) if returncode == 0 else None
+    agy_receipts.write_record(log_path, receipts, found + ([completion] if completion else []))
+    if found:
+        raise agy_dispatch.AgyWorkerAccountFailed(f"{'; '.join(found)}; log {log_path}")
+    return completion
 
 
 def _feed(process, prompt: str) -> None:
@@ -197,26 +219,16 @@ def _feed(process, prompt: str) -> None:
             pass
 
 
-def _stop(
-    process, copier, attempt: str, reader=None, dispatch=None, roots=None
-) -> tuple[bool, list[str]]:
+def _stop(process, copier, attempt: str, reader=None) -> bool:
     """Kill agy's group and anything it started outside it that still carries the
-    attempt marker; a worker-account run the dispatcher left behind is swept through the
-    wrapper. Return whether something still holds agy's output pipe, and the runs (or the
-    reason) whose worker-account processes could not be shown to be gone."""
+    attempt marker; return True if something still holds agy's output pipe."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # the group is already gone
     process.wait()
-    unswept: list[str] = []
-    if dispatch is not None and dispatch.run_as_user is not None:
-        if roots is None:
-            unswept.append("worker launches unknown (process list unreadable)")
-        else:
-            unswept += [r for r in sorted(roots) if not agy_dispatch.sweep_worker_run(dispatch, r)]
     sweep_marked(ATTEMPT_ENV, attempt, skip_group=process.pid)
     copier.join(timeout=10)
     if reader is not None:
         reader.join(timeout=10)
-    return copier.is_alive() or (reader is not None and reader.is_alive()), unswept
+    return copier.is_alive() or (reader is not None and reader.is_alive())
