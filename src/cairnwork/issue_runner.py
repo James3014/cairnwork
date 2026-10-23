@@ -246,10 +246,12 @@ def _post_verified(intake: Intake, github: GitHub, clone: Path, status) -> None:
 
 
 def _names_hook(path: Path) -> bool:
+    """Whether the (now unreadable) config sets a hook path; an explicit null does not count."""
     try:
-        return "post_verified_hook" in path.read_text(errors="replace")
+        text = path.read_text(errors="replace")
     except OSError:
         return False
+    return re.search(r'"post_verified_hook"\s*:\s*"', text) is not None
 
 
 def _open_pr(intake: Intake, github: GitHub, clone: Path, number: int, status) -> str:

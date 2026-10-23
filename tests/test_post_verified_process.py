@@ -1,5 +1,6 @@
 """The post-verified hook's process and log handling: timeouts, odd output, unsafe logs."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -68,7 +69,8 @@ def _gone(pid, within=10):
         except ProcessLookupError:
             return True
         time.sleep(0.1)
-    os.kill(pid, 9)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, 9)
     return False
 
 
@@ -91,7 +93,10 @@ def test_a_detached_descendant_cannot_hold_settlement(tmp_path, monkeypatch):
     try:
         assert run()["reason"] == "TIMEOUT" and time.monotonic() - started < 10
     finally:
-        os.kill(int((tmp_path / "child").read_text()), 9)
+        child = tmp_path / "child"
+        if child.exists():
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(child.read_text()), 9)
 
 
 def test_output_that_is_not_utf8_is_still_recorded(tmp_path):

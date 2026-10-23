@@ -273,6 +273,31 @@ def test_a_config_that_breaks_at_settle_time_does_not_change_the_result(rig, mon
     assert commented and github.labels[7] == {runner.DONE}
 
 
+@pytest.mark.parametrize(("text", "alerted"), [
+    ('{"post_verified_hook": "/usr/bin/true", ', True),
+    ('{"post_verified_hook": null, ', False),
+])  # fmt: skip
+def test_a_broken_config_alerts_only_when_it_sets_a_hook(rig, monkeypatch, capsys, text, alerted):
+    github = FakeGitHub([issue()])
+    taken = runner.take(rig["intake"], github, rig["clone"])[0]
+    commit = commit_change(rig["clone"], {"src/calc.py": "x = 2\n"})
+    monkeypatch.setattr(Intake, "status", _completed(rig, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    real_comment = github.comment
+
+    def comment_then_break(*a):  # the done comment is final; then config.json is cut short
+        real_comment(*a)
+        (rig["intake"].state / "config.json").write_text(text)
+
+    monkeypatch.setattr(github, "comment", comment_then_break)
+    capsys.readouterr()
+    out = runner.settle(rig["intake"], github, rig["clone"])
+    assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
+    err = capsys.readouterr().err
+    assert ("ALERT post_verified_hook skipped: JSONDecodeError" in err) == alerted
+    assert alerted or err == ""
+
+
 def test_an_off_hook_is_silent_even_if_config_breaks_at_settle_time(rig, monkeypatch, capsys):
     github = FakeGitHub([issue()])
     taken = runner.take(rig["intake"], github, rig["clone"])[0]
