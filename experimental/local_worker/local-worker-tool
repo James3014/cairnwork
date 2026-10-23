@@ -1,0 +1,215 @@
+#!/bin/sh
+# local-worker-tool: the one command the Owner may start as _cairnwork_worker for the local agent
+# arm's tool calls (Cairnwork #88, isolation half). Installed by install_local_worker_tool.sh to
+# /Users/Shared/cairnwork-worker/bin/local-worker-tool (owner-owned, 0755); the sudoers rule
+#   <owner> ALL=(_cairnwork_worker) NOPASSWD: /Users/Shared/cairnwork-worker/bin/local-worker-tool
+# names that path. experimental/local_worker/tools.py runs it with `sudo -n -u _cairnwork_worker`.
+#
+# Five actions, nothing else (exit 64 = refused before anything ran):
+#   local-worker-tool list   <run_root> <relpath>        list a directory of the checkout
+#   local-worker-tool read   <run_root> <relpath>        print a regular file of the checkout
+#   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
+#   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
+#   local-worker-tool sweep  <run_root>                  kill worker processes whose cwd is in run_root
+#
+# <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
+# created by the Owner; the checkout is <run_root>/checkout. <relpath> is relative to the checkout,
+# with no "..", "." (except a bare "." for list), empty or ".git" component.
+#
+# Every action except sweep runs under a Seatbelt profile built HERE (never supplied by the caller):
+#   * no network at all (the tools do not need it; Splash is the agent loop's business, not theirs);
+#   * no reads under /Users, /Volumes, /private/tmp, /private/var/folders except this run root and
+#     the worker Python tree, so the owner's home, the verifier tree, private test bundles, the
+#     harness and every other run (same uid!) are unreadable;
+#   * writes only inside <run_root>/checkout and <run_root>/tmp, never into any .git component (a
+#     worker-written hook or config would later run as the Owner).
+# The uid boundary (the account cannot enter /Users/<owner>) sits under this as a second layer.
+#
+# For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
+# CAIRNWORK_LOCAL_WORKER_RUNS / CAIRNWORK_LOCAL_WORKER_PYROOT set; running as the worker account,
+# those overrides are ignored (sudo also resets the environment).
+set -eu
+
+WORKER=_cairnwork_worker
+RUNS=/Users/Shared/cairnwork-worker/local-runs
+PYROOT=/Users/Shared/cairnwork-worker/python
+if [ "$(id -un)" != "$WORKER" ]; then
+  RUNS=${CAIRNWORK_LOCAL_WORKER_RUNS:-$RUNS}
+  PYROOT=${CAIRNWORK_LOCAL_WORKER_PYROOT:-$PYROOT}
+fi
+SANDBOX_EXEC=/usr/bin/sandbox-exec
+WORKER_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+refuse() {
+  printf 'local-worker-tool: refusing: %s\n' "$*" >&2
+  exit 64
+}
+
+physical_dir() {
+  (CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+# A path we splice into the profile must be absolute and free of quote/backslash/newline.
+require_profile_safe() {
+  case "$1" in
+    /*) ;;
+    *) refuse "$2 is not absolute" ;;
+  esac
+  case "$1" in
+    *'"'* | *'\'* | *"
+"*) refuse "$2 has a character the profile cannot carry" ;;
+  esac
+}
+
+require_run_root() {
+  require_profile_safe "$1" run_root
+  [ ! -L "$1" ] && [ -d "$1" ] || refuse "run_root is not a real directory"
+  [ "$(physical_dir "$1")" = "$1" ] || refuse "run_root is not a canonical path"
+  [ "$(physical_dir "$RUNS")" = "$RUNS" ] || refuse "runs directory is not canonical"
+  [ "${1%/*}" = "$RUNS" ] || refuse "run_root is not directly inside $RUNS"
+  name=${1##*/}
+  case "$name" in
+    *[!0-9a-f]*) refuse "run_root name is not a run tag" ;;
+  esac
+  [ "${#name}" -eq 32 ] || refuse "run_root name is not a run tag"
+  CHECKOUT=$1/checkout
+  [ ! -L "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || refuse "run_root has no real checkout directory"
+}
+
+# relpath: relative, no empty / "." / ".." / ".git" component, no newline, not starting with "-".
+require_relpath() {
+  case "$1" in
+    "" | /* | -*) refuse "path must be a non-empty relative path" ;;
+    *"
+"*) refuse "path has a newline" ;;
+  esac
+  case "/$1/" in
+    *//* | */./* | */../* | */.git/*) refuse "path has an empty, '.', '..' or '.git' component" ;;
+  esac
+}
+
+# Directory $1 (absolute) must resolve inside the checkout.
+require_dir_inside_checkout() {
+  real=$(physical_dir "$1") || refuse "$2 directory cannot be resolved"
+  case "$real/" in
+    "$CHECKOUT"/*) ;;
+    *) refuse "$2 resolves outside the checkout" ;;
+  esac
+}
+
+ancestors() {   # SBPL literals for every ancestor directory of $1 (metadata only)
+  p=$1
+  while [ "$p" != "" ] && [ "$p" != "/" ]; do
+    p=${p%/*}
+    [ -n "$p" ] || p=/
+    printf ' (literal "%s")' "$p"
+  done
+}
+
+profile() {
+  printf '(version 1)\n(allow default)\n(deny network*)\n'
+  printf '(deny mach-lookup (global-name "com.apple.dnssd.service"))\n'
+  printf '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp")'
+  printf ' (subpath "/private/var/folders"))\n'
+  printf '(allow file-read* (subpath "%s") (subpath "%s"))\n' "$RUN_ROOT" "$PYROOT"
+  printf '(allow file-read-metadata%s%s)\n' "$(ancestors "$RUN_ROOT")" "$(ancestors "$PYROOT")"
+  printf '(deny file-write*)\n'
+  printf '(allow file-write* (subpath "%s") (subpath "%s/tmp")' "$CHECKOUT" "$RUN_ROOT"
+  printf ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))\n'
+  printf '(deny file-write* (regex #"/\\.git(/|$)"))\n'
+}
+
+sandboxed() {
+  cd -- "$CHECKOUT"
+  exec /usr/bin/env -i \
+    HOME="$RUN_ROOT/tmp" \
+    TMPDIR="$RUN_ROOT/tmp" \
+    PATH="$WORKER_PATH" \
+    LANG=en_US.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    "$SANDBOX_EXEC" -p "$(profile)" "$@"
+}
+
+# Worker-owned pids whose cwd is this run root or inside it.
+sweep_pids() {
+  /usr/sbin/lsof -nP -a -u "$UID_SELF" -d cwd -Fpn 2>/dev/null | while read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      n"$RUN_ROOT" | n"$RUN_ROOT"/*) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+[ "$#" -ge 2 ] || refuse "usage: local-worker-tool <list|read|write|pytest|sweep> <run_root> ..."
+ACTION=$1
+RUN_ROOT=$2
+shift 2
+require_run_root "$RUN_ROOT"
+require_profile_safe "$PYROOT" python_root
+umask 007
+
+case "$ACTION" in
+  list | read | write)
+    [ "$#" -eq 1 ] || refuse "$ACTION takes exactly one path"
+    if [ "$ACTION" = list ] && [ "$1" = . ]; then
+      TARGET=$CHECKOUT
+    else
+      require_relpath "$1"
+      TARGET=$CHECKOUT/$1
+    fi
+    ;;
+  pytest)
+    PY=$RUN_ROOT/venv/bin/python
+    [ -x "$PY" ] || refuse "run_root has no venv/bin/python"
+    ;;
+  sweep)
+    [ "$#" -eq 0 ] || refuse "sweep takes no further arguments"
+    ;;
+  *) refuse "unknown action '$ACTION'" ;;
+esac
+[ -d "$RUN_ROOT/tmp" ] || mkdir -- "$RUN_ROOT/tmp"
+
+case "$ACTION" in
+  list)
+    [ ! -L "$TARGET" ] && [ -d "$TARGET" ] || refuse "not a directory: $1"
+    require_dir_inside_checkout "$TARGET" list
+    sandboxed /bin/ls -1Ap -- "$TARGET"
+    ;;
+  read)
+    [ ! -L "$TARGET" ] && [ -f "$TARGET" ] || refuse "not a regular file: $1"
+    require_dir_inside_checkout "${TARGET%/*}" read
+    sandboxed /bin/cat -- "$TARGET"
+    ;;
+  write)
+    [ ! -L "$TARGET" ] || refuse "target is a symlink: $1"
+    [ ! -e "$TARGET" ] || [ -f "$TARGET" ] || refuse "target exists and is not a regular file: $1"
+    parent=${TARGET%/*}
+    # Every existing ancestor up to the checkout must resolve inside it (no symlinked directory).
+    probe=$parent
+    while [ ! -d "$probe" ]; do probe=${probe%/*}; done
+    require_dir_inside_checkout "$probe" write
+    sandboxed /bin/sh -c 'mkdir -p -- "$1" && cat > "$2"' sh "$parent" "$TARGET"
+    ;;
+  pytest)
+    sandboxed "$PY" -m pytest -p no:cacheprovider "$@"
+    ;;
+  sweep)
+    ME=$$
+    UID_SELF=$(id -u)
+    left=""
+    for _ in 1 2 3 4 5; do
+      left=""
+      for p in $(sweep_pids); do
+        [ "$p" = "$ME" ] && continue
+        kill -9 "$p" 2>/dev/null && left="$left $p"
+      done
+      [ -z "$left" ] && break
+      sleep 0.2
+    done
+    if [ -n "$left" ]; then
+      printf 'LOCAL_WORKER_SWEEP unclean%s\n' "$left"
+      exit 3
+    fi
+    printf 'LOCAL_WORKER_SWEEP clean\n'
+    ;;
+esac
