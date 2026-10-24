@@ -51,7 +51,7 @@ from experimental.local_worker.endpoint import (
     parse_usage,
 )
 from experimental.local_worker.episode import LoopOutcome, TurnLog
-from experimental.local_worker.gitstate import TreeState, parse_numstat
+from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
 from experimental.local_worker.tools import (
     KILL_GRACE_SECONDS,
@@ -159,6 +159,14 @@ class AgentLoop:
             return TreeState(observed=False)
         return _parse_status(call.raw)
 
+    def _base_paths(self) -> frozenset[str] | None:
+        """The base commit's paths (which path names the line may publish: redact.py); None
+        when the query failed or its output was capped, and then every path is a digest."""
+        self._step_deadline()
+        call = self.tools.tracked()
+        complete = call.exit_code == 0 and call.capture_complete
+        return parse_tracked(call.raw) if complete else None
+
     def run(
         self,
         messages: list[dict],
@@ -179,7 +187,8 @@ class AgentLoop:
             raise RefusedStart("checkout is not a clean git tree at its base")
         if expected_base is not None and base.head != expected_base:
             raise RefusedStart(f"checkout HEAD {base.head} is not the pinned base {expected_base}")
-        out = LoopOutcome(base=base, started_at=self.now().astimezone(UTC8).isoformat())
+        started = self.now().astimezone(UTC8).isoformat()
+        out = LoopOutcome(base=base, base_paths=self._base_paths(), started_at=started)
         try:
             self._loop(messages, out, first_turn, deadline)
         except (EndpointTimeout, TimeoutError):

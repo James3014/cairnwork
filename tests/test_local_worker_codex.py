@@ -20,7 +20,7 @@ from local_worker_fakes import (
     reply,
 )
 
-from experimental.local_worker import agent, endpoint, episode, tools
+from experimental.local_worker import agent, endpoint, episode, redact, tools
 from experimental.local_worker.agent import initial_messages
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 
@@ -71,7 +71,7 @@ def test_an_unused_argument_is_a_recorded_protocol_abort(harness):
 def test_a_path_that_named_nothing_is_published_only_as_a_digest(tmp_path):
     rec, _ = _record(tmp_path, [reply("read_file", path=SECRET), reply("list_dir", path="src")])
     first, second = rec["turns"][0], rec["turns"][1]
-    assert first["exit_code"] == 64 and set(first["tool_args"]["path"]) == {"sha256", "bytes"}
+    assert first["exit_code"] == 64 and redact.is_path_digest(first["tool_args"]["path"])
     assert second["tool_args"] == {"path": "src"}  # listed: a real directory
     assert SECRET not in json.dumps(rec)
     plain = {**first, "tool_args": {"path": SECRET}}

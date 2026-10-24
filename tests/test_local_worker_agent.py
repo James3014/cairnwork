@@ -11,6 +11,7 @@ from experimental.local_worker.cuts import first_edit_cut
 from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
 from experimental.local_worker.episode import build_record
 from experimental.local_worker.episode_schema import SchemaError, validate_record
+from experimental.local_worker.redact import path_digest
 
 EDIT_SRC = reply("edit_file", path="src/app.py", target="x = 1", replacement="x = 2")
 
@@ -45,13 +46,14 @@ def test_a_test_file_write_is_the_cut(tmp_path):
         EDIT_SRC,
     ]
     cut = cut_of(tmp_path, replies)
-    assert cut["cut_turn_index"] == 1 and cut["target_file"] == "tests/test_new.py"
+    new = path_digest("tests/test_new.py")  # a new path: never readable (review of #239, NB4)
+    assert cut["cut_turn_index"] == 1 and cut["target_file"] == new
     assert cut["is_test_file"] is True and cut["cut_cause"] == "write_file"
 
 
 def test_a_doc_file_write_is_the_cut(tmp_path):
     cut = cut_of(tmp_path, [reply("write_file", path="docs/notes.md", content="n\n"), EDIT_SRC])
-    assert cut["cut_turn_index"] == 0 and cut["target_file"] == "docs/notes.md"
+    assert cut["cut_turn_index"] == 0 and cut["target_file"] == path_digest("docs/notes.md")
     assert cut["is_test_file"] is False
 
 
@@ -73,7 +75,7 @@ def test_run_tests_side_effect_cuts_and_is_flagged(tmp_path):
     world.pytest_writes = {"src/generated.py": "g = 1\n"}
     cut = cut_of(tmp_path, [reply("read_file", path="src/app.py"), reply("run_tests")], world)
     assert cut["cut_turn_index"] == 1 and cut["cut_cause"] == "run_tests_side_effect"
-    assert cut["cut_ambiguous"] is True and cut["target_file"] == "src/generated.py"
+    assert cut["cut_ambiguous"] is True and cut["target_file"] == path_digest("src/generated.py")
 
 
 def test_a_refused_write_does_not_cut(tmp_path):
@@ -84,7 +86,8 @@ def test_a_refused_write_does_not_cut(tmp_path):
 def test_status_runs_after_every_tool_call(tmp_path):
     _, rec, world, _ = run(tmp_path, [reply("read_file", path="src/app.py"), EDIT_SRC])
     actions = [c[0] for c in world.calls]
-    assert actions == ["status", "read", "status", "read", "write", "status", "sweep", "numstat"]
+    base = ["status", "tracked"]  # the base's status and paths, then each tool and its status
+    assert actions == [*base, "read", "status", "read", "write", "status", "sweep", "numstat"]
     assert [t["tree_differs_from_base"] for t in rec["turns"]] == [False, True, None]
 
 
@@ -167,8 +170,9 @@ def test_no_request_is_sent_after_the_deadline(tmp_path):
     out, rec, _, endpoint = run(
         tmp_path, replies, world, max_wall_seconds=1000, cleanup_reserve_seconds=60, model_seconds=0
     )
-    assert out.exit_reason == "TIMEOUT" and rec["total_turns"] == 5
-    assert len(endpoint.payloads) == 5  # the loop stops itself; it does not probe the endpoint
+    # 100 s each for the base's status and paths, then 200 s per turn (tool + status) to 940 s
+    assert out.exit_reason == "TIMEOUT" and rec["total_turns"] == 4
+    assert len(endpoint.payloads) == 4  # the loop stops itself; it does not probe the endpoint
 
 
 def test_context_cap(tmp_path):
@@ -287,7 +291,7 @@ def test_a_test_written_first_splits_the_two_cuts(tmp_path):
         EDIT_SRC,
     ]
     edit, source = cuts_of(tmp_path, replies)
-    assert edit["cut_turn_index"] == 1 and edit["target_file"] == "tests/test_new.py"
+    assert edit["cut_turn_index"] == 1 and edit["target_file"] == path_digest("tests/test_new.py")
     assert source["occurred"] and source["turn_index"] == 2
     assert (source["path"], source["cause"]) == ("src/app.py", "edit_file")
     assert source["pre_read_actions"] == 1 and source["pre_tokens_accum"] == 2 * 160
@@ -300,7 +304,7 @@ def test_an_ignored_run_tests_artifact_first_splits_the_two_cuts(tmp_path):
     world.pytest_writes = {"out.log": "log\n"}  # .gitignore'd, still listed by status
     edit, source = cuts_of(tmp_path, [reply("run_tests"), EDIT_SRC], world)
     assert edit["cut_turn_index"] == 0 and edit["cut_cause"] == "run_tests_side_effect"
-    assert edit["changed_paths"] == ["out.log"]
+    assert edit["changed_paths"] == [path_digest("out.log")]
     assert (source["turn_index"], source["path"], source["cause"]) == (1, "src/app.py", "edit_file")
 
 

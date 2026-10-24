@@ -84,3 +84,15 @@ def parse_numstat(raw: bytes) -> tuple[int, int, int] | None:
         return None
     added, removed, binary = (int(g) for g in m.groups())
     return added, removed, binary
+
+
+def parse_tracked(raw: bytes) -> frozenset[str] | None:
+    """The base's paths from the worker's ``tracked`` query (``git ls-tree -r -t -z --name-only
+    HEAD``: every file and directory of HEAD), plus "." for the checkout root; None unless every
+    record is non-empty and NUL-terminated."""
+    if raw and not raw.endswith(b"\0"):
+        return None
+    names = raw.decode("utf-8", errors="surrogateescape").split("\0")[:-1] if raw else []
+    if not all(names):
+        return None
+    return frozenset([".", *names])

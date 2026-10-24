@@ -15,7 +15,7 @@ import re
 from typing import TYPE_CHECKING
 
 from experimental.local_worker.gitstate import TreeState
-from experimental.local_worker.redact import public_path, public_paths
+from experimental.local_worker.redact import BasePaths, public_path, public_paths
 
 if TYPE_CHECKING:
     from experimental.local_worker.episode import TurnLog
@@ -185,10 +185,11 @@ def _pre(before: list[TurnLog], turn: TurnLog) -> tuple[int, int | None, float, 
     return reads, tokens, round(turn.t_start, 3), sum(missing_usage(t) for t in before)
 
 
-def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
+def first_edit_cut(turns: list[TurnLog], base: TreeState, base_paths: BasePaths = None) -> dict:
     """The spec §3 object, cut where the tree first differs from base (any path: what resume
     needs), plus cut_cause, cut_ambiguous, changed_paths (at most MAX_CHANGED_PATHS, the full count
-    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path."""
+    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path:
+    readable only if they existed at base (``base_paths``), else a path digest."""
     status, n, turn, changed = _first_change(turns, base, source_only=False)
     if status != "CUT":
         return _no_cut(CUT_FIELDS, status)
@@ -199,21 +200,21 @@ def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
     return {
         "cut_occurred": True,
         "cut_turn_index": turn.index,
-        "target_file": public_path(target) if isinstance(target, str) else None,
+        "target_file": public_path(target, base_paths) if isinstance(target, str) else None,
         "is_test_file": is_test_path(target) if isinstance(target, str) else None,
         "pre_cut_read_actions": reads,
         "pre_cut_tokens_accum": tokens,
         "pre_cut_wall_seconds": wall,
         "cut_cause": cause,
         "cut_ambiguous": ambiguous,
-        "changed_paths": public_paths(changed),
+        "changed_paths": public_paths(changed, base_paths),
         "changed_paths_total": len(changed),
         "pre_cut_turns_missing_usage": missing,
         "cut_status": "CUT",
     }
 
 
-def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
+def first_source_edit(turns: list[TurnLog], base: TreeState, base_paths: BasePaths = None) -> dict:
     """The spec's original cut: the first turn whose observed changed paths include a source
     file (is_source_path, and not git-ignored unless an ignore file: _artifacts). It equals
     first_edit_cut unless a test, doc or run_tests artifact changed the tree first; resume always
@@ -228,7 +229,8 @@ def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
     return dict(
         zip(
             SOURCE_FIELDS,
-            (True, turn.index, public_path(path), cause, reads, tokens, wall, missing, "CUT"),
+            (True, turn.index, public_path(path, base_paths), cause, reads, tokens, wall, missing)
+            + ("CUT",),
             strict=True,
         )
     )

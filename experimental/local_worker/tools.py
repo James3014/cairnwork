@@ -275,6 +275,10 @@ class WorkerTools:
         """Fixed ``git status --porcelain=v2 --branch -z -uall`` of the checkout, as the worker."""
         return self._call("status", "status", [], {})
 
+    def tracked(self) -> ToolCall:
+        """Fixed ``git ls-tree -r -t -z --name-only HEAD``: the base's paths, as the worker."""
+        return self._call("tracked", "tracked", [], {})
+
     def numstat(self) -> ToolCall:
         """Fixed ``git diff --numstat -z HEAD`` (untracked files included), as the worker."""
         return self._call("numstat", "numstat", [], {})

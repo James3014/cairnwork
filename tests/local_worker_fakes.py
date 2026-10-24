@@ -94,6 +94,9 @@ class World:
             return self.status_rc, self.status()
         if action == "numstat":
             return 0, self.numstat()
+        if action == "tracked":  # the base's files and their directories
+            dirs = {p.rsplit("/", i)[0] for p in self.base for i in range(1, p.count("/") + 1)}
+            return 0, "".join(f"{p}\0" for p in sorted(set(self.base) | dirs)).encode()
         return 64, b"refusing\n"
 
     def changed(self) -> list[str]:
