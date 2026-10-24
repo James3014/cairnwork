@@ -107,7 +107,8 @@ def verify_candidate(
             except (CandidateRejected, TestCommitRejected, WorkspaceError) as exc:
                 result.reason, status = str(exc), "REFUSED"
     judged = result.candidate_commit or candidate
-    verdict = notary.verdict(result.task_id, result.attempt_id, expected_candidate=judged)
+    subject = binding["head"] if binding else judged  # a bound row names the head (#229)
+    verdict = notary.verdict(result.task_id, result.attempt_id, expected_candidate=subject)
     return {
         "status": "VERIFIED" if result.verified else status,
         "verified": result.verified,

@@ -263,7 +263,12 @@ Exactly these four keys (strict JSON); an unreadable or malformed policy is a us
 2). `key_id` must be the key id of `--public-key`, `core_identity` is pinned like
 `--core-identity` (both apply when both are given), and the receipt's test commit and rule must
 equal the policy's. A policy can also be given in full mode. A v0.1 receipt under a policy fails
-with `TEST_SOURCE_MISMATCH` (it binds no tests).
+with `TEST_SOURCE_MISMATCH` (it binds no tests). A caller of the Python API that passes a policy
+dict of the wrong shape gets `POLICY_MALFORMED`.
+
+Without `--policy` a receiver cannot tell whether tests were required: a v0.1 receipt without
+tests for the same head also verifies `OK`. Whenever the receiver requires tests, give
+`--policy` (in full mode too).
 
 ```bash
 cairnwork-attest verify bundle.json --public-key pub.pem --repo <clone> --candidate <PR head> \
@@ -281,8 +286,9 @@ Checks run in this order and the first failure is reported:
 6. base: binding base == predicate base (== `--base`) (`BASE_MISMATCH`), present (`BASE_NOT_FOUND`)
 7. test source: `hidden_test_commit` and the policy's pins; in full mode the test commit is one
    commit on the base changing exactly `test_paths` (`TEST_SOURCE_MISMATCH`)
-8. tree (full: `TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`) or head-tree (confidential:
-   `HEAD_TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`)
+8. tree (full: `TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`; `REBUILD_FAILED` when git cannot
+   rebuild the tree in the receiver's repository, e.g. it is read-only, which says nothing about
+   the receipt) or head-tree (confidential: `HEAD_TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`)
 9. Core verdict (`RESPONSE_NOT_VERIFIED`, `CORE_IDENTITY_MISMATCH`), as for v0.1
 
 On success `verify --json` adds `assurance`, what the receiver checked itself (`null` for v0.1):

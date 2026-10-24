@@ -64,16 +64,24 @@ def load_policy(path: Path) -> dict[str, Any]:
         text, error_cls=PolicyError, malformed_code="POLICY_MALFORMED",
         constant_code="POLICY_MALFORMED",
     )  # fmt: skip
-    if not isinstance(policy, dict) or set(policy) != _POLICY_KEYS:
-        raise PolicyError(f"a policy has exactly the keys {sorted(_POLICY_KEYS)}")
+    problem = _policy_problem(policy)
+    if problem:
+        raise PolicyError(problem)
+    return policy
+
+
+def _policy_problem(policy: Any) -> str:
+    """Why policy is not a valid receiver policy, else "" (load_policy and verify_bound)."""
+    if not isinstance(policy, Mapping) or set(policy) != _POLICY_KEYS:
+        return f"a policy has exactly the keys {sorted(_POLICY_KEYS)}"
     if (
         policy["rule"] not in KNOWN_RULES
         or not _oid(policy["test_commit"])
         or not isinstance(policy["core_identity"], dict)
         or not (isinstance(policy["key_id"], str) and _KEYID.fullmatch(policy["key_id"]))
     ):
-        raise PolicyError("policy values: known rule, 40-hex test_commit, object, 64-hex key_id")
-    return policy
+        return "policy values: known rule, 40-hex test_commit, object, 64-hex key_id"
+    return ""
 
 
 def _oid(value: Any) -> bool:
@@ -118,6 +126,8 @@ def verify_bound(
     policy: Mapping[str, Any] | None = None,
 ) -> VerifyResult:
     """Check a v0.2 statement whose DSSE signature verify.py has already checked."""
+    if policy is not None and (problem := _policy_problem(policy)):
+        return _fail("POLICY_MALFORMED", problem)  # a caller's dict, not load_policy's
     if policy is not None and _keyid_of(public_key_pem) != policy.get("key_id"):
         return _fail("SIGNATURE_INVALID", "the public key is not the key the policy pins")
     binding, err = _shape(statement)
@@ -222,12 +232,12 @@ def _chain(ctx: _Ctx) -> VerifyResult | None:
     if not echoed:
         return _fail("BINDING_HASH_MISMATCH", "Core's response does not echo this contract")
     tree = f"git-tree:{binding['executed_tree']}"
-    if (
-        change_set.get("target_revision") != tree
-        or manifest.get("target_tree") != tree
-        or change_set.get("source_revision") != f"git-commit:{binding['base']}"
-    ):
-        return _fail("BINDING_HASH_MISMATCH", "request is not for the binding's base and tree")
+    if change_set.get("target_revision") != tree:
+        return _fail("BINDING_HASH_MISMATCH", "change_set.target_revision is not the bound tree")
+    if manifest.get("target_tree") != tree:
+        return _fail("BINDING_HASH_MISMATCH", "change_manifest.target_tree is not the bound tree")
+    if change_set.get("source_revision") != f"git-commit:{binding['base']}":
+        return _fail("BINDING_HASH_MISMATCH", "change_set.source_revision is not the bound base")
     return None
 
 
@@ -291,18 +301,19 @@ def _tree(ctx: _Ctx) -> VerifyResult | None:
                 ctx.repo, binding["head"], binding["test_commit"], tuple(binding["test_paths"]),
                 Path(tmp) / "index",
             )  # fmt: skip
-        except TestCommitRejected as exc:
+        except TestCommitRejected as exc:  # a git failure here is the receiver's environment
             code = "OVERLAY_UNSUPPORTED_ENTRY" if exc.code == "OVERLAY_UNSUPPORTED_ENTRY" else ""
-            return _fail(code or "TREE_MISMATCH", str(exc))
+            return _fail(code or "REBUILD_FAILED", str(exc))
     if tree != binding["executed_tree"]:
         return _fail("TREE_MISMATCH", f"head + tests give {tree}, not {binding['executed_tree']}")
     try:
         manifest = change_manifest(read_tree_change_set(ctx.repo, binding["base"], tree))
     except ChangeSetError as exc:
         return _fail("TREE_MISMATCH", f"cannot read base -> executed tree: {exc}")
-    diff_hash = ctx.request["change_set"].get("diff_hash")
-    if ctx.request["change_manifest"] != manifest or diff_hash != change_manifest_hash(manifest):
+    if ctx.request["change_manifest"] != manifest:
         return _fail("TREE_MISMATCH", "Core's manifest is not base -> the rebuilt tree")
+    if ctx.request["change_set"].get("diff_hash") != change_manifest_hash(manifest):
+        return _fail("TREE_MISMATCH", "change_set.diff_hash is not the rebuilt manifest's hash")
     return None
 
 
@@ -315,10 +326,12 @@ def _head_tree(ctx: _Ctx) -> VerifyResult | None:
     except ChangeSetError as exc:
         return _fail("HEAD_TREE_MISMATCH", f"cannot read base -> head: {exc}")
     entries = manifest.get("entries")
-    if manifest.get("source_tree") != f"git-tree:{head_change.base_tree}" or not (
-        isinstance(entries, list) and all(isinstance(e, dict) for e in entries)
-    ):
+    if manifest.get("source_tree") != f"git-tree:{head_change.base_tree}":
         return _fail("HEAD_TREE_MISMATCH", "Core's manifest does not start at the base tree")
+    if not isinstance(entries, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("path"), str) for e in entries
+    ):
+        return _fail("HEAD_TREE_MISMATCH", "Core's manifest entries are malformed")
     claimed = {e.get("path"): e for e in entries}
     heads = {e.path: e.to_core() for e in head_change.entries}
     tests = set(binding["test_paths"])

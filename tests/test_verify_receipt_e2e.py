@@ -61,6 +61,7 @@ def test_an_external_candidate_receipt_verifies_offline_after_the_scratch_is_gon
     cand = candidate(project, base, {"src/calc.py": FIX})
     code, out = verify(state, project, base, cand, "--test-commit", test_commit, tests=(VERIFIER,))
     assert code == 0, out
+    assert out["core_status"] == "VERIFIED"
     binding = out["binding"]
     assert binding["head"] == cand and binding["base"] == base
     assert binding["test_commit"] == test_commit and binding["rule"] == "overlay-v1"
@@ -97,6 +98,7 @@ def test_without_a_test_commit_the_receipt_stays_bound_to_the_commit(project, st
     cand = candidate(project, base, {"src/calc.py": FIX})
     code, out = verify(state, project, base, cand)
     assert code == 0, out
+    assert out["core_status"] == "VERIFIED"
     assert out["binding"] is None and out["executed_tree"] == "" and out["judged_commit"] == cand
     bundle, pub = signed(state, out, tmp_path, cand)
     code, result = check(bundle, pub, fresh(tmp_path, "r", project, cand), cand)
