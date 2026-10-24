@@ -26,8 +26,10 @@ CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
     " run_tests artifacts count. This deviates from EPISODE_CORPUS_SPEC_ZH §3/§8 (first edit of"
     " a source file) per Plan v2 point 4, so that resume from it is valid. first_source_edit"
     " carries the spec's cut: the first observed change to a path that is not a test, doc or"
-    " git-ignored file. cut_status UNOBSERVED (cut_occurred null): a turn whose tool ran was"
-    " never observed before any cut, so whether and where the tree changed is unknown."
+    " git-ignored file; a new or changed .gitignore is itself a source change even when it"
+    " ignores itself (so one planted to hide new source files sets the cut). cut_status"
+    " UNOBSERVED (cut_occurred null): a turn whose tool ran was never observed before any cut,"
+    " so whether and where the tree changed is unknown."
     " Besides git's status, the observation lists the empty directories, FIFOs and sockets in"
     " the checkout (git cannot see them), so creating one is a tree change for first_edit_cut;"
     " they are never a source change. Not observed: anything outside the checkout (run_root/tmp,"
@@ -132,6 +134,25 @@ def missing_usage(t: TurnLog) -> bool:
     return any(v is None for v in t.tokens)
 
 
+def is_ignore_file(path: str) -> bool:
+    """A .gitignore (any case: git opens it by name on a case-insensitive file system)."""
+    return path.rsplit("/", 1)[-1].lower() == ".gitignore"
+
+
+def _artifacts(tree: TreeState) -> set[str]:
+    """Paths of a tree that are never a source edit: git-ignored ones (status "!"), except an
+    ignore file, and what git cannot see (x: an empty directory, a FIFO or a socket).
+
+    Claude review of #239, NB3: a planted ``src/.gitignore`` containing ``*`` ignores itself
+    and every new file beside it, so ignored-means-artifact would hide new source files. Only
+    the base's ignore rules may make a path an artifact; the observation cannot evaluate those
+    rules alone, so a new or changed ignore file is instead always a source change: the cut then
+    falls at the turn that planted it (or earlier, at a source file it later hides), and no
+    rule a worker wrote can move first_source_edit later."""
+    ignored = {e[2:] for e in tree.entries if e.startswith("! ") and not is_ignore_file(e[2:])}
+    return ignored | {e[4:] for e in tree.entries if e.startswith("x ")}
+
+
 def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
     """(status, position, turn, changed paths): "CUT" at the first turn whose observed tree
     differs from base (in a source path, when ``source_only``); "UNOBSERVED" at the first turn
@@ -146,11 +167,8 @@ def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
             continue
         assert turn.tree is not None
         changed = [p for p in turn.tree.paths() if p not in base.paths()] or turn.tree.paths()
-        if source_only:  # git-ignored paths (status "!") are artifacts, never source; nor
-            # what git cannot see (x: an empty directory, a FIFO or a socket)
-            ignored = {e[2:] for e in turn.tree.entries if e.startswith("! ")}
-            ignored |= {e[4:] for e in turn.tree.entries if e.startswith("x ")}
-            changed = [p for p in changed if is_source_path(p) and p not in ignored]
+        if source_only:
+            changed = [p for p in changed if is_source_path(p) and p not in _artifacts(turn.tree)]
         if changed or not source_only:
             return "CUT", n, turn, changed
     return "NO_CUT", None, None, []
@@ -197,8 +215,9 @@ def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
 
 def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
     """The spec's original cut: the first turn whose observed changed paths include a source
-    file (is_source_path, and not git-ignored). It equals first_edit_cut unless a test, doc or
-    run_tests artifact changed the tree first; resume always uses first_edit_cut."""
+    file (is_source_path, and not git-ignored unless an ignore file: _artifacts). It equals
+    first_edit_cut unless a test, doc or run_tests artifact changed the tree first; resume always
+    uses first_edit_cut."""
     status, n, turn, changed = _first_change(turns, base, source_only=True)
     if status != "CUT":
         return _no_cut(SOURCE_FIELDS, status)
