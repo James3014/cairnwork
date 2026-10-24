@@ -12,10 +12,11 @@ import local_worker_fakes
 import pytest
 from local_worker_fakes import META, TASK, World, cli_harness, lines, make_loop, reply
 
-from experimental.local_worker import cli, corpus_io, episode
+from experimental.local_worker import agent, cli, corpus_io, episode
 from experimental.local_worker.agent import initial_messages
 from experimental.local_worker.agent_protocol import ProtocolError
 from experimental.local_worker.endpoint import EndpointError
+from experimental.local_worker.episode import TurnLog
 from experimental.local_worker.episode_schema import validate_record
 from experimental.local_worker.tools import WorkerIsolationError
 
@@ -383,3 +384,25 @@ def test_the_cli_exits_0_after_a_signal_while_an_exception_unwinds(harness, monk
     assert run([READ], "run") == 0  # nothing re-raised
     [rec] = lines(out)
     assert rec["termination"]["abort_cause"] == "interrupted"
+
+
+class SignalOnFinish(TurnLog):
+    """A turn that sends SIGTERM the moment it is labelled finish."""
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if name == "action_type" and value == "finish":
+            os.kill(os.getpid(), signal.SIGTERM)
+
+
+def test_interruptible_is_cleared_before_a_turn_is_labelled_finish(
+    tmp_path, on_sigterm, monkeypatch
+):
+    """Review of PR #248 round 3, item 2 (mutant P2: clearing it after the label reopens W1)."""
+    monkeypatch.setattr(agent, "TurnLog", SignalOnFinish)
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    out = _run(loop)
+    assert isinstance(out.turns[-1], SignalOnFinish) and out.turns[-1].action_type == "finish"
+    assert out.exit_reason == "COMPLETED" and not out.interrupted and loop.late_signals == 1
+    validate_record(episode.build_record(META, out))
