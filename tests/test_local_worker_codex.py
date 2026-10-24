@@ -9,7 +9,16 @@ import time
 from typing import Any
 
 import pytest
-from local_worker_fakes import META, TASK, Clock, World, cli_harness, lines, make_loop, reply
+from local_worker_fakes import (
+    META,
+    TASK,
+    Clock,
+    World,
+    cli_harness,
+    lines,
+    make_loop,
+    reply,
+)
 
 from experimental.local_worker import agent, endpoint, episode, tools
 from experimental.local_worker.agent import initial_messages

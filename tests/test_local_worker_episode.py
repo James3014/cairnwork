@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from local_worker_fakes import BASE_SHA, cli_harness, lines, reply
+from local_worker_fakes import BASE_SHA, canary_checks, cli_harness, lines, reply
 
 from experimental.local_worker import corpus_io, cuts, endpoint, episode, gitstate
+from experimental.local_worker.canary import SCHEMA as CANARY_SCHEMA
 from experimental.local_worker.episode_schema import TOP_EXTRA, TOP_SPEC, SchemaError
 from experimental.local_worker.episode_schema import validate_record as validate
 
@@ -147,6 +148,8 @@ def canary(tmp_path):
     wrapper = tmp_path / "local-worker-tool"
     wrapper.write_bytes(corpus_io.REPO_WRAPPER.read_bytes())
     report = {
+        "schema": CANARY_SCHEMA,
+        "checks": canary_checks(),
         "overall": "PASS",
         "mode": "worker",
         "wrapper": str(wrapper),

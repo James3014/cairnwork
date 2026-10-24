@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from experimental.local_worker.agent import Task
+from experimental.local_worker.canary_check import CanaryEvidenceError, check_evidence
 from experimental.local_worker.episode_schema import validate_record
 from experimental.local_worker.tools import INSTALLED_WRAPPER
 
@@ -115,10 +116,12 @@ def verify_canary(
     host: str | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Plan v2 point 9: the report's recomputed sha256 matches its sidecar; overall PASS in worker
-    mode; bound to the installed wrapper (whose sha256 also equals this repository's copy, so the
-    installed tool configuration is the one this loop expects), to this host, and at most 7 days
-    old. Returns the binding recorded in the manifest and in every line.
+    """Plan v2 point 9: the report's recomputed sha256 matches its sidecar; its content is a
+    complete passing worker-mode canary (canary_check.check_evidence: schema, all six checks
+    and every required probe passed, the worker identity); bound to the installed wrapper
+    (whose sha256 also equals this repository's copy, so the installed tool configuration is
+    the one this loop expects), to this host, and at most 7 days old. Returns the binding
+    recorded in the manifest and in every line.
 
     The sidecar sha256 proves integrity only (the report was not changed after it was written);
     it is not a signature and proves nothing about who wrote the report. A report dated in the
@@ -130,6 +133,10 @@ def verify_canary(
     if recorded != [digest]:
         raise InputRefused("canary report sha256 does not match its .sha256 sidecar")
     report = json.loads(data)
+    try:  # Codex B5: the checks themselves, not only overall and the metadata
+        check_evidence(report)
+    except CanaryEvidenceError as exc:
+        raise InputRefused(f"canary report: {exc}") from None
     installed = _wrapper_sha(wrapper)
     expected = {
         "overall": "PASS",

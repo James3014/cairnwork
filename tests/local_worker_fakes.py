@@ -7,6 +7,9 @@ import copy
 import difflib
 import itertools
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +20,8 @@ from experimental.local_worker.episode import PARENT_FIELDS
 from experimental.local_worker.tools import WorkerTools
 
 BASE_SHA = "a" * 40
+WRAPPER = Path(tools.__file__).with_name("local-worker-tool")
+TAG = "0123456789abcdef0123456789abcdef"
 TASK = Task("TASK_01", "repo_x", "SECRET-PROMPT-7f3 fix the bug", ("tests/test_app.py",))
 META: dict[str, Any] = {
     "episode_id": "ep_test",
@@ -221,3 +226,45 @@ def lines(out: Path) -> list[dict]:
     files = sorted(out.glob("episodes-*.jsonl"))
     assert len(files) == 1
     return [json.loads(x) for x in files[0].read_text().splitlines()]
+
+
+def canary_checks(user: str = "_cairnwork_worker") -> dict:
+    """The checks of a complete passing canary report (every probe canary_check requires)."""
+    from experimental.local_worker import canary_check
+
+    checks: dict[str, Any] = {}
+    for name, probes in canary_check.REQUIRED_PROBES.items():
+        rows = [{"probe": p, "pass": True} for p in sorted(probes)]
+        rows += [{"probe": f"wrapper read_file x{i}", "pass": True} for i in range(6)]
+        checks[name] = {"pass": True, "probes": rows}
+    checks["identity"] = {"pass": True, "observed": {"user": user}}
+    return checks
+
+
+def make_runs(tmp_path: Any) -> Path:
+    """A runs directory with one run root (TAG: checkout, tmp, an empty .git) and a sibling."""
+    runs = (tmp_path / "runs").resolve()
+    (runs / TAG / "checkout" / "sub").mkdir(parents=True)
+    (runs / TAG / "tmp").mkdir()
+    (runs / TAG / "checkout" / ".git").mkdir()
+    (runs / TAG / "checkout" / "a.txt").write_text("hello\n")
+    (runs / ("f" * 32)).mkdir()
+    (runs / ("f" * 32) / "secret.txt").write_text("s\n")
+    return runs
+
+
+def run_wrapper(runs: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess:
+    """The repository's wrapper copy in direct mode (the Owner, Seatbelt only)."""
+    env = dict(
+        os.environ,
+        CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
+        CAIRNWORK_LOCAL_WORKER_PYROOT=sys.base_prefix,
+    )
+    return subprocess.run(
+        ["/bin/sh", str(WRAPPER), *args],
+        input=stdin,
+        capture_output=True,
+        env=env,
+        cwd="/",
+        check=False,
+    )
