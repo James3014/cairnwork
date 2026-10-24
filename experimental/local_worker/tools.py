@@ -1,6 +1,6 @@
 """Tool layer of the local worker arm (#88): every tool call runs as _cairnwork_worker.
 
-The agent loop (not written yet; it waits for the PAUSE pilot) may run as the Owner, but it must
+The agent loop (agent.py) may run as the Owner, but it must
 never read the checkout itself: the only text it may hand the model is ``ToolCall.output``, which is
 what the wrapper ``local-worker-tool`` printed while running as the worker account under its own
 Seatbelt profile (knowledge addendum 2026-10-23 §0a item 1). This module therefore opens exactly one
@@ -159,7 +159,9 @@ class ToolCall:
         rec["role"] = "tool_result"
         return rec
 
-    def as_turn(self, tokens_prompt: int, tokens_completion: int, tokens_cached: int) -> dict:
+    def as_turn(
+        self, tokens_prompt: int | None, tokens_completion: int | None, tokens_cached: int | None
+    ) -> dict:
         turn = self.record()
         turn.update(
             tokens_prompt=tokens_prompt,
@@ -170,7 +172,7 @@ class ToolCall:
 
 
 class WorkerTools:
-    """list_dir / read_file / write_file / edit_file / run_tests, each run as the worker.
+    """list_dir / read_file / write_file / edit_file / run_tests / status / numstat, as the worker.
 
     ``mode="worker"`` (the only mode an experiment may use) goes through ``sudo -n -u
     _cairnwork_worker`` and the installed wrapper. ``mode="direct"`` runs a wrapper copy as the
@@ -241,6 +243,14 @@ class WorkerTools:
 
     def sweep(self) -> ToolCall:
         return self._call("sweep", "sweep", [], {})
+
+    def status(self) -> ToolCall:
+        """Fixed ``git status --porcelain=v2 --branch -z -uall`` of the checkout, as the worker."""
+        return self._call("status", "status", [], {})
+
+    def numstat(self) -> ToolCall:
+        """Fixed ``git diff --numstat -z HEAD`` (untracked files included), as the worker."""
+        return self._call("numstat", "numstat", [], {})
 
     # -- plumbing ----------------------------------------------------------------------------
     def _argv(self, action: str, args: Sequence[str], nonce: str | None = None) -> list[str]:

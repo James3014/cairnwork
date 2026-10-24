@@ -6,13 +6,15 @@
 #   <owner> ALL=(_cairnwork_worker) NOPASSWD: /Users/Shared/cairnwork-worker/local-bin/local-worker-tool
 # names that path. experimental/local_worker/tools.py runs it with `sudo -n -u _cairnwork_worker`.
 #
-# Five actions, nothing else (exit 64 = refused before anything ran):
+# Seven actions, nothing else (exit 64 = refused before anything ran):
 #   [--start-nonce <hex>] before the action prints LOCAL_WORKER_STARTED <hex> on stderr first.
 #   local-worker-tool list   <run_root> <relpath>        list a directory of the checkout
 #   local-worker-tool read   <run_root> <relpath>        print a regular file of the checkout
 #   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
 #   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
 #   local-worker-tool sweep  <run_root>                  kill this run's worker processes
+#   local-worker-tool status <run_root>                  git status of the checkout (porcelain v2)
+#   local-worker-tool numstat <run_root>                 git diff --numstat of the checkout vs HEAD
 #
 # <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
 # created by the Owner (0750: the worker may not rename or plant entries in it) together with
@@ -146,6 +148,40 @@ sandboxed() {
     "$SANDBOX_EXEC" -p "$(profile)" "$@" 2>&1
 }
 
+# The two fixed git queries (status, numstat): read-only on the checkout, as the worker under the
+# same profile. Only the checkout's own .git/config applies (the Owner prepared it; the worker cannot
+# write .git): no system or global config (HOME is the worker-writable tmp), no fsmonitor, untracked
+# cache, hooks, optional index locks, external diff or textconv. numstat stages into a throwaway
+# index and object directory under <run_root>/tmp (the real objects only as an alternate), so .git
+# is never written. The real git binary is used, not the /usr/bin/git shim (its xcrun cache write
+# outside the profile fails); git's stderr is dropped so the NUL-separated output stays parseable.
+# shellcheck disable=SC2016  # expanded by the inner shell
+GIT_QUERY='set -euf
+c=$1
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0
+export GIT_TERMINAL_PROMPT=0 GIT_DIR="$c/.git" GIT_WORK_TREE="$c" GIT_CEILING_DIRECTORIES="${c%/*}"
+G="$3 -c core.fsmonitor=false -c core.untrackedCache=false -c safe.directory=*
+ -c core.hooksPath=/dev/null -c diff.external= -c core.quotePath=true"
+if [ "$2" = status ]; then
+  exec $G status --porcelain=v2 --branch -z -uall --renames --ignored=matching 2>/dev/null
+fi
+q=$TMPDIR/numstat.$$
+trap '\''rm -rf "$q"'\'' EXIT
+/bin/mkdir -p "$q/objects"
+/bin/cp "$c/.git/index" "$q/index"
+export GIT_INDEX_FILE="$q/index" GIT_OBJECT_DIRECTORY="$q/objects"
+export GIT_ALTERNATE_OBJECT_DIRECTORIES="$c/.git/objects"
+$G add -A 2>/dev/null
+$G diff --cached --no-ext-diff --no-textconv --no-renames --numstat -z HEAD 2>/dev/null'
+
+real_git() {
+  for g in /Library/Developer/CommandLineTools/usr/bin/git \
+    /Applications/Xcode.app/Contents/Developer/usr/bin/git; do
+    [ -x "$g" ] && { printf '%s\n' "$g"; return 0; }
+  done
+  refuse "no git binary under the developer tools"
+}
+
 # Worker-owned pids of this run: the run tag in their environment, or a cwd inside the run root.
 # (A process that both clears its environment and leaves the run root is not found; it is still
 # inside this run's Seatbelt profile, so the Owner must sweep before reading the checkout back and
@@ -176,7 +212,7 @@ if [ "${1:-}" = --start-nonce ]; then
   shift 2
 fi
 
-[ "$#" -ge 2 ] || refuse "usage: local-worker-tool <list|read|write|pytest|sweep> <run_root> ..."
+[ "$#" -ge 2 ] || refuse "usage: local-worker-tool <list|read|write|pytest|sweep|status|numstat> <run_root> ..."
 ACTION=$1
 RUN_ROOT=$2
 shift 2
@@ -200,6 +236,10 @@ case "$ACTION" in
     ;;
   sweep)
     [ "$#" -eq 0 ] || refuse "sweep takes no further arguments"
+    ;;
+  status | numstat)
+    [ "$#" -eq 0 ] || refuse "$ACTION takes no further arguments"
+    [ ! -L "$CHECKOUT/.git" ] && [ -d "$CHECKOUT/.git" ] || refuse "checkout has no real .git directory"
     ;;
   *) refuse "unknown action '$ACTION'" ;;
 esac
@@ -227,6 +267,10 @@ case "$ACTION" in
     ;;
   pytest)
     sandboxed "$PY" -m pytest -p no:cacheprovider "$@"
+    ;;
+  status | numstat)
+    GIT_BIN=$(real_git) || exit 64
+    sandboxed /bin/sh -c "$GIT_QUERY" sh "$CHECKOUT" "$ACTION" "$GIT_BIN"
     ;;
   sweep)
     ME=$$

@@ -71,6 +71,9 @@ def run(runs, *args, stdin=b""):
         ("write", "{runs}/" + TAG, "sub"),  # existing directory
         ("read", "{runs}/" + TAG, "a.txt", "extra"),
         ("sweep", "{runs}/" + TAG, "extra"),
+        ("status", "{runs}/" + TAG, "--porcelain"),  # fixed queries take no arguments
+        ("numstat", "{runs}/" + TAG, "HEAD~1"),
+        ("status", "{runs}/" + "f" * 32),  # no checkout
         ("pytest", "{runs}/" + TAG, "-q"),  # no run venv
         ("exec", "{runs}/" + TAG, "a.txt"),
         ("read",),
@@ -242,3 +245,42 @@ def test_test_code_cannot_erase_the_start_marker(runs, tmp_path, tamper):
     )
     call = tools.run_tests(["-q"])  # raises WorkerIsolationError if the marker was lost
     assert call.exit_code == 0
+
+
+def test_git_queries_refuse_a_symlinked_git_dir(runs):
+    co = runs / TAG / "checkout"
+    (co / ".git").rmdir()
+    (co / ".git").symlink_to(runs / ("f" * 32))
+    for action in ("status", "numstat"):
+        proc = run(runs, action, str(runs / TAG))
+        assert proc.returncode == 64 and b".git" in proc.stderr, action
+
+
+@pytest.mark.sandbox
+def test_git_queries_observe_the_tree_without_writing_git(runs):
+    """status/numstat run sandboxed, read-only on .git: a real repo, changed by the 'worker'."""
+    from experimental.local_worker.episode import parse_numstat, parse_status
+
+    co = runs / TAG / "checkout"
+    (co / ".git").rmdir()
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (co / ".gitignore").write_text("*.log\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    root = str(runs / TAG)
+    clean = run(runs, "status", root)
+    assert clean.returncode == 0, clean.stdout
+    tree = parse_status(clean.stdout)
+    assert tree.observed and tree.head == head.strip() and tree.entries == ()
+    before = sorted(p.name for p in (co / ".git").rglob("*"))
+    assert run(runs, "write", root, "a.txt", stdin=b"hello\nworld\n").returncode == 0
+    assert run(runs, "write", root, "new dir/b.py", stdin=b"x\ny\nz\n").returncode == 0
+    assert run(runs, "write", root, "x.log", stdin=b"l\n").returncode == 0
+    tree = parse_status(run(runs, "status", root).stdout)
+    assert tree.paths() == ["a.txt", "new dir/b.py", "x.log"]
+    stat = run(runs, "numstat", root)
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (4, 0), stat.stdout
+    assert sorted(p.name for p in (co / ".git").rglob("*")) == before  # .git never written
+    assert list((runs / TAG / "tmp").iterdir()) == []  # the throwaway index is removed
