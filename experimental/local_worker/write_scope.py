@@ -8,10 +8,11 @@ lies under one (entry + "/" prefix), compared byte for byte.
 
 The wrapper enforces it (local-worker-tool ``write --scope``), not this module: only the worker may
 look at the checkout, and only the wrapper sees the canonical path a write lands on (symlinks, case
-and Unicode form of existing components resolved by /bin/realpath), and has Seatbelt allow writes
-only under the entries. Entries stay literal: one naming an existing component in another case or
-Unicode form than on disk matches nothing (its writes are refused, never let through). Here the
-entries are only checked to be canonical, and turned into the wrapper's arguments. Unset (None) changes
+and Unicode form of existing components resolved by /bin/realpath), refuses an existing file with
+another hard link, and has Seatbelt allow writes only under the entries. Entries stay literal: one
+naming an existing component in another case or Unicode form than on disk matches nothing (its
+writes are refused, never let through). Here the entries are only checked to be canonical, and
+turned into the wrapper's arguments. Unset (None) changes
 nothing: no argument, no manifest key, no line field.
 """
 
@@ -25,8 +26,8 @@ WRITE_SCOPE_RULE = (  # recorded in manifest.json when a corpus runs with a writ
     " (symlinks, case and Unicode form of existing components resolved by the worker) equals an"
     " entry of the episode's write_scope or lies under one (entry + '/' prefix, byte for byte):"
     " the K arm's --write-path match. Entries are canonical relpaths taken literally, so they must"
-    " name existing components in their on-disk case and Unicode form."
-    " run_tests side effects are not limited."
+    " name existing components in their on-disk case and Unicode form. A write to an existing"
+    " file with more than one hard link is refused too. run_tests side effects are not limited."
 )
 _BAD_CHARS = ('"', "\\", "\n", "\r", "\0")
 

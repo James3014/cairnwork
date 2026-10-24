@@ -110,6 +110,21 @@ def test_a_symlink_into_scope_lands_in_scope(runs):
     assert (co / "sub" / "x.py").read_bytes() == b"new\n"
 
 
+@pytest.mark.sandbox
+def test_a_hard_link_in_scope_is_refused(runs):
+    """Another name of the same file may lie outside the scope (test code can make one)."""
+    co = runs / TAG / "checkout"
+    (co / "out").mkdir()
+    (co / "out" / "f").write_text("orig\n")
+    os.link(co / "out" / "f", co / "sub" / "h")
+    proc = write(runs, "sub/h", "sub")
+    assert refused(proc) and b"out of write scope: sub/h has 2 hard links" in proc.stderr
+    assert (co / "out" / "f").read_text() == "orig\n"
+    (co / "out" / "f").unlink()  # its only name now: in scope
+    assert write(runs, "sub/h", "sub").returncode == 0
+    assert (co / "sub" / "h").read_bytes() == b"new\n"
+
+
 def _case_insensitive(path: Path) -> bool:
     return (path.parent / path.name.upper()).exists()
 

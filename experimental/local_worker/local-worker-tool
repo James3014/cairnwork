@@ -52,10 +52,11 @@
 # and Unicode form, so neither a symlink in the checkout nor a case or normalization variant of a
 # name can move a write out of scope. Entries are taken literally, never resolved (a symlink
 # planted at an entry must not widen it): an entry must name existing components in their on-disk
-# case and Unicode form, or every write under it is refused (refused, never let through). The
-# profile then allows writes in the checkout only under the entries (plus creating their
-# ancestors): Seatbelt checks the resolved path, so a symlink swapped in after the check (by a
-# process a sweep missed) cannot land the write elsewhere either.
+# case and Unicode form, or every write under it is refused (refused, never let through). An
+# existing file with more than one hard link is refused too: its other names may lie outside the
+# scope, and no path check sees them. The profile then allows writes in the checkout only under
+# the entries (plus creating their ancestors): Seatbelt checks the resolved path, so a symlink
+# swapped in after the check (by a process a sweep missed) cannot land the write elsewhere either.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
 # CAIRNWORK_LOCAL_WORKER_RUNS / CAIRNWORK_LOCAL_WORKER_PYROOT set; running as the worker account,
@@ -168,6 +169,8 @@ in_scope() {
 require_in_scope() {
   if [ -e "$TARGET" ]; then
     landed=$(/bin/realpath -- "$TARGET") || refuse "write target cannot be resolved"
+    links=$(/usr/bin/stat -f %l -- "$TARGET") || refuse "write target cannot be resolved"
+    [ "$links" = 1 ] || refuse "out of write scope: $1 has $links hard links (other names unseen)"
   else
     landed=$(/bin/realpath -- "$2")${TARGET#"$2"} || refuse "write directory cannot be resolved"
   fi
