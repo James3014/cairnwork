@@ -135,7 +135,7 @@ jobs:
             env "PATH=$PATH" "HOME=$HOME" \
               CAIRNWORK_REQUIRE_SANDBOX=1 CAIRNWORK_REQUIRE_VERIFIER_ACCOUNT=1 \
               CAIRNWORK_VERIFIER_ROOT=/var/lib/cairnwork \
-              bash -c 'umask 077 && id -nG && uv run pytest -q tests/test_verifier_account.py -k strict_caller_umask'
+              bash -c 'umask 077 && id -nG && uv run pytest -q tests/test_verifier_account.py tests/test_checkout_write_parity.py -k "strict_caller_umask or (checkout_writes_match and account)"'
 
   # Launch witness (fe56's launch gate ③): the real one-line-install UX end to end on Linux.
   # The test/sandbox jobs run pytest, but nothing otherwise proves the *installed* console script
