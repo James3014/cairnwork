@@ -118,15 +118,22 @@ def test_share_gives_group_and_other_what_the_owner_may_read(tmp_path):
     os.chmod(root / "sub" / ".git" / "f", 0o600)
     os.chmod(root / "d700", 0o700)
     (root / "d000").mkdir(mode=0)
-    done = _share(root)
+    try:
+        done = _share(root)
+    finally:
+        modes_after = {}
+        for name in ("d000", "d700"):  # read, then reopen: pytest's tmp cleanup must get in
+            modes_after[name] = stat.S_IMODE(os.lstat(root / name).st_mode)
+            os.chmod(root / name, 0o700)
     assert done.returncode == 0, done.stderr
     expected = {
         "f600": 0o644, "f700": 0o755, "f000": 0, "f200": 0o200, "d700/f640": 0o644,
         "d700": 0o755, "d000": 0, ".git/config": 0o600, "sub/.git/f": 0o644,
     }  # fmt: skip
-    assert {n: stat.S_IMODE(os.lstat(root / n).st_mode) for n in expected} == expected
+    for name in expected:
+        modes_after.setdefault(name, stat.S_IMODE(os.lstat(root / name).st_mode))
+    assert {name: modes_after[name] for name in expected} == expected
     assert stat.S_IMODE(os.lstat(outside).st_mode) == 0o600  # the link's target is untouched
-    os.chmod(root / "d000", 0o700)
 
 
 def test_the_owner_rmtree_never_follows_a_symlink_out():
