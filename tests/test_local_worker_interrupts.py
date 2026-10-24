@@ -351,3 +351,35 @@ def test_w4_a_signal_while_a_generator_closes_defers_nothing(tmp_path, on_sigter
     out = _run(loop)
     assert out.abort_cause == "interrupted" and loop.deferred is None
     validate_record(episode.build_record(META, out))
+
+
+def _raise_then_signal():
+    try:
+        raise RuntimeError("being handled")
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)  # the interrupt's context is the RuntimeError
+
+
+def test_a_signal_while_an_exception_unwinds_defers_nothing(tmp_path, on_sigterm, monkeypatch):
+    """Review of PR #248 round 3, item 3: an Exception context is never deferred (mutant P5)."""
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    _signal_while_unwinding(monkeypatch, loop, _raise_then_signal)
+    out = _run(loop)
+    assert out.abort_cause == "interrupted" and loop.deferred is None
+    validate_record(episode.build_record(META, out))
+
+
+def test_the_cli_exits_0_after_a_signal_while_an_exception_unwinds(harness, monkeypatch):
+    run, out = harness
+
+    class RaiseThenSignal(World):
+        def handle(self, action, args, stdin):
+            if action == "read":
+                _raise_then_signal()
+            return super().handle(action, args, stdin)
+
+    monkeypatch.setattr(local_worker_fakes, "World", RaiseThenSignal)
+    assert run([READ], "run") == 0  # nothing re-raised
+    [rec] = lines(out)
+    assert rec["termination"]["abort_cause"] == "interrupted"
