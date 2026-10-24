@@ -14,7 +14,10 @@ from local_worker_fakes import META, TASK, World, cli_harness, lines, make_loop,
 
 from experimental.local_worker import cli, corpus_io, episode
 from experimental.local_worker.agent import initial_messages
+from experimental.local_worker.agent_protocol import ProtocolError
+from experimental.local_worker.endpoint import EndpointError
 from experimental.local_worker.episode_schema import validate_record
+from experimental.local_worker.tools import WorkerIsolationError
 
 READ = reply("read_file", path="src/app.py")
 
@@ -297,3 +300,21 @@ def test_w2_the_cli_exits_with_the_replaced_system_exit(harness, monkeypatch):
     assert exc.value.code == 9
     [rec] = lines(out)
     assert rec["termination"]["abort_cause"] == "interrupted"
+
+
+@pytest.mark.parametrize(
+    ("exc", "cause"),
+    [
+        (WorkerIsolationError("not the worker uid"), "worker_isolation"),
+        (EndpointError("connection reset"), "endpoint_error"),
+        (ProtocolError("bad structure"), "protocol_error"),
+        (RuntimeError("boom"), "internal_error"),
+    ],
+)
+def test_each_stop_cause_is_recorded(tmp_path, exc, cause):
+    """Review of PR #248, N9: each _ABORT_CAUSES entry, and the internal_error default."""
+    loop, _, _, _ = make_loop(tmp_path, [READ], world=Raising("read", exc))
+    out = loop.run(initial_messages(TASK))
+    assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == cause
+    assert loop.abort_detail == f"{type(exc).__name__}: {exc}" and loop.deferred is None
+    validate_record(episode.build_record(META, out))
