@@ -55,8 +55,9 @@
 # case and Unicode form, or every write under it is refused (refused, never let through). An
 # existing file with more than one hard link is refused too: its other names may lie outside the
 # scope, and no path check sees them. The profile then allows writes in the checkout only under
-# the entries (plus creating their ancestors): Seatbelt checks the resolved path, so a symlink
-# swapped in after the check (by a process a sweep missed) cannot land the write elsewhere either.
+# the entries (plus creating their ancestors, as directories only): Seatbelt checks the resolved
+# path, so a symlink swapped in after the check (by a process a sweep missed) cannot land the
+# write elsewhere either.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
 # CAIRNWORK_LOCAL_WORKER_RUNS / CAIRNWORK_LOCAL_WORKER_PYROOT set; running as the worker account,
@@ -148,7 +149,7 @@ set_scope() {
 "
     WRITE_RULES="$WRITE_RULES (subpath \"$CHECKOUT/$s\")"
     p=$s
-    while [ "${p%/*}" != "$p" ]; do  # mkdir -p may create the entry's ancestors
+    while [ "${p%/*}" != "$p" ]; do  # mkdir -p may create the entry's ancestors (directories)
       p=${p%/*}
       CREATE_RULES="$CREATE_RULES (literal \"$CHECKOUT/$p\")"
     done
@@ -205,7 +206,9 @@ profile() {  # the tool profile: list, read, write, pytest (and so every line of
   printf '(deny file-write*)\n'
   printf '(allow file-write* %s (subpath "%s/tmp")' "$WRITE_RULES" "$RUN_ROOT"
   printf ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))\n'
-  [ -z "$CREATE_RULES" ] || printf '(allow file-write-create%s)\n' "$CREATE_RULES"
+  [ -z "$CREATE_RULES" ] ||
+    printf '(allow file-write-create (require-all (vnode-type DIRECTORY) (require-any%s)))\n' \
+      "$CREATE_RULES"
   printf '(deny file-write* (regex #"/\\.[gG][iI][tT](/|$)"))\n'
   printf '(deny file-read* file-write* (subpath "%s/q"))\n' "$RUN_ROOT"  # the queries' alone
   printf '(deny signal)\n(allow signal (target same-sandbox))\n'

@@ -225,10 +225,8 @@ def test_tools_refuse_out_of_scope_writes_and_edits_then_go_on(runs, tmp_path):
     assert unscoped.write_file("a.txt", "x\n").exit_code == 0
 
 
-@pytest.mark.sandbox
-def test_the_profile_alone_keeps_writes_in_scope(runs, tmp_path):
-    """The second layer: with the wrapper's own check taken out, Seatbelt still allows writes in
-    the checkout only under the entries (a symlink swapped in after the check gains nothing)."""
+def _without_the_check(runs, tmp_path):
+    """The wrapper with its own scope check taken out: only the Seatbelt layer is left."""
     text = WRAPPER.read_text()
     check = '[ -z "$SCOPE_SET" ] || require_in_scope "$1" "$probe"'
     assert text.count(check) == 1
@@ -239,18 +237,42 @@ def test_the_profile_alone_keeps_writes_in_scope(runs, tmp_path):
         CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
         CAIRNWORK_LOCAL_WORKER_PYROOT=sys.base_prefix,
     )
-    co = runs / TAG / "checkout"
-    (co / "out").mkdir()
-    (co / "sub" / "esc").symlink_to("../out")
-    for path in ("a.txt", "subx/f.py", "sub/esc/x.py"):
-        proc = subprocess.run(
-            ["/bin/sh", str(copy), "write", str(runs / TAG), path, "--scope", "sub"],
+
+    def write_unchecked(path, *scope):
+        return subprocess.run(
+            ["/bin/sh", str(copy), "write", str(runs / TAG), path, "--scope", *scope],
             input=b"new\n",
             capture_output=True,
             env=env,
             cwd="/",
             check=False,
         )
+
+    return write_unchecked
+
+
+@pytest.mark.sandbox
+def test_the_profile_alone_keeps_writes_in_scope(runs, tmp_path):
+    """The second layer: with the wrapper's own check taken out, Seatbelt still allows writes in
+    the checkout only under the entries (a symlink swapped in after the check gains nothing)."""
+    write_unchecked = _without_the_check(runs, tmp_path)
+    co = runs / TAG / "checkout"
+    (co / "out").mkdir()
+    (co / "sub" / "esc").symlink_to("../out")
+    for path in ("a.txt", "subx/f.py", "sub/esc/x.py"):
+        proc = write_unchecked(path, "sub")
         assert proc.returncode != 0 and b"Operation not permitted" in proc.stdout, path
     assert (co / "a.txt").read_text() == "hello\n"
     assert list((co / "out").iterdir()) == [] and not (co / "subx").exists()
+
+
+@pytest.mark.sandbox
+def test_the_profile_lets_an_entrys_ancestors_be_created_as_directories_only(runs, tmp_path):
+    write_unchecked = _without_the_check(runs, tmp_path)
+    co = runs / TAG / "checkout"
+    proc = write_unchecked("pkg", "pkg/mod/new.py")  # a regular file at an ancestor path
+    assert proc.returncode != 0 and not (co / "pkg").exists()
+    proc = write_unchecked("pkg/zzz/f.py", "pkg/mod/new.py")  # a directory beside the ancestor
+    assert proc.returncode != 0 and (co / "pkg").is_dir() and not (co / "pkg" / "zzz").exists()
+    assert write_unchecked("pkg/mod/new.py", "pkg/mod/new.py").returncode == 0
+    assert (co / "pkg" / "mod" / "new.py").read_bytes() == b"new\n"
