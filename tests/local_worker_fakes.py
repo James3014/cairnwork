@@ -79,13 +79,15 @@ class World:
         for p in self.changed():
             if p in self.base:
                 recs.append(f"1 .M N... 100644 100644 100644 {'b' * 40} {'b' * 40} {p}")
+            elif p.endswith(".log"):  # .gitignore'd: listed by --ignored=matching
+                recs.append(f"! {p}")
             else:
                 recs.append(f"? {p}")
         return ("\0".join(recs) + "\0").encode()
 
     def numstat(self) -> bytes:
         out = []
-        for p in self.changed():
+        for p in [p for p in self.changed() if not p.endswith(".log")]:  # git diff skips ignored
             old = self.base.get(p, "").splitlines()
             new = self.files.get(p, "").splitlines()
             diff = list(difflib.ndiff(old, new))

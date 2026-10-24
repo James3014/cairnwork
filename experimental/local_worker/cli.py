@@ -11,8 +11,12 @@
 Before anything runs: the canary report is bound (corpus_io.verify_canary), the server must list
 the requested model, and the manifest is created or must match. A resume starts from a fresh
 checkout that must be clean at the parent's base sha; the prefix stops just before the parent's
-cut turn, so the tree there is base by construction (Plan v2 point 5). Exit 0 after the line is
-written (whatever the episode's exit reason), 2 when a check refused the start.
+cut turn, so the tree there is base by construction (Plan v2 point 5). Ignored files: the status
+query lists them (--ignored=matching), so an ignored artifact that run_tests writes into the
+checkout is itself a tree change and sets the cut; none lies before it. What run_tests left before
+the cut outside the checkout (<run_root>/tmp, its HOME and TMPDIR) is not recreated in the fresh
+run root. Exit 0 after the line is written (whatever the episode's exit reason), 2 when a check
+refused the start.
 """
 
 from __future__ import annotations
@@ -85,7 +89,12 @@ MANIFEST_SCHEMA = corpus_io.MANIFEST_SCHEMA
 
 
 def resume_prefix(parent: dict, cut_turn: int | None) -> tuple[list[dict], int, float]:
-    """(messages before the cut turn's model reply, cut turn index, its start in seconds)."""
+    """(messages before the cut turn's model reply, cut turn index, its start in seconds).
+
+    The resumed run's clock starts at that start (wall_clock_seconds includes it; its
+    own_wall_seconds does not). Ignored artifacts in the checkout cannot precede the cut (status
+    lists ignored files, so creating one is the cut); what run_tests left before the cut outside
+    the checkout (<run_root>/tmp) is not recreated in the fresh run root."""
     cut = parent["record"]["first_edit_cut"]
     limit: int | None = cut["cut_turn_index"] if cut["cut_occurred"] else None
     chosen = cut_turn if cut_turn is not None else limit

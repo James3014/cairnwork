@@ -11,7 +11,7 @@ from experimental.local_worker import agent, episode
 from experimental.local_worker.agent import RefusedStart, initial_messages
 from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
 from experimental.local_worker.episode import build_record, first_edit_cut
-from experimental.local_worker.episode_schema import validate_record
+from experimental.local_worker.episode_schema import SchemaError, validate_record
 
 META: dict[str, Any] = {
     "episode_id": "ep_test",
@@ -273,3 +273,104 @@ def test_resume_continues_from_the_prefix(tmp_path):
     assert [t.index for t in out.turns] == [4, 5]
     assert out.turns[0].t_start == pytest.approx(120.0)
     assert first_edit_cut(out.turns, out.base)["cut_turn_index"] == 4
+
+
+# -- the spec's source-edit cut next to the tree cut, missing usage, own wall time (1ca5 review) --
+SOURCE_PRE = ("pre_read_actions", "pre_tokens_accum", "pre_wall_seconds")
+EDIT_PRE = ("pre_cut_read_actions", "pre_cut_tokens_accum", "pre_cut_wall_seconds")
+
+
+def cuts(tmp_path, replies, world=None) -> tuple[dict, dict]:
+    rec = run(tmp_path, replies, world)[1]
+    return rec["first_edit_cut"], rec["first_source_edit"]
+
+
+def test_a_test_written_first_splits_the_two_cuts(tmp_path):
+    replies = [
+        reply("read_file", path="src/app.py"),
+        reply("write_file", path="tests/test_new.py", content="def test_x(): pass\n"),
+        EDIT_SRC,
+    ]
+    edit, source = cuts(tmp_path, replies)
+    assert edit["cut_turn_index"] == 1 and edit["target_file"] == "tests/test_new.py"
+    assert source["occurred"] and source["turn_index"] == 2
+    assert (source["path"], source["cause"]) == ("src/app.py", "edit_file")
+    assert source["pre_read_actions"] == 1 and source["pre_tokens_accum"] == 2 * 160
+    assert source["pre_wall_seconds"] > edit["pre_cut_wall_seconds"]
+    assert source["pre_cut_turns_missing_usage"] == 0
+
+
+def test_an_ignored_run_tests_artifact_first_splits_the_two_cuts(tmp_path):
+    world = World()
+    world.pytest_writes = {"out.log": "log\n"}  # .gitignore'd, still listed by status
+    edit, source = cuts(tmp_path, [reply("run_tests"), EDIT_SRC], world)
+    assert edit["cut_turn_index"] == 0 and edit["cut_cause"] == "run_tests_side_effect"
+    assert edit["changed_paths"] == ["out.log"]
+    assert (source["turn_index"], source["path"], source["cause"]) == (1, "src/app.py", "edit_file")
+
+
+def test_a_source_edit_first_makes_the_two_cuts_equal(tmp_path):
+    edit, source = cuts(tmp_path, [reply("read_file", path="src/app.py"), EDIT_SRC])
+    assert source["turn_index"] == edit["cut_turn_index"] == 1
+    assert (source["path"], source["cause"]) == (edit["target_file"], edit["cut_cause"])
+    assert [source[k] for k in SOURCE_PRE] == [edit[k] for k in EDIT_PRE]
+
+
+def test_no_source_change_means_no_source_cut(tmp_path):
+    edit, source = cuts(tmp_path, [reply("write_file", path="docs/a.md", content="d\n")])
+    assert edit["cut_occurred"] and source["occurred"] is False
+    assert all(v is None for k, v in source.items() if k != "occurred")
+
+
+def test_missing_usage_is_counted_before_each_cut_and_per_episode(tmp_path):
+    replies = [
+        reply("read_file", usage="missing", path="src/app.py"),
+        reply("read_file", usage=(5, 1, None), path="src/app.py"),  # no cached field
+        reply("read_file", path="src/app.py"),
+        EDIT_SRC,
+        reply("read_file", usage="missing", path="src/app.py"),
+    ]
+    _, rec, _, _ = run(tmp_path, replies)
+    edit, source = rec["first_edit_cut"], rec["first_source_edit"]
+    assert edit["pre_cut_turns_missing_usage"] == 2 and edit["pre_cut_tokens_accum"] is None
+    assert source["pre_cut_turns_missing_usage"] == 2 and source["pre_tokens_accum"] is None
+    assert rec["turns_missing_usage"] == 3
+
+
+def test_usage_missing_only_after_the_cut_keeps_the_sum(tmp_path):
+    replies = [EDIT_SRC, reply("read_file", usage="missing", path="src/app.py")]
+    _, rec, _, _ = run(tmp_path, replies)
+    assert rec["first_edit_cut"]["pre_cut_turns_missing_usage"] == 0
+    assert rec["first_edit_cut"]["pre_cut_tokens_accum"] == 0
+    assert rec["turns_missing_usage"] == 1 and rec["tokens_total"]["prompt"] is None
+
+
+def test_own_wall_seconds_excludes_the_resumed_prefix(tmp_path):
+    loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], model_seconds=10.0)
+    out = loop.run(initial_messages(TASK), first_turn=3, elapsed_offset=120.0)
+    rec = build_record(dict(META, resume_parent_episode_id="ep_parent"), out)
+    validate_record(rec)
+    assert rec["own_wall_seconds"] == pytest.approx(20.0)  # two model replies, 10 s each
+    assert rec["wall_clock_seconds"] == pytest.approx(120.0 + 20.0)
+    _, fresh, _, _ = run(tmp_path / "fresh", [EDIT_SRC])
+    assert fresh["own_wall_seconds"] == fresh["wall_clock_seconds"]
+    rec["own_wall_seconds"] = rec["wall_clock_seconds"] + 5  # a resumed run can't exceed its total
+    with pytest.raises(SchemaError):
+        validate_record(rec)
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda r: r.update(turns_missing_usage=r["turns_missing_usage"] + 1),
+        lambda r: r["first_source_edit"].update(turn_index=-1),
+        lambda r: r["first_edit_cut"].update(pre_cut_turns_missing_usage=1),
+        lambda r: r.update(own_wall_seconds=r["own_wall_seconds"] + 5),
+        lambda r: r["first_source_edit"].update(path=None),
+    ],
+)
+def test_validator_checks_the_new_fields(tmp_path, corrupt):
+    _, rec, _, _ = run(tmp_path, [reply("read_file", path="src/app.py"), EDIT_SRC])
+    corrupt(rec)
+    with pytest.raises(SchemaError):
+        validate_record(rec)

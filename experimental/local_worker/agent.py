@@ -30,8 +30,9 @@ from experimental.local_worker.endpoint import (
     EndpointTimeout,
     parse_usage,
 )
-from experimental.local_worker.episode import LoopOutcome, TreeState, TurnLog, parse_numstat
-from experimental.local_worker.episode import parse_status as _parse_status
+from experimental.local_worker.episode import LoopOutcome, TurnLog
+from experimental.local_worker.gitstate import TreeState, parse_numstat
+from experimental.local_worker.gitstate import parse_status as _parse_status
 from experimental.local_worker.tools import ToolCall, WorkerIsolationError, WorkerTools
 
 UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8

@@ -259,7 +259,7 @@ def test_git_queries_refuse_a_symlinked_git_dir(runs):
 @pytest.mark.sandbox
 def test_git_queries_observe_the_tree_without_writing_git(runs):
     """status/numstat run sandboxed, read-only on .git: a real repo, changed by the 'worker'."""
-    from experimental.local_worker.episode import parse_numstat, parse_status
+    from experimental.local_worker.gitstate import parse_numstat, parse_status
 
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()

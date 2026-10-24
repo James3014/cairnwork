@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from experimental.local_worker.gitstate import TreeState
+
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
 TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed before the cut"
@@ -44,20 +46,19 @@ CUT_FIELDS = (
     "cut_cause",
     "cut_ambiguous",
     "changed_paths",
+    "pre_cut_turns_missing_usage",
+)
+SOURCE_FIELDS = (
+    "occurred",
+    "turn_index",
+    "path",
+    "cause",
+    "pre_read_actions",
+    "pre_tokens_accum",
+    "pre_wall_seconds",
+    "pre_cut_turns_missing_usage",
 )
 _TEST_NAME = re.compile(r"(^|[_.-])tests?([_.-]|$)")
-
-
-@dataclass(frozen=True)
-class TreeState:
-    """One observed ``git status``: HEAD and the porcelain v2 entries (sorted), or not observed."""
-
-    observed: bool
-    head: str | None = None
-    entries: tuple[str, ...] = ()
-
-    def paths(self) -> list[str]:
-        return sorted({p for e in self.entries for p in _entry_paths(e)})
 
 
 @dataclass
@@ -108,56 +109,6 @@ def is_doc_path(path: str) -> bool:
     )
 
 
-def _entry_paths(entry: str) -> list[str]:
-    kind = entry[:1]
-    if kind in ("?", "!"):
-        return [entry[2:]]
-    if kind == "1":
-        return [entry.split(" ", 8)[-1]]
-    if kind == "2":
-        head, _, orig = entry.partition("\0")
-        return [head.split(" ", 9)[-1], orig]
-    if kind == "u":
-        return [entry.split(" ", 10)[-1]]
-    return []
-
-
-def parse_status(raw: bytes) -> TreeState:
-    """Parse ``git status --porcelain=v2 --branch -z`` output (rename entries carry two paths)."""
-    fields = raw.decode("utf-8", errors="surrogateescape").split("\0")
-    head: str | None = None
-    entries: list[str] = []
-    i = 0
-    while i < len(fields):
-        f = fields[i]
-        if f.startswith("# branch.oid "):
-            oid = f.removeprefix("# branch.oid ")
-            head = oid if re.fullmatch(r"[0-9a-f]{40,64}", oid) else None
-        elif f[:2] in ("1 ", "u ", "? ", "! "):
-            entries.append(f)
-        elif f.startswith("2 ") and i + 1 < len(fields):
-            entries.append(f + "\0" + fields[i + 1])
-            i += 1
-        elif f and not f.startswith("# "):
-            return TreeState(observed=False)  # not git porcelain: never guess a tree
-        i += 1
-    return TreeState(observed=True, head=head, entries=tuple(sorted(entries)))
-
-
-def parse_numstat(raw: bytes) -> tuple[int, int] | None:
-    """Sum ``git diff --numstat -z`` (binary files count 0); None if a record does not parse."""
-    added = removed = 0
-    for rec in raw.decode("utf-8", errors="surrogateescape").split("\0"):
-        if not rec:
-            continue
-        m = re.match(r"(\d+|-)\t(\d+|-)\t", rec)
-        if not m:
-            return None
-        added += int(m.group(1)) if m.group(1) != "-" else 0
-        removed += int(m.group(2)) if m.group(2) != "-" else 0
-    return added, removed
-
-
 def differs(tree: TreeState | None, base: TreeState) -> bool | None:
     if tree is None or not tree.observed:
         return None
@@ -177,29 +128,82 @@ def _cut_cause(turn: TurnLog, changed: list[str]) -> tuple[str, bool]:
     return "other", True
 
 
-def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
-    """The spec §3 object (plus cut_cause, cut_ambiguous, changed_paths) from observed trees."""
+def is_source_path(path: str) -> bool:
+    """The spec's original edit target: neither a test file nor a doc file."""
+    return not is_test_path(path) and not is_doc_path(path)
+
+
+def missing_usage(t: TurnLog) -> bool:
+    """A turn whose token triple is incomplete (no, malformed or cache-less usage): any sum over
+    it is null, and this counter says how many such turns made it null."""
+    return any(v is None for v in t.tokens)
+
+
+def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
+    """(position, turn, changed paths) of the first turn whose observed tree differs from base
+    (in a source path, when ``source_only``), else None."""
     for n, turn in enumerate(turns):
         if not differs(turn.tree, base):
             continue
         assert turn.tree is not None
         changed = [p for p in turn.tree.paths() if p not in base.paths()] or turn.tree.paths()
-        cause, ambiguous = _cut_cause(turn, changed)
-        target = turn.tool_args.get("path") if cause in EDIT_ACTIONS else (changed or [None])[0]
-        before = turns[:n]
-        return {
-            "cut_occurred": True,
-            "cut_turn_index": turn.index,
-            "target_file": target,
-            "is_test_file": is_test_path(target) if isinstance(target, str) else None,
-            "pre_cut_read_actions": sum(t.action_type in READ_ACTIONS for t in before),
-            "pre_cut_tokens_accum": _sum([v for t in before for v in t.tokens]),
-            "pre_cut_wall_seconds": round(turn.t_start, 3),
-            "cut_cause": cause,
-            "cut_ambiguous": ambiguous,
-            "changed_paths": changed,
-        }
-    return {"cut_occurred": False, **dict.fromkeys(CUT_FIELDS[1:])}
+        if source_only:  # git-ignored paths (status "!") are artifacts, never source
+            ignored = {e[2:] for e in turn.tree.entries if e.startswith("! ")}
+            changed = [p for p in changed if is_source_path(p) and p not in ignored]
+        if changed or not source_only:
+            return n, turn, changed
+    return None
+
+
+def _pre(before: list[TurnLog], turn: TurnLog) -> tuple[int, int | None, float, int]:
+    reads = sum(t.action_type in READ_ACTIONS for t in before)
+    tokens = _sum([v for t in before for v in t.tokens])
+    return reads, tokens, round(turn.t_start, 3), sum(missing_usage(t) for t in before)
+
+
+def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
+    """The spec §3 object, cut where the tree first differs from base (any path: what resume
+    needs), plus cut_cause, cut_ambiguous, changed_paths and pre_cut_turns_missing_usage."""
+    found = _first_change(turns, base, source_only=False)
+    if found is None:
+        return {"cut_occurred": False, **dict.fromkeys(CUT_FIELDS[1:])}
+    n, turn, changed = found
+    cause, ambiguous = _cut_cause(turn, changed)
+    target = turn.tool_args.get("path") if cause in EDIT_ACTIONS else (changed or [None])[0]
+    reads, tokens, wall, missing = _pre(turns[:n], turn)
+    return {
+        "cut_occurred": True,
+        "cut_turn_index": turn.index,
+        "target_file": target,
+        "is_test_file": is_test_path(target) if isinstance(target, str) else None,
+        "pre_cut_read_actions": reads,
+        "pre_cut_tokens_accum": tokens,
+        "pre_cut_wall_seconds": wall,
+        "cut_cause": cause,
+        "cut_ambiguous": ambiguous,
+        "changed_paths": changed,
+        "pre_cut_turns_missing_usage": missing,
+    }
+
+
+def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
+    """The spec's original cut: the first turn whose observed changed paths include a source
+    file (is_source_path, and not git-ignored). It equals first_edit_cut unless a test, doc or
+    run_tests artifact changed the tree first; resume always uses first_edit_cut."""
+    found = _first_change(turns, base, source_only=True)
+    if found is None:
+        return {"occurred": False, **dict.fromkeys(SOURCE_FIELDS[1:])}
+    n, turn, changed = found
+    cause, _ = _cut_cause(turn, changed)
+    path = turn.tool_args.get("path") if cause in EDIT_ACTIONS else changed[0]
+    reads, tokens, wall, missing = _pre(turns[:n], turn)
+    return dict(
+        zip(
+            SOURCE_FIELDS,
+            (True, turn.index, path, cause, reads, tokens, wall, missing),
+            strict=True,
+        )
+    )
 
 
 def _digest(text: Any) -> dict:
@@ -296,7 +300,14 @@ class LoopOutcome:
 def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> dict:
     """The corpus line. ``meta`` carries the identity fields (episode_id, task_id, repo,
     model_name, harness_version, arm, seed, endpoint, server_model_id, manifest_sha256,
-    canary_report_sha256, checkout_id and the resume_* / plan_sha256 fields)."""
+    canary_report_sha256, checkout_id and the resume_* / plan_sha256 fields).
+
+    Time: ``wall_clock_seconds`` is the episode's logical length; for a resume run it starts at
+    the parent's pre-cut seconds (t_start/t_end and cut_900s use the same clock).
+    ``own_wall_seconds`` is what this run itself spent (equal for a fresh run). To total M5 time
+    for L0 plus its resume arms, sum L0's ``wall_clock_seconds`` and each resume run's
+    ``own_wall_seconds``; summing the resume's wall_clock_seconds would count the pre-cut time
+    twice. wall_clock_start/end are this run's real timestamps."""
     turns = [public_turn(t, out.base) for t in out.turns]
     added, removed = out.patch if out.patch is not None else (None, None)
     record = {
@@ -305,9 +316,12 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
         "base_sha": out.base.head,
         "wall_clock_start": out.started_at,
         "wall_clock_end": out.ended_at,
-        "wall_clock_seconds": round(out.wall_seconds, 3),
+        "wall_clock_seconds": round(out.elapsed_offset + out.wall_seconds, 3),
+        "own_wall_seconds": round(out.wall_seconds, 3),
         "total_turns": len(turns),
         "first_edit_cut": first_edit_cut(out.turns, out.base),
+        "first_source_edit": first_source_edit(out.turns, out.base),
+        "turns_missing_usage": sum(missing_usage(t) for t in out.turns),
         "turns": turns,
         "tokens_total": token_totals(turns),
         "usage_status": episode_usage_status(turns),

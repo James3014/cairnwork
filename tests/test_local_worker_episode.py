@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from local_worker_fakes import BASE_SHA, FakeEndpoint, World, reply
 
-from experimental.local_worker import cli, corpus_io, endpoint, episode, tools
+from experimental.local_worker import cli, corpus_io, endpoint, episode, gitstate, tools
 from experimental.local_worker.episode_schema import TOP_EXTRA, TOP_SPEC, SchemaError
 from experimental.local_worker.episode_schema import validate_record as validate
 
@@ -150,6 +150,8 @@ def test_resume_from_the_cut_with_a_plan(harness):
     roles = [m["role"] for m in msgs[:6]]
     assert roles == ["system", "user", "assistant", "tool", "assistant", "tool"]
     assert child["turns"][0]["t_start_seconds"] == parent["turns"][2]["t_start_seconds"]
+    offset = child["wall_clock_seconds"] - child["own_wall_seconds"]  # the parent's pre-cut time
+    assert offset == pytest.approx(parent["first_edit_cut"]["pre_cut_wall_seconds"], abs=0.002)
 
 
 def test_resume_refuses_a_turn_after_the_cut(harness):
@@ -309,10 +311,10 @@ def test_status_parser_handles_renames_untracked_and_garbage():
         f"# branch.oid {BASE_SHA}\0# branch.head main\0"
         "2 R. N... 100644 100644 100644 a b R100 new name.py\0old.py\0? tests/t.py\0! x.log\0"
     ).encode()
-    tree = episode.parse_status(raw)
+    tree = gitstate.parse_status(raw)
     assert tree.observed and tree.head == BASE_SHA
     assert tree.paths() == ["new name.py", "old.py", "tests/t.py", "x.log"]
-    assert not episode.parse_status(b"fatal: not a git repository\n").observed
+    assert not gitstate.parse_status(b"fatal: not a git repository\n").observed
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from experimental.local_worker.episode import (
     CUT_FIELDS,
     EXIT_REASONS,
     SCHEMA_VERSION,
+    SOURCE_FIELDS,
     TEXT_ARGS,
     VERIFICATION_POST_STEP,
     token_totals,
@@ -52,6 +53,9 @@ TOP_EXTRA: dict[str, tuple[Any, bool]] = {  # Plan v2 point 10 and the bindings
     "usage_status": (STR, False),
     "termination": (DICT, False),
     "cut_900s": (DICT, False),
+    "own_wall_seconds": (FLOAT, False),
+    "first_source_edit": (DICT, False),
+    "turns_missing_usage": (INT, False),
 }
 CUT: dict[str, tuple[Any, bool]] = dict(
     zip(
@@ -67,7 +71,16 @@ CUT: dict[str, tuple[Any, bool]] = dict(
             (STR, True),
             (BOOL, True),
             (LIST, True),
+            (INT, True),
         ],
+        strict=True,
+    )
+)
+SOURCE: dict[str, tuple[Any, bool]] = dict(
+    zip(
+        SOURCE_FIELDS,
+        [(BOOL, False), (INT, True), (STR, True), (STR, True), (INT, True), (INT, True)]
+        + [(FLOAT, True), (INT, True)],
         strict=True,
     )
 )
@@ -170,14 +183,52 @@ def _check_turns(turns: list) -> None:
             raise SchemaError(f"turns[{n}].turn_index is not consecutive")
 
 
-def _check_cut(cut: dict) -> None:
-    if not cut["cut_occurred"]:
-        if any(cut[k] is not None for k in CUT_FIELDS[1:]):
-            raise SchemaError("first_edit_cut: no cut, so every other field must be null")
+def _check_cut(cut: dict, fields: tuple[str, ...], required: tuple[str, ...], where: str) -> None:
+    """No cut: every other field null. A cut: the required fields set, and the token sum null
+    exactly when some turn before the cut lacked usage (pre_cut_turns_missing_usage > 0)."""
+    if not cut[fields[0]]:
+        if any(cut[k] is not None for k in fields[1:]):
+            raise SchemaError(f"{where}: no cut, so every other field must be null")
         return
-    for key in ("cut_turn_index", "pre_cut_wall_seconds", "cut_cause", "changed_paths"):
+    for key in required:
         if cut[key] is None:
-            raise SchemaError(f"first_edit_cut.{key} must be set when a cut occurred")
+            raise SchemaError(f"{where}.{key} must be set when a cut occurred")
+    accum = cut["pre_cut_tokens_accum" if "pre_cut_tokens_accum" in cut else "pre_tokens_accum"]
+    if (accum is None) != (cut["pre_cut_turns_missing_usage"] > 0):
+        raise SchemaError(f"{where}: token sum null exactly when a pre-cut turn lacks usage")
+
+
+def _check_cuts(rec: dict) -> None:
+    edit, source = rec["first_edit_cut"], rec["first_source_edit"]
+    _check(edit, CUT, "first_edit_cut")
+    _check(source, SOURCE, "first_source_edit")
+    required = ("cut_turn_index", "pre_cut_wall_seconds", "cut_cause", "changed_paths")
+    _check_cut(edit, CUT_FIELDS, (*required, "pre_cut_turns_missing_usage"), "first_edit_cut")
+    required = ("turn_index", "path", "cause", "pre_wall_seconds", "pre_cut_turns_missing_usage")
+    _check_cut(source, SOURCE_FIELDS, required, "first_source_edit")
+    if source["occurred"] and not (
+        edit["cut_occurred"] and edit["cut_turn_index"] <= source["turn_index"]
+    ):
+        raise SchemaError("first_source_edit precedes the first tree change")
+
+
+def _check_counts(rec: dict) -> None:
+    turns = rec["turns"]
+    if rec["total_turns"] != len(turns):
+        raise SchemaError("total_turns differs from len(turns)")
+    if rec["tokens_total"] != token_totals(turns):
+        raise SchemaError("tokens_total differs from the per-turn sums")
+    keys = ("tokens_prompt", "tokens_completion", "tokens_cached")
+    missing = sum(any(t[k] is None for k in keys) for t in turns)
+    if rec["turns_missing_usage"] != missing:
+        raise SchemaError("turns_missing_usage differs from the turns without full usage")
+    if rec["own_wall_seconds"] > rec["wall_clock_seconds"] + 0.001:
+        raise SchemaError("own_wall_seconds exceeds wall_clock_seconds")
+    if (
+        rec["resume_parent_episode_id"] is None
+        and rec["own_wall_seconds"] != rec["wall_clock_seconds"]
+    ):
+        raise SchemaError("a fresh run's own_wall_seconds must equal wall_clock_seconds")
 
 
 def validate_record(rec: Any) -> None:
@@ -185,8 +236,7 @@ def validate_record(rec: Any) -> None:
     _check(rec, {**TOP_SPEC, **TOP_EXTRA}, "record")
     if rec["schema_version"] != SCHEMA_VERSION:
         raise SchemaError(f"schema_version {rec['schema_version']!r}")
-    _check(rec["first_edit_cut"], CUT, "first_edit_cut")
-    _check_cut(rec["first_edit_cut"])
+    _check_cuts(rec)
     _check(rec["verification"], VERIFICATION, "verification")
     if rec["verification"]["exit_reason"] not in EXIT_REASONS:
         raise SchemaError(f"exit_reason {rec['verification']['exit_reason']!r}")
@@ -195,7 +245,4 @@ def validate_record(rec: Any) -> None:
     _check(rec["cut_900s"], CUT_900S, "cut_900s")
     _check(rec["tokens_total"], TOKENS_TOTAL, "tokens_total")
     _check_turns(rec["turns"])
-    if rec["total_turns"] != len(rec["turns"]):
-        raise SchemaError("total_turns differs from len(turns)")
-    if rec["tokens_total"] != token_totals(rec["turns"]):
-        raise SchemaError("tokens_total differs from the per-turn sums")
+    _check_counts(rec)
