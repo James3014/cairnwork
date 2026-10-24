@@ -9,14 +9,15 @@
         --task task.json --checkout <a FRESH run root>/checkout ... --arm A --seed 1000
 
 Before anything runs: the canary report is bound (corpus_io.verify_canary), the server must list
-the requested model, and the manifest is created or must match. A resume starts from a fresh
-checkout that must be clean at the parent's base sha; the prefix stops just before the parent's
-cut turn, so the tree there is base by construction (Plan v2 point 5). Ignored files: the status
-query lists them (--ignored=matching), so an ignored artifact that run_tests writes into the
-checkout is itself a tree change and sets the cut; none lies before it. What run_tests left before
-the cut outside the checkout (<run_root>/tmp, its HOME and TMPDIR) is not recreated in the fresh
-run root. Exit 0 after the line is written (whatever the episode's exit reason), 2 when a check
-refused the start.
+the requested model, and the manifest is created or must match. A resume starts from a fresh run
+root (its name is neither the parent's checkout_id nor any checkout_id already in a corpus file
+under --out) whose checkout must be clean at the parent's base sha; the prefix stops just before
+the parent's cut turn, so the tree there is base by construction (Plan v2 point 5). Ignored files:
+the status query lists them (--ignored=matching), so an ignored artifact that run_tests writes into
+the checkout is itself a tree change and sets the cut; none lies before it. What run_tests left
+before the cut outside the checkout (<run_root>/tmp, its HOME and TMPDIR) is not recreated in the
+fresh run root. Exit 0 after the line is written (whatever the episode's exit reason), 2 when a
+check refused the start.
 """
 
 from __future__ import annotations
@@ -181,6 +182,10 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
             raise corpus_io.InputRefused("the parent episode is for another task")
         if parent["record"]["resume_parent_episode_id"] is not None:
             raise corpus_io.InputRefused("resume from a fresh (L0) episode, not from a resume run")
+        root = p["run_root"].name
+        used = corpus_io.used_checkouts(p["out_dir"]) | {parent["record"]["checkout_id"]}
+        if root in used:
+            raise corpus_io.InputRefused(f"resume needs a fresh run root; {root} was used before")
         messages, first_turn, offset = resume_prefix(parent, a.cut_turn)
         prefix = parent_prefix(parent["turns"], first_turn)
         expected_base, parent_id = parent["record"]["base_sha"], parent["episode_id"]

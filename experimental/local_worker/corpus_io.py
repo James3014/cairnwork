@@ -198,6 +198,15 @@ def episodes_path(out_dir: Path, dataset: str, model: str, split: str) -> Path:
     return _inside(out_dir / f"episodes-{slug}.jsonl", out_dir)
 
 
+def used_checkouts(out_dir: Path) -> set[str]:
+    """The checkout_id (run root name) of every line already in a corpus file under out_dir."""
+    ids: set[str] = set()
+    for path in sorted(out_dir.glob("episodes-*.jsonl")):
+        for line in _inside(path, out_dir).read_text(encoding="utf-8").splitlines():
+            ids.add(json.loads(line).get("checkout_id"))
+    return ids
+
+
 def append_episode(path: Path, record: dict, out_dir: Path) -> str:
     """Validate, then append one line (O_APPEND, fsync). Returns the line's sha256."""
     validate_record(record)

@@ -224,3 +224,31 @@ def test_request_checks_the_connected_peer(monkeypatch):
     assert endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(
         time.monotonic() + 5
     ) == ["m"]
+
+
+def test_resume_refuses_a_reused_run_root(harness):
+    """Finding 8: a resume must start in a fresh run root, never the parent's or another one
+    already in the corpus (leftover <run_root>/tmp files would carry over)."""
+    run, out = harness
+    parent_root, other_root = "a" * 32, "b" * 32
+    assert run([reply("read_file", path="src/app.py"), EDIT_SRC], "run", root=parent_root) == 0
+    assert run([reply("finish", status="DONE")], "run", "--seed", "1", root=other_root) == 0
+    tr = str(transcript_of(out, lines(out)[0]["episode_id"]))
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, root=parent_root) == 2
+    assert run(done, "resume", "--parent-transcript", tr, root=other_root) == 2
+    assert len(lines(out)) == 2
+    assert run(done, "resume", "--parent-transcript", tr, root="c" * 32) == 0
+    assert lines(out)[2]["checkout_id"] == "c" * 32
+
+
+def test_resume_refuses_the_parent_run_root_even_without_its_line(harness):
+    run, out = harness
+    assert run([reply("read_file", path="src/app.py"), EDIT_SRC], "run", root="d" * 32) == 0
+    tr = str(transcript_of(out, lines(out)[0]["episode_id"]))
+    for f in out.glob("episodes-*.jsonl"):
+        f.unlink()  # the parent's checkout_id is then known only from its transcript
+    assert (
+        run([reply("finish", status="DONE")], "resume", "--parent-transcript", tr, root="d" * 32)
+        == 2
+    )
