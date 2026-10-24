@@ -17,6 +17,7 @@ from local_worker_fakes import META, TASK, World, make_loop, reply
 from experimental.local_worker import episode
 from experimental.local_worker.agent import initial_messages
 from experimental.local_worker.episode_schema import SchemaError, validate_record
+from experimental.local_worker.tools import WorkerIsolationError
 
 
 def _turn(start, end, ran, differs):
@@ -120,3 +121,38 @@ def test_an_interrupted_tool_turn_spans_until_its_tree_was_observed(tmp_path, mo
     bad = dict(rec, cut_900s=dict(rec["cut_900s"], tree_differs_at_limit=True))
     with pytest.raises(SchemaError, match="cut_900s differs"):
         validate_record(bad)
+
+
+def test_an_interrupted_tool_turn_whose_observation_fails_ends_with_the_attempt(
+    tmp_path, monkeypatch
+):
+    """No observation gets attached: the turn still ends when the attempt ended (the end of the
+    cleanup), its tree stays unobserved, and it is not a completed turn at a limit before."""
+    loop, _, _, clock = make_loop(tmp_path, [reply("write_file", path="src/a.py", content="a")])
+    interrupted_at: list[float] = []
+
+    class StatusFails(World):
+        def handle(self, action, args, stdin):
+            if action == "write":
+                interrupted_at.append(loop._own())
+                os.kill(os.getpid(), signal.SIGTERM)
+            if interrupted_at and action in ("sweep", "status"):
+                clock.t += 5.0
+            if interrupted_at and action == "status":
+                raise WorkerIsolationError("status ran as the wrong user")
+            return super().handle(action, args, stdin)
+
+    loop.tools.invoker = StatusFails(clock=clock)
+    before = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, loop.interrupt)
+    try:
+        out = loop.run(initial_messages(TASK))
+    finally:
+        signal.signal(signal.SIGTERM, before)
+    [turn] = out.turns
+    [t_int] = interrupted_at
+    assert turn.tool_ran and turn.tree is None and turn.t_end >= t_int + 10.0
+    rec = episode.build_record(META, out, cut_seconds=t_int + 2.0)
+    validate_record(rec)
+    assert rec["cut_900s"]["turns_completed"] == 0
+    assert rec["cut_900s"]["tree_differs_at_limit"] is None
