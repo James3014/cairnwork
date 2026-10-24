@@ -1,6 +1,6 @@
 """Tool layer of the local worker arm (#88): every tool call runs as _cairnwork_worker.
 
-The agent loop (not written yet; it waits for the PAUSE pilot) may run as the Owner, but it must
+The agent loop (agent.py) may run as the Owner, but it must
 never read the checkout itself: the only text it may hand the model is ``ToolCall.output``, which is
 what the wrapper ``local-worker-tool`` printed while running as the worker account under its own
 Seatbelt profile (knowledge addendum 2026-10-23 §0a item 1). This module therefore opens exactly one
@@ -30,6 +30,9 @@ INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/local-bin/local-worker-
 SUDO = "/usr/bin/sudo"
 REFUSED_EXIT = 64
 TERM_GRACE_SECONDS = 5.0  # after SIGTERM, and again after SIGKILL, before giving up on a wait
+KILL_GRACE_SECONDS = 2 * TERM_GRACE_SECONDS  # how long a timed-out call can outlive its timeout
+SWEEP_TIMEOUT_SECONDS = 10.0  # the sweep after a pytest run or a timed-out tool call
+TOOL_ACTIONS = ("list", "read", "write", "pytest")  # wrapper actions the model's tools use
 START_MARKER = "LOCAL_WORKER_STARTED"  # first line the wrapper prints on stderr: "<marker> <nonce>"
 DEFAULT_MAX_OUTPUT_BYTES = 20_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -42,6 +45,11 @@ Invoker = Callable[[list[str], bytes | None, float], Invoked]
 
 class WorkerIsolationError(RuntimeError):
     """sudo could not start the wrapper as the worker: fail closed, never fall back to the Owner."""
+
+
+class ToolDeadline(TimeoutError):
+    """Not enough time before ``WorkerTools.deadline`` to start a wrapper call and wait it out
+    (its timeout, the kill grace and, for a tool action, the sweep after it): nothing started."""
 
 
 def _nonce_args(nonce: str | None) -> list[str]:
@@ -159,7 +167,9 @@ class ToolCall:
         rec["role"] = "tool_result"
         return rec
 
-    def as_turn(self, tokens_prompt: int, tokens_completion: int, tokens_cached: int) -> dict:
+    def as_turn(
+        self, tokens_prompt: int | None, tokens_completion: int | None, tokens_cached: int | None
+    ) -> dict:
         turn = self.record()
         turn.update(
             tokens_prompt=tokens_prompt,
@@ -170,7 +180,7 @@ class ToolCall:
 
 
 class WorkerTools:
-    """list_dir / read_file / write_file / edit_file / run_tests, each run as the worker.
+    """list_dir / read_file / write_file / edit_file / run_tests / status / numstat, as the worker.
 
     ``mode="worker"`` (the only mode an experiment may use) goes through ``sudo -n -u
     _cairnwork_worker`` and the installed wrapper. ``mode="direct"`` runs a wrapper copy as the
@@ -199,6 +209,11 @@ class WorkerTools:
         self.timeout_seconds = timeout_seconds
         self.identity = WORKER_USER if mode == "worker" else _owner_name()
         self.turn_index = 0
+        # Absolute end (on ``clock``) for every wrapper call, the waits after a timeout and the
+        # sweep included; None: each call just gets timeout_seconds (canary, tests).
+        self.deadline: float | None = None
+        self.clock: Callable[[], float] = time.monotonic
+        self.calls_started = 0  # wrapper processes started: a tool may have changed the tree
 
     # -- the actions -------------------------------------------------------------------------
     def list_dir(self, path: str = ".") -> ToolCall:
@@ -219,6 +234,7 @@ class WorkerTools:
         """Replace the single exact occurrence of ``target``; the text comes from a worker read."""
         tool_args = {"path": path, "target": target, "replacement": replacement}
         started = time.monotonic()
+        budget_end = self.clock() + self.timeout_seconds  # one timeout for the read and the write
         rc, out, err = self._invoke("read", [path], None)
         if rc != 0:
             call = self._log("edit_file", tool_args, rc, out + err, started)
@@ -234,7 +250,10 @@ class WorkerTools:
             note = f"edit_file: target occurs {count} times in {path}; nothing written\n"
             return self._log("edit_file", tool_args, 1, note.encode(), started)
         new = text.replace(target, replacement, 1).encode()
-        rc, out, err = self._invoke("write", [path], new)
+        left = budget_end - self.clock()
+        if left <= 0:
+            return self._log("edit_file", tool_args, None, b"edit_file: no time left\n", started)
+        rc, out, err = self._invoke("write", [path], new, cap=left)
         call = self._log("edit_file", tool_args, rc, out + err, started)
         self._after("write", rc)
         return call
@@ -242,18 +261,44 @@ class WorkerTools:
     def sweep(self) -> ToolCall:
         return self._call("sweep", "sweep", [], {})
 
+    def status(self) -> ToolCall:
+        """Fixed ``git status --porcelain=v2 --branch -z -uall`` of the checkout, as the worker."""
+        return self._call("status", "status", [], {})
+
+    def numstat(self) -> ToolCall:
+        """Fixed ``git diff --numstat -z HEAD`` (untracked files included), as the worker."""
+        return self._call("numstat", "numstat", [], {})
+
     # -- plumbing ----------------------------------------------------------------------------
     def _argv(self, action: str, args: Sequence[str], nonce: str | None = None) -> list[str]:
         build = sudo_argv if self.mode == "worker" else direct_argv
         return build(self.wrapper, action, self.run_root, args, nonce)
 
-    def _invoke(self, action: str, args: Sequence[str], stdin: bytes | None) -> Invoked:
+    def _timeout(self, action: str, cap: float | None) -> float:
+        """The timeout of the next wrapper call: at most timeout_seconds and ``cap``, and short
+        enough that the call, its kill grace and (for a tool action) the sweep after it with its
+        own grace all end by ``deadline``. Raises ToolDeadline when that leaves nothing."""
+        timeout = min(self.timeout_seconds, cap if cap is not None else self.timeout_seconds)
+        if self.deadline is None:
+            return timeout
+        left = self.deadline - self.clock() - KILL_GRACE_SECONDS
+        if action in TOOL_ACTIONS:
+            left -= SWEEP_TIMEOUT_SECONDS + KILL_GRACE_SECONDS
+        if left <= 0 or timeout <= 0:
+            raise ToolDeadline(f"no time left before the deadline for {action}")
+        return min(timeout, left)
+
+    def _invoke(
+        self, action: str, args: Sequence[str], stdin: bytes | None, cap: float | None = None
+    ) -> Invoked:
         # The wrapper prints "<START_MARKER> <nonce>" as the first thing on stderr. Whether it
         # started is decided by that line alone, never by the exit code or by text such as
         # "sudo:" in the output: a test the model wrote may exit 126/127 or print anything.
+        timeout = self._timeout(action, cap)
         nonce = secrets.token_hex(8)
         argv = self._argv(action, args, nonce)
-        rc, out, err = self.invoker(argv, stdin, self.timeout_seconds)
+        self.calls_started += 1
+        rc, out, err = self.invoker(argv, stdin, timeout)
         marker = f"{START_MARKER} {nonce}\n".encode()
         if not err.startswith(marker):
             # No rule, missing binary, refused sudo: the wrapper never ran. Fail closed.
@@ -265,9 +310,9 @@ class WorkerTools:
 
     def _sweep_quietly(self) -> None:
         try:
-            self.sweep()
-        except WorkerIsolationError:
-            pass
+            self._call("sweep", "sweep", [], {}, cap=SWEEP_TIMEOUT_SECONDS)
+        except (WorkerIsolationError, ToolDeadline):
+            pass  # the loop's cleanup sweeps again
 
     def _call(
         self,
@@ -276,9 +321,10 @@ class WorkerTools:
         args: Sequence[str],
         tool_args: dict,
         stdin: bytes | None = None,
+        cap: float | None = None,
     ) -> ToolCall:
         started = time.monotonic()
-        rc, out, err = self._invoke(action, args, stdin)
+        rc, out, err = self._invoke(action, args, stdin, cap)
         call = self._log(action_type, tool_args, rc, out + err, started)
         self._after(action, rc)
         return call
@@ -286,8 +332,9 @@ class WorkerTools:
     def _after(self, action: str, rc: int | None) -> None:
         # Test code can leave processes behind (and a timed-out command certainly may): sweep
         # after every pytest run and every timeout, so nothing keeps changing the checkout.
-        if action != "sweep" and (action == "pytest" or rc is None):
-            self.sweep()
+        # The time for this sweep was kept free when the tool call's timeout was chosen.
+        if action in TOOL_ACTIONS and (action == "pytest" or rc is None):
+            self._call("sweep", "sweep", [], {}, cap=SWEEP_TIMEOUT_SECONDS)
 
     def _log(
         self, action_type: str, tool_args: dict, rc: int | None, raw: bytes, started: float

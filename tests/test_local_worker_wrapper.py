@@ -5,47 +5,24 @@ The worker-mode canary needs the installed wrapper and sudoers rule; it is run b
 addendum. Here the same canary runs as the Owner so Seatbelt regressions show up in CI.
 """
 
+import getpass
+import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from local_worker_fakes import TAG, WRAPPER, make_runs
+from local_worker_fakes import run_wrapper as run
 
-from experimental.local_worker import canary, escapes
-
-WRAPPER = Path(canary.__file__).with_name("local-worker-tool")
-TAG = "0123456789abcdef0123456789abcdef"
+from experimental.local_worker import canary, canary_check, escapes
 
 
 @pytest.fixture
 def runs(tmp_path):
-    runs = (tmp_path / "runs").resolve()
-    (runs / TAG / "checkout" / "sub").mkdir(parents=True)
-    (runs / TAG / "tmp").mkdir()
-    (runs / TAG / "checkout" / ".git").mkdir()
-    (runs / TAG / "checkout" / "a.txt").write_text("hello\n")
-    (runs / ("f" * 32)).mkdir()
-    (runs / ("f" * 32) / "secret.txt").write_text("s\n")
-    return runs
-
-
-def run(runs, *args, stdin=b""):
-    env = dict(
-        os.environ,
-        CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
-        CAIRNWORK_LOCAL_WORKER_PYROOT=sys.base_prefix,
-    )
-    return subprocess.run(
-        ["/bin/sh", str(WRAPPER), *args],
-        input=stdin,
-        capture_output=True,
-        env=env,
-        cwd="/",
-        check=False,
-    )
+    return make_runs(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -71,6 +48,9 @@ def run(runs, *args, stdin=b""):
         ("write", "{runs}/" + TAG, "sub"),  # existing directory
         ("read", "{runs}/" + TAG, "a.txt", "extra"),
         ("sweep", "{runs}/" + TAG, "extra"),
+        ("status", "{runs}/" + TAG, "--porcelain"),  # fixed queries take no arguments
+        ("numstat", "{runs}/" + TAG, "HEAD~1"),
+        ("status", "{runs}/" + "f" * 32),  # no checkout
         ("pytest", "{runs}/" + TAG, "-q"),  # no run venv
         ("exec", "{runs}/" + TAG, "a.txt"),
         ("read",),
@@ -158,8 +138,8 @@ def test_canary_direct_mode_denies_reads_writes_and_network(tmp_path):
     assert escapes["code escape signal_other_sandbox"]["result"] == "DENIED"
     assert escapes["code escape signal_outside_sandbox"]["result"] == "DENIED"
     assert escapes["code escape signal_same_sandbox_control"]["result"] == "ALLOWED"
+    canary_check.check_evidence(report, mode="direct", user=getpass.getuser())  # names match
     digest = report_path.with_suffix(".json.sha256").read_text().split()[0]
-    import hashlib
 
     assert digest == hashlib.sha256(report_path.read_bytes()).hexdigest()
     assert list(runs.iterdir()) == []  # fixture and call log removed
