@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from local_worker_fakes import BASE_SHA, cli_harness, lines, reply
 
-from experimental.local_worker import corpus_io, endpoint, episode, gitstate
+from experimental.local_worker import corpus_io, cuts, endpoint, episode, gitstate
 from experimental.local_worker.episode_schema import TOP_EXTRA, TOP_SPEC, SchemaError
 from experimental.local_worker.episode_schema import validate_record as validate
 
@@ -292,7 +292,7 @@ def test_status_parser_handles_renames_untracked_and_garbage():
     ],
 )
 def test_test_path_rule(path, test):
-    assert episode.is_test_path(path) is test
+    assert cuts.is_test_path(path) is test
 
 
 def test_append_validates_before_writing(tmp_path):

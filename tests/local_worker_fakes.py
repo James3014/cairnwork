@@ -68,7 +68,7 @@ class World:
         rc, out = self.handle(action, args, stdin or b"")
         return rc, out, f"{tools.START_MARKER} {nonce}\n".encode()
 
-    def handle(self, action: str, args: list[str], stdin: bytes) -> tuple[int, bytes]:
+    def handle(self, action: str, args: list[str], stdin: bytes) -> tuple[int | None, bytes]:
         if action == "list":
             return 0, "\n".join(sorted(self.files)).encode()
         if action == "read":

@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from local_worker_fakes import META, TASK, World, cli_harness, lines, make_loop, reply
 
-from experimental.local_worker import endpoint, episode, redact, tools
+from experimental.local_worker import cuts, endpoint, episode, redact, tools
 from experimental.local_worker.agent import Limits, RefusedStart, initial_messages
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 
@@ -323,7 +323,7 @@ def test_manifest_states_the_cut_definition(harness):
     run, out = harness
     run([reply("read_file", path="src/app.py"), EDIT_SRC], "run")
     manifest = json.loads((out / "manifest.json").read_text())
-    assert manifest["cut_definition"] == episode.CUT_DEFINITION
+    assert manifest["cut_definition"] == cuts.CUT_DEFINITION
     assert (
         "§3/§8" in manifest["cut_definition"] and "first_source_edit" in manifest["cut_definition"]
     )
@@ -358,21 +358,22 @@ def test_validator_recomputes_pre_cut_values_from_the_turns(tmp_path, cut, key, 
 
 def test_validator_refuses_a_missing_cut_when_the_tree_changed(tmp_path):
     rec = _record(tmp_path, [EDIT_SRC])
-    no_cut = {"cut_occurred": False, **dict.fromkeys(episode.CUT_FIELDS[1:])}
-    no_source = {"occurred": False, **dict.fromkeys(episode.SOURCE_FIELDS[1:])}
+    no_cut = {"cut_occurred": False, **dict.fromkeys(cuts.CUT_FIELDS[1:-1]), "cut_status": "NO_CUT"}
+    no_source = {"occurred": False, **dict.fromkeys(cuts.SOURCE_FIELDS[1:-1])}
+    no_source["cut_status"] = "NO_CUT"
     with pytest.raises(SchemaError):
         validate_record({**rec, "first_edit_cut": no_cut, "first_source_edit": no_source})
 
 
 def test_validator_ties_the_edit_cut_to_the_first_changed_tree(tmp_path):
-    from experimental.local_worker import episode_schema
+    from experimental.local_worker import schema_cuts
 
     replies = [reply("write_file", path="tests/test_new.py", content="x"), EDIT_SRC]
     rec = _record(tmp_path, replies)
-    reads, tokens, wall, missing = episode_schema._pre_cut(rec["turns"], 1)
+    reads, tokens, wall, missing = schema_cuts.pre_cut(rec["turns"], 1)
     late: dict[str, Any] = dict(rec["first_edit_cut"], cut_turn_index=1)
     late.update(pre_cut_read_actions=reads, pre_cut_tokens_accum=tokens)
     late.update(pre_cut_wall_seconds=wall, pre_cut_turns_missing_usage=missing)
     # self-consistent, but turn 0 changed the tree first
-    with pytest.raises(SchemaError, match="first turn whose tree differs"):
+    with pytest.raises(SchemaError, match="first observed"):
         validate_record({**rec, "first_edit_cut": late})

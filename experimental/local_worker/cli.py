@@ -49,9 +49,9 @@ from experimental.local_worker.agent_protocol import (
     TOOL_SCHEMAS,
     TOOLS_ABSENT,
 )
+from experimental.local_worker.cuts import CUT_DEFINITION
 from experimental.local_worker.endpoint import DEFAULT_URL, EndpointError, LoopbackEndpoint
 from experimental.local_worker.episode import (
-    CUT_DEFINITION,
     NULL_RULE,
     PARENT_FIELDS,
     SCHEMA_VERSION,
@@ -103,7 +103,9 @@ def resume_prefix(parent: dict, cut_turn: int | None) -> tuple[list[dict], int, 
     lists ignored files, so creating one is the cut); what run_tests left before the cut outside
     the checkout (<run_root>/tmp) is not recreated in the fresh run root."""
     cut = parent["record"]["first_edit_cut"]
-    limit: int | None = cut["cut_turn_index"] if cut["cut_occurred"] else None
+    if cut["cut_status"] == "UNOBSERVED":  # Codex B7: an unknown tree is no clean prefix
+        raise corpus_io.InputRefused("the parent's tree was not observed before any cut")
+    limit: int | None = cut["cut_turn_index"] if cut["cut_status"] == "CUT" else None
     chosen = cut_turn if cut_turn is not None else limit
     if chosen is None:
         raise corpus_io.InputRefused("the parent has no cut: pass --cut-turn")

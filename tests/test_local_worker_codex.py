@@ -219,3 +219,109 @@ def test_a_reply_read_after_the_deadline_is_a_timeout(monkeypatch):
     )
     with pytest.raises(endpoint.EndpointTimeout):
         late.models(time.monotonic() + 5)
+
+
+# -- B7: a tree that was never observed is an indeterminate cut, never "no edit" -----------------
+class BlindWorld(World):
+    """Status answers for the base, then fails ``blind`` times (exit 3), then answers again."""
+
+    def __init__(self, blind: int, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.blind, self.statuses = blind, 0
+
+    def handle(self, action: str, args: list[str], stdin: bytes) -> tuple[int | None, bytes]:
+        if action == "status":
+            self.statuses += 1
+            if 1 < self.statuses <= 1 + self.blind:
+                return 3, b"fatal: could not open directory\n"
+        return super().handle(action, args, stdin)
+
+
+def test_an_edit_never_observed_is_an_unobserved_cut(tmp_path):
+    rec, world = _record(tmp_path, [EDIT_SRC], BlindWorld(blind=2))
+    edit, source = rec["first_edit_cut"], rec["first_source_edit"]
+    assert rec["termination"]["abort_cause"] == "status_unavailable"
+    assert (edit["cut_status"], edit["cut_occurred"]) == ("UNOBSERVED", None)
+    assert (source["cut_status"], source["occurred"]) == ("UNOBSERVED", None)
+    assert rec["turns"][0]["tool_ran"] and rec["turns"][0]["tree_differs_from_base"] is None
+    assert rec["verification"]["patch_lines_added"] == 1  # the edit happened; the cut is unknown
+    assert rec["cut_900s"]["tree_differs_at_limit"] is None
+    no_edit = {**edit, "cut_occurred": False, "cut_status": "NO_CUT"}
+    no_source = {**source, "occurred": False, "cut_status": "NO_CUT"}
+    with pytest.raises(SchemaError):
+        validate_record({**rec, "first_edit_cut": no_edit, "first_source_edit": no_source})
+    with pytest.raises(SchemaError):
+        validate_record({**rec, "first_edit_cut": {**edit, "cut_occurred": False}})
+    with pytest.raises(SchemaError, match="never observed"):
+        validate_record({**rec, "first_source_edit": no_source})
+
+
+def test_a_run_stopped_before_its_status_is_observed_in_cleanup(tmp_path):
+    rec, world = _record(tmp_path, [EDIT_SRC], BlindWorld(blind=1))
+    edit = rec["first_edit_cut"]
+    assert rec["termination"]["abort_cause"] == "status_unavailable"
+    assert (edit["cut_status"], edit["cut_turn_index"], edit["target_file"]) == (
+        "CUT",
+        0,
+        "src/app.py",
+    )
+    assert [c[0] for c in world.calls][-3:] == ["sweep", "numstat", "status"]
+
+
+def test_an_unobserved_parent_is_no_clean_prefix_for_resume(harness, monkeypatch):
+    run, out = harness
+    monkeypatch.setattr("local_worker_fakes.World", lambda: BlindWorld(blind=2))
+    assert run([EDIT_SRC], "run") == 0
+    monkeypatch.setattr("local_worker_fakes.World", World)  # not undo(): the harness stays
+    [parent] = lines(out)
+    assert parent["first_edit_cut"]["cut_status"] == "UNOBSERVED"
+    tr = str(out / "private" / parent["episode_id"] / "transcript.json")
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, "--cut-turn", "0") == 2
+    assert len(lines(out)) == 1
+    run([reply("read_file", path="src/app.py"), EDIT_SRC], "run")  # the same harness resumes
+    tr = str(out / "private" / lines(out)[1]["episode_id"] / "transcript.json")
+    assert run(done, "resume", "--parent-transcript", tr) == 0
+
+
+def test_a_turn_whose_tool_never_ran_has_no_tree(tmp_path):
+    rec, _ = _record(tmp_path, [reply("read_file", path="src/app.py")])
+    turn = {**rec["turns"][-1]}  # finish: no tool ran
+    assert turn["tool_ran"] is False and turn["tree_differs_from_base"] is None
+    with pytest.raises(SchemaError):
+        validate_record(
+            {**rec, "turns": [*rec["turns"][:-1], {**turn, "tree_differs_from_base": False}]}
+        )
+
+
+class DeadlineWorld(BlindWorld):
+    """The write times out (11 s) and uses the whole kill grace, ending at 1120; every status,
+    sweep and numstat after the base uses its timeout plus its grace (20 s)."""
+
+    def handle(self, action: str, args: list[str], stdin: bytes) -> tuple[int | None, bytes]:
+        assert self.clock is not None
+        if action == "write":  # the file is written, but the call reports a timeout
+            self.clock.t += 11 + tools.KILL_GRACE_SECONDS
+            return None, super().handle(action, args, stdin)[1]
+        if action in ("status", "sweep", "numstat") and self.clock() > 1001:
+            self.clock.t += 20  # sweep after the write to 1140, then 1160, 1180, 1200
+        return super().handle(action, args, stdin)
+
+
+def test_the_late_status_never_runs_past_max_wall_seconds(tmp_path):
+    """The edit's write ends at the loop deadline; the failed status, the sweep and numstat
+    each use their whole third of the reserve, so the late status has no time left."""
+    loop, world, _, clock = make_loop(
+        tmp_path,
+        [EDIT_SRC],
+        DeadlineWorld(blind=1),
+        max_wall_seconds=200,
+        cleanup_reserve_seconds=60,
+        model_seconds=99,
+    )
+    start = clock()
+    out = loop.run(initial_messages(TASK))
+    assert 195 < clock() - start <= 200
+    rec = episode.build_record(META, out)
+    validate_record(rec)
+    assert rec["first_edit_cut"]["cut_status"] == "UNOBSERVED"

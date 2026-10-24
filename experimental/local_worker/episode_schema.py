@@ -10,25 +10,29 @@ from __future__ import annotations
 from typing import Any
 
 from experimental.local_worker.episode import (
-    CUT_FIELDS,
     EXIT_REASONS,
     PARENT_FIELDS,
-    READ_ACTIONS,
     SCHEMA_VERSION,
-    SOURCE_FIELDS,
     VERIFICATION_POST_STEP,
     token_totals,
 )
 from experimental.local_worker.redact import (
-    MAX_CHANGED_PATHS,
     PUBLIC_ARGS,
     TEXT_ARGS,
     is_digest,
     is_public_path,
 )
-
-STR, INT, FLOAT, BOOL, DICT, LIST = str, int, (int, float), bool, dict, list
-PATH = (str, dict)  # a path, or {sha256, bytes} when longer than redact.MAX_PATH_CHARS
+from experimental.local_worker.schema_base import (
+    BOOL,
+    DICT,
+    FLOAT,
+    INT,
+    LIST,
+    STR,
+    SchemaError,
+    check,
+)
+from experimental.local_worker.schema_cuts import check_cuts
 
 TOP_SPEC: dict[str, tuple[Any, bool]] = {  # spec §2: (type, nullable)
     "episode_id": (STR, False),
@@ -70,34 +74,6 @@ TOP_EXTRA: dict[str, tuple[Any, bool]] = {  # Plan v2 point 10 and the bindings
     "parent_pre_cut_wall_seconds": (FLOAT, True),
     "parent_pre_cut_turns_missing_usage": (INT, True),
 }
-CUT: dict[str, tuple[Any, bool]] = dict(
-    zip(
-        CUT_FIELDS,
-        [
-            (BOOL, False),
-            (INT, True),
-            (PATH, True),
-            (BOOL, True),
-            (INT, True),
-            (INT, True),
-            (FLOAT, True),
-            (STR, True),
-            (BOOL, True),
-            (LIST, True),
-            (INT, True),
-            (INT, True),
-        ],
-        strict=True,
-    )
-)
-SOURCE: dict[str, tuple[Any, bool]] = dict(
-    zip(
-        SOURCE_FIELDS,
-        [(BOOL, False), (INT, True), (PATH, True), (STR, True), (INT, True), (INT, True)]
-        + [(FLOAT, True), (INT, True)],
-        strict=True,
-    )
-)
 VERIFICATION: dict[str, tuple[Any, bool]] = {
     "exit_reason": (STR, False),
     "patch_lines_added": (INT, True),
@@ -143,33 +119,13 @@ TURN: dict[str, tuple[Any, bool]] = {
     "usage_status": (STR, False),
     "t_start_seconds": (FLOAT, False),
     "t_end_seconds": (FLOAT, False),
+    "tool_ran": (BOOL, False),
     "tree_differs_from_base": (BOOL, True),
     "extra_tool_calls_ignored": (INT, False),
     "exec_identity": (STR, True),
     "isolation": (STR, True),
 }
 USAGE_STATES = ("ok", "no_cache_field", "malformed", "missing")
-
-
-class SchemaError(ValueError):
-    """A line that does not match the frozen schema is never appended."""
-
-
-def _check(obj: Any, schema: dict[str, tuple[Any, bool]], where: str) -> None:
-    if not isinstance(obj, dict):
-        raise SchemaError(f"{where} is not an object")
-    if set(obj) != set(schema):
-        extra, missing = sorted(set(obj) - set(schema)), sorted(set(schema) - set(obj))
-        raise SchemaError(f"{where}: unexpected keys {extra}, missing keys {missing}")
-    for key, (typ, nullable) in schema.items():
-        value = obj[key]
-        if value is None:
-            if not nullable:
-                raise SchemaError(f"{where}.{key} must not be null")
-            continue
-        bad_bool = isinstance(value, bool) and typ is not BOOL
-        if bad_bool or not isinstance(value, typ):
-            raise SchemaError(f"{where}.{key} has type {type(value).__name__}")
 
 
 def _check_tool_args(turn: dict, where: str) -> None:
@@ -194,60 +150,12 @@ def _check_tool_args(turn: dict, where: str) -> None:
 
 def _check_turns(turns: list) -> None:
     for n, turn in enumerate(turns):
-        _check(turn, TURN, f"turns[{n}]")
+        check(turn, TURN, f"turns[{n}]")
         _check_tool_args(turn, f"turns[{n}].tool_args")
         if turn["usage_status"] not in USAGE_STATES:
             raise SchemaError(f"turns[{n}].usage_status {turn['usage_status']!r}")
         if turn["turn_index"] != turns[0]["turn_index"] + n:
             raise SchemaError(f"turns[{n}].turn_index is not consecutive")
-
-
-def _check_cut(cut: dict, fields: tuple[str, ...], required: tuple[str, ...], where: str) -> None:
-    """No cut: every other field null. A cut: the required fields set, and the token sum null
-    exactly when some turn before the cut lacked usage (pre_cut_turns_missing_usage > 0)."""
-    if not cut[fields[0]]:
-        if any(cut[k] is not None for k in fields[1:]):
-            raise SchemaError(f"{where}: no cut, so every other field must be null")
-        return
-    for key in required:
-        if cut[key] is None:
-            raise SchemaError(f"{where}.{key} must be set when a cut occurred")
-    accum = cut["pre_cut_tokens_accum" if "pre_cut_tokens_accum" in cut else "pre_tokens_accum"]
-    if (accum is None) != (cut["pre_cut_turns_missing_usage"] > 0):
-        raise SchemaError(f"{where}: token sum null exactly when a pre-cut turn lacks usage")
-
-
-def _check_cuts(rec: dict) -> None:
-    edit, source = rec["first_edit_cut"], rec["first_source_edit"]
-    _check(edit, CUT, "first_edit_cut")
-    _check(source, SOURCE, "first_source_edit")
-    required = ("cut_turn_index", "pre_cut_wall_seconds", "cut_cause", "changed_paths")
-    required += ("changed_paths_total",)
-    _check_cut(edit, CUT_FIELDS, (*required, "pre_cut_turns_missing_usage"), "first_edit_cut")
-    required = ("turn_index", "path", "cause", "pre_wall_seconds", "pre_cut_turns_missing_usage")
-    _check_cut(source, SOURCE_FIELDS, required, "first_source_edit")
-    _check_paths(edit, source)
-    if source["occurred"] and not (
-        edit["cut_occurred"] and edit["cut_turn_index"] <= source["turn_index"]
-    ):
-        raise SchemaError("first_source_edit precedes the first tree change")
-
-
-def _check_paths(edit: dict, source: dict) -> None:
-    """Review finding 9: every path is short or a digest; changed_paths keeps at most
-    MAX_CHANGED_PATHS entries and changed_paths_total counts them all."""
-    for value in (edit["target_file"], source["path"]):
-        if value is not None and not is_public_path(value):
-            raise SchemaError("a cut path must be a short path or {sha256, bytes}")
-    paths, total = edit["changed_paths"], edit["changed_paths_total"]
-    if paths is None:
-        if total is not None:
-            raise SchemaError("changed_paths_total without changed_paths")
-        return
-    if total is None or len(paths) != min(total, MAX_CHANGED_PATHS):
-        raise SchemaError("changed_paths must hold min(changed_paths_total, MAX_CHANGED_PATHS)")
-    if not all(is_public_path(v) for v in paths):
-        raise SchemaError("changed_paths entries must be short paths or {sha256, bytes}")
 
 
 def _check_counts(rec: dict) -> None:
@@ -279,53 +187,18 @@ def _check_parent(rec: dict) -> None:
         raise SchemaError("wall_clock_seconds must be parent pre-cut seconds + own seconds")
 
 
-def _pre_cut(turns: list, index: int) -> tuple[int, int | None, float, int]:
-    """(read actions, token sum, wall seconds, turns missing usage) before turn ``index``,
-    recomputed from the public turns exactly as episode._pre computes them."""
-    pos = index - turns[0]["turn_index"]
-    if not 0 <= pos < len(turns):
-        raise SchemaError(f"cut turn {index} is not among the turns")
-    keys = ("tokens_prompt", "tokens_completion", "tokens_cached")
-    before = turns[:pos]
-    values = [t[k] for t in before for k in keys]
-    tokens = None if any(v is None for v in values) else sum(values)
-    missing = sum(any(t[k] is None for k in keys) for t in before)
-    reads = sum(t["action_type"] in READ_ACTIONS for t in before)
-    return reads, tokens, turns[pos]["t_start_seconds"], missing
-
-
-def _check_pre_cut(rec: dict) -> None:
-    """Review finding 10: each cut's pre-cut counts equal those recomputed from the turns, and
-    the edit cut is the first turn whose observed tree differs from base."""
-    turns, edit, source = rec["turns"], rec["first_edit_cut"], rec["first_source_edit"]
-    differs = [n for n, t in enumerate(turns) if t["tree_differs_from_base"] is True]
-    if edit["cut_occurred"]:
-        if not differs or turns[differs[0]]["turn_index"] != edit["cut_turn_index"]:
-            raise SchemaError("first_edit_cut is not the first turn whose tree differs from base")
-        got = [edit[k] for k in CUT_FIELDS if k.startswith("pre_cut_")]
-        if got != list(_pre_cut(turns, edit["cut_turn_index"])):
-            raise SchemaError("first_edit_cut pre-cut values differ from the turns before it")
-    elif differs:
-        raise SchemaError("a turn's tree differs from base but first_edit_cut did not occur")
-    if source["occurred"]:
-        got = [source[k] for k in SOURCE_FIELDS[4:]]
-        if got != list(_pre_cut(turns, source["turn_index"])):
-            raise SchemaError("first_source_edit pre values differ from the turns before it")
-
-
 def validate_record(rec: Any) -> None:
     """Raise SchemaError unless ``rec`` is a complete, consistent corpus line."""
-    _check(rec, {**TOP_SPEC, **TOP_EXTRA}, "record")
+    check(rec, {**TOP_SPEC, **TOP_EXTRA}, "record")
     if rec["schema_version"] != SCHEMA_VERSION:
         raise SchemaError(f"schema_version {rec['schema_version']!r}")
-    _check_cuts(rec)
-    _check(rec["verification"], VERIFICATION, "verification")
+    check(rec["verification"], VERIFICATION, "verification")
     if rec["verification"]["exit_reason"] not in EXIT_REASONS:
         raise SchemaError(f"exit_reason {rec['verification']['exit_reason']!r}")
-    _check(rec["spec_feedback"], SPEC_FEEDBACK, "spec_feedback")
-    _check(rec["termination"], TERMINATION, "termination")
-    _check(rec["cut_900s"], CUT_900S, "cut_900s")
-    _check(rec["tokens_total"], TOKENS_TOTAL, "tokens_total")
+    check(rec["spec_feedback"], SPEC_FEEDBACK, "spec_feedback")
+    check(rec["termination"], TERMINATION, "termination")
+    check(rec["cut_900s"], CUT_900S, "cut_900s")
+    check(rec["tokens_total"], TOKENS_TOTAL, "tokens_total")
     _check_turns(rec["turns"])
     _check_counts(rec)
-    _check_pre_cut(rec)
+    check_cuts(rec)

@@ -19,53 +19,24 @@ turn before it left the tree at base.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from experimental.local_worker.cuts import (
+    READ_ACTIONS,
+    _sum,
+    differs,
+    first_edit_cut,
+    first_source_edit,
+    missing_usage,
+)
 from experimental.local_worker.gitstate import TreeState
-from experimental.local_worker.redact import public_args, public_path, public_paths
+from experimental.local_worker.redact import public_args
 
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
 TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed before the cut"
-CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
-    "first_edit_cut: the first turn after which the worker-observed git status (porcelain v2,"
-    " -uall, --ignored=matching) differs from base in any path; test files, doc files and"
-    " run_tests artifacts count. This deviates from EPISODE_CORPUS_SPEC_ZH §3/§8 (first edit of"
-    " a source file) per Plan v2 point 4, so that resume from it is valid. first_source_edit"
-    " carries the spec's cut: the first observed change to a path that is not a test, doc or"
-    " git-ignored file."
-)
 EXIT_REASONS = ("COMPLETED", "TURN_LIMIT", "TIMEOUT", "ERROR_ABORT")
-READ_ACTIONS = ("read_file", "list_dir", "search")
-EDIT_ACTIONS = ("write_file", "edit_file")
-DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
-CUT_FIELDS = (
-    "cut_occurred",
-    "cut_turn_index",
-    "target_file",
-    "is_test_file",
-    "pre_cut_read_actions",
-    "pre_cut_tokens_accum",
-    "pre_cut_wall_seconds",
-    "cut_cause",
-    "cut_ambiguous",
-    "changed_paths",
-    "changed_paths_total",
-    "pre_cut_turns_missing_usage",
-)
-SOURCE_FIELDS = (
-    "occurred",
-    "turn_index",
-    "path",
-    "cause",
-    "pre_read_actions",
-    "pre_tokens_accum",
-    "pre_wall_seconds",
-    "pre_cut_turns_missing_usage",
-)
-_TEST_NAME = re.compile(r"(^|[_.-])tests?([_.-]|$)")
 
 
 @dataclass
@@ -90,129 +61,8 @@ class TurnLog:
     isolation: str | None = None
     extra_tool_calls_ignored: int = 0
     tree: TreeState | None = None  # after a tool call; None when no tool ran
+    tool_ran: bool = False  # a wrapper process of the tool started (it may have changed the tree)
     t_end: float = 0.0
-
-
-def is_test_path(path: str) -> bool:
-    """In a tests/test/testing directory, conftest.py, or a name with a test/tests word part
-    (test_x.py, x_test.py, tests.py; not attestation.py)."""
-    parts = [p.lower() for p in path.split("/") if p]
-    if not parts:
-        return False
-    name = parts[-1]
-    in_test_dir = any(p in ("tests", "test", "testing") for p in parts[:-1])
-    return in_test_dir or name == "conftest.py" or bool(_TEST_NAME.search(name.rsplit(".", 1)[0]))
-
-
-def is_doc_path(path: str) -> bool:
-    parts = [p.lower() for p in path.split("/") if p]
-    if not parts:
-        return False
-    name = parts[-1]
-    return (
-        name.endswith(DOC_SUFFIXES)
-        or any(p in ("docs", "doc") for p in parts[:-1])
-        or name.startswith(("readme", "changelog", "license"))
-    )
-
-
-def differs(tree: TreeState | None, base: TreeState) -> bool | None:
-    if tree is None or not tree.observed:
-        return None
-    return tree.head != base.head or tree.entries != base.entries
-
-
-def _sum(values: list[int | None]) -> int | None:
-    return None if any(v is None for v in values) else sum(v for v in values if v is not None)
-
-
-def _cut_cause(turn: TurnLog, changed: list[str]) -> tuple[str, bool]:
-    path = turn.tool_args.get("path")
-    if turn.action_type in EDIT_ACTIONS and turn.exit_code == 0 and path in changed:
-        return turn.action_type, changed != [path]
-    if turn.action_type == "run_test":
-        return "run_tests_side_effect", True
-    return "other", True
-
-
-def is_source_path(path: str) -> bool:
-    """The spec's original edit target: neither a test file nor a doc file."""
-    return not is_test_path(path) and not is_doc_path(path)
-
-
-def missing_usage(t: TurnLog) -> bool:
-    """A turn whose token triple is incomplete (no, malformed or cache-less usage): any sum over
-    it is null, and this counter says how many such turns made it null."""
-    return any(v is None for v in t.tokens)
-
-
-def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
-    """(position, turn, changed paths) of the first turn whose observed tree differs from base
-    (in a source path, when ``source_only``), else None."""
-    for n, turn in enumerate(turns):
-        if not differs(turn.tree, base):
-            continue
-        assert turn.tree is not None
-        changed = [p for p in turn.tree.paths() if p not in base.paths()] or turn.tree.paths()
-        if source_only:  # git-ignored paths (status "!") are artifacts, never source
-            ignored = {e[2:] for e in turn.tree.entries if e.startswith("! ")}
-            changed = [p for p in changed if is_source_path(p) and p not in ignored]
-        if changed or not source_only:
-            return n, turn, changed
-    return None
-
-
-def _pre(before: list[TurnLog], turn: TurnLog) -> tuple[int, int | None, float, int]:
-    reads = sum(t.action_type in READ_ACTIONS for t in before)
-    tokens = _sum([v for t in before for v in t.tokens])
-    return reads, tokens, round(turn.t_start, 3), sum(missing_usage(t) for t in before)
-
-
-def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
-    """The spec §3 object, cut where the tree first differs from base (any path: what resume
-    needs), plus cut_cause, cut_ambiguous, changed_paths (at most MAX_CHANGED_PATHS, the full count
-    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path."""
-    found = _first_change(turns, base, source_only=False)
-    if found is None:
-        return {"cut_occurred": False, **dict.fromkeys(CUT_FIELDS[1:])}
-    n, turn, changed = found
-    cause, ambiguous = _cut_cause(turn, changed)
-    target = turn.tool_args.get("path") if cause in EDIT_ACTIONS else (changed or [None])[0]
-    reads, tokens, wall, missing = _pre(turns[:n], turn)
-    return {
-        "cut_occurred": True,
-        "cut_turn_index": turn.index,
-        "target_file": public_path(target) if isinstance(target, str) else None,
-        "is_test_file": is_test_path(target) if isinstance(target, str) else None,
-        "pre_cut_read_actions": reads,
-        "pre_cut_tokens_accum": tokens,
-        "pre_cut_wall_seconds": wall,
-        "cut_cause": cause,
-        "cut_ambiguous": ambiguous,
-        "changed_paths": public_paths(changed),
-        "changed_paths_total": len(changed),
-        "pre_cut_turns_missing_usage": missing,
-    }
-
-
-def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
-    """The spec's original cut: the first turn whose observed changed paths include a source
-    file (is_source_path, and not git-ignored). It equals first_edit_cut unless a test, doc or
-    run_tests artifact changed the tree first; resume always uses first_edit_cut."""
-    found = _first_change(turns, base, source_only=True)
-    if found is None:
-        return {"occurred": False, **dict.fromkeys(SOURCE_FIELDS[1:])}
-    n, turn, changed = found
-    cause, _ = _cut_cause(turn, changed)
-    path = str(turn.tool_args["path"]) if cause in EDIT_ACTIONS else changed[0]  # in changed
-    reads, tokens, wall, missing = _pre(turns[:n], turn)
-    return dict(
-        zip(
-            SOURCE_FIELDS,
-            (True, turn.index, public_path(path), cause, reads, tokens, wall, missing),
-            strict=True,
-        )
-    )
 
 
 def public_turn(t: TurnLog, base: TreeState) -> dict:
@@ -233,7 +83,8 @@ def public_turn(t: TurnLog, base: TreeState) -> dict:
         "usage_status": t.usage_status,
         "t_start_seconds": round(t.t_start, 3),
         "t_end_seconds": round(t.t_end, 3),
-        "tree_differs_from_base": differs(t.tree, base),
+        "tool_ran": t.tool_ran,
+        "tree_differs_from_base": differs(t.tree, base) if t.tool_ran else None,
         "extra_tool_calls_ignored": t.extra_tool_calls_ignored,
         "exec_identity": t.exec_identity,
         "isolation": t.isolation,
@@ -279,16 +130,22 @@ def episode_usage_status(turns: list[dict]) -> str:
     return "missing" if states == {"missing"} else "partial"
 
 
+def tree_at(turns: list[dict]) -> bool | None:
+    """Whether the tree differed from base after these turns: the observation after the last
+    turn whose tool ran (null if that one was never observed); False if no tool ran (base)."""
+    ran = [t for t in turns if t["tool_ran"]]
+    return ran[-1]["tree_differs_from_base"] if ran else False
+
+
 def cut_at(turns: list[dict], exit_reason: str, wall: float, limit: float) -> dict:
     """What the episode would have been with a ``limit``-second wall clock (addendum §0a item 4)."""
     done = [t for t in turns if t["t_end_seconds"] <= limit]
-    seen = [t["tree_differs_from_base"] for t in done if t["tree_differs_from_base"] is not None]
     return {
         "limit_seconds": limit,
         "within_limit": wall <= limit,
         "exit_reason": exit_reason if wall <= limit else "TIMEOUT",
         "turns_completed": len(done),
-        "tree_differs_at_limit": seen[-1] if seen else None,
+        "tree_differs_at_limit": tree_at(done),
     }
 
 

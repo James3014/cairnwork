@@ -5,10 +5,11 @@ from __future__ import annotations
 import pytest
 from local_worker_fakes import BASE_SHA, META, TASK, World, make_loop, reply
 
-from experimental.local_worker import agent_protocol, episode, tools
+from experimental.local_worker import agent_protocol, cuts, episode, tools
 from experimental.local_worker.agent import RefusedStart, initial_messages
+from experimental.local_worker.cuts import first_edit_cut
 from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
-from experimental.local_worker.episode import build_record, first_edit_cut
+from experimental.local_worker.episode import build_record
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 
 EDIT_SRC = reply("edit_file", path="src/app.py", target="x = 1", replacement="x = 2")
@@ -57,7 +58,7 @@ def test_a_doc_file_write_is_the_cut(tmp_path):
 def test_no_edit_means_no_cut_and_null_fields(tmp_path):
     cut = cut_of(tmp_path, [reply("read_file", path="src/app.py")])
     assert cut["cut_occurred"] is False
-    assert all(cut[k] is None for k in episode.CUT_FIELDS[1:])
+    assert all(cut[k] is None for k in cuts.CUT_FIELDS[1:-1]) and cut["cut_status"] == "NO_CUT"
 
 
 def test_edit_at_turn_zero_has_observed_zero_counts(tmp_path):
@@ -153,7 +154,8 @@ def test_wall_clock_limit_uses_one_deadline(tmp_path):
     )
     assert rec["total_turns"] == 2 and out.exit_reason == "TIMEOUT"
     assert rec["turns"][1]["error_category"] == "TIMEOUT"  # replied at 1940: its tool never ran
-    assert rec["turns"][1]["exit_code"] is None
+    assert rec["turns"][1]["exit_code"] is None and rec["turns"][1]["tool_ran"] is False
+    assert rec["first_edit_cut"]["cut_status"] == "NO_CUT"  # nothing ran: still no change
     assert [c[0] for c in world.calls].count("read") == 1
     assert rec["termination"]["cleanup"] == "ok"
 
@@ -273,7 +275,7 @@ SOURCE_PRE = ("pre_read_actions", "pre_tokens_accum", "pre_wall_seconds")
 EDIT_PRE = ("pre_cut_read_actions", "pre_cut_tokens_accum", "pre_cut_wall_seconds")
 
 
-def cuts(tmp_path, replies, world=None) -> tuple[dict, dict]:
+def cuts_of(tmp_path, replies, world=None) -> tuple[dict, dict]:
     rec = run(tmp_path, replies, world)[1]
     return rec["first_edit_cut"], rec["first_source_edit"]
 
@@ -284,7 +286,7 @@ def test_a_test_written_first_splits_the_two_cuts(tmp_path):
         reply("write_file", path="tests/test_new.py", content="def test_x(): pass\n"),
         EDIT_SRC,
     ]
-    edit, source = cuts(tmp_path, replies)
+    edit, source = cuts_of(tmp_path, replies)
     assert edit["cut_turn_index"] == 1 and edit["target_file"] == "tests/test_new.py"
     assert source["occurred"] and source["turn_index"] == 2
     assert (source["path"], source["cause"]) == ("src/app.py", "edit_file")
@@ -296,23 +298,24 @@ def test_a_test_written_first_splits_the_two_cuts(tmp_path):
 def test_an_ignored_run_tests_artifact_first_splits_the_two_cuts(tmp_path):
     world = World()
     world.pytest_writes = {"out.log": "log\n"}  # .gitignore'd, still listed by status
-    edit, source = cuts(tmp_path, [reply("run_tests"), EDIT_SRC], world)
+    edit, source = cuts_of(tmp_path, [reply("run_tests"), EDIT_SRC], world)
     assert edit["cut_turn_index"] == 0 and edit["cut_cause"] == "run_tests_side_effect"
     assert edit["changed_paths"] == ["out.log"]
     assert (source["turn_index"], source["path"], source["cause"]) == (1, "src/app.py", "edit_file")
 
 
 def test_a_source_edit_first_makes_the_two_cuts_equal(tmp_path):
-    edit, source = cuts(tmp_path, [reply("read_file", path="src/app.py"), EDIT_SRC])
+    edit, source = cuts_of(tmp_path, [reply("read_file", path="src/app.py"), EDIT_SRC])
     assert source["turn_index"] == edit["cut_turn_index"] == 1
     assert (source["path"], source["cause"]) == (edit["target_file"], edit["cut_cause"])
     assert [source[k] for k in SOURCE_PRE] == [edit[k] for k in EDIT_PRE]
 
 
 def test_no_source_change_means_no_source_cut(tmp_path):
-    edit, source = cuts(tmp_path, [reply("write_file", path="docs/a.md", content="d\n")])
+    edit, source = cuts_of(tmp_path, [reply("write_file", path="docs/a.md", content="d\n")])
     assert edit["cut_occurred"] and source["occurred"] is False
-    assert all(v is None for k, v in source.items() if k != "occurred")
+    assert all(v is None for k, v in source.items() if k not in ("occurred", "cut_status"))
+    assert source["cut_status"] == "NO_CUT"
 
 
 def test_missing_usage_is_counted_before_each_cut_and_per_episode(tmp_path):

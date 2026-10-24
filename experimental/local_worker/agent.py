@@ -312,11 +312,14 @@ class AgentLoop:
         self.tools.timeout_seconds = self.limits.tool_cap_seconds
         self.tools.deadline = deadline
         self.tools.turn_index = log.index
+        started = self.tools.calls_started
         try:
             call = self._dispatch(name, args)
         except ToolDeadline:
             log.error_category = "TIMEOUT"
             raise
+        finally:  # a started wrapper process may have changed the tree, also when it then failed
+            log.tool_ran = self.tools.calls_started > started
         log.exit_code, log.error_category = call.exit_code, call.error_category
         log.stdout_bytes, log.stdout_truncated = call.stdout_bytes, call.stdout_truncated
         log.duration_ms, log.exec_identity, log.isolation = (
@@ -344,6 +347,18 @@ class AgentLoop:
             return
         out.patch = parse_numstat(stat.raw) if stat.exit_code == 0 else None
         out.cleanup = "ok" if sweep.exit_code == 0 and out.patch is not None else "failed"
+        self._observe_last(out)
+
+    def _observe_last(self, out: LoopOutcome) -> None:
+        """The run stopped after a tool started but before its tree was observed: observe it now,
+        after the sweep (nothing else ran since), so its cut is known; else it stays unobserved."""
+        last = out.turns[-1] if out.turns else None
+        if last is None or not last.tool_ran or (last.tree is not None and last.tree.observed):
+            return
+        try:
+            last.tree = self.observe()
+        except (WorkerIsolationError, ToolDeadline):
+            pass
 
 
 def _message(resp: dict) -> dict:
