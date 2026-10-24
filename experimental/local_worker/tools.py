@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import subprocess
 import tempfile
@@ -24,6 +25,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+from experimental.local_worker.write_scope import wrapper_args
 
 WORKER_USER = "_cairnwork_worker"
 INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/local-bin/local-worker-tool")
@@ -214,7 +217,7 @@ class WorkerTools:
         self.invoker = invoker or subprocess_invoker()
         self.max_output_bytes = max_output_bytes
         self.timeout_seconds = timeout_seconds
-        self.identity = WORKER_USER if mode == "worker" else _owner_name()
+        self.identity = WORKER_USER if mode == "worker" else pwd.getpwuid(os.getuid()).pw_name
         self.turn_index = 0
         # Absolute end (on ``clock``) for every wrapper call, the waits after a timeout and the
         # sweep included; None: each call just gets timeout_seconds (canary, tests).
@@ -222,6 +225,7 @@ class WorkerTools:
         self.clock: Callable[[], float] = time.monotonic
         self.calls_started = 0  # wrapper processes started: a tool may have changed the tree
         self.last_complete = True  # whether the last wrapper call's output was captured whole
+        self.write_scope: tuple[str, ...] | None = None  # writes only here (write_scope.py)
 
     # -- the actions -------------------------------------------------------------------------
     def list_dir(self, path: str = ".") -> ToolCall:
@@ -232,7 +236,8 @@ class WorkerTools:
 
     def write_file(self, path: str, content: str) -> ToolCall:
         args = {"path": path, "content": content}
-        return self._call("write_file", "write", [path], args, stdin=content.encode())
+        argv = [path, *wrapper_args(self.write_scope)]
+        return self._call("write_file", "write", argv, args, stdin=content.encode())
 
     def run_tests(self, pytest_args: Sequence[str]) -> ToolCall:
         args = list(pytest_args)
@@ -264,7 +269,7 @@ class WorkerTools:
         left = budget_end - self.clock()
         if left <= 0:
             return self._log("edit_file", tool_args, None, b"edit_file: no time left\n", started)
-        rc, out, err = self._invoke("write", [path], new, cap=left)
+        rc, out, err = self._invoke("write", [path, *wrapper_args(self.write_scope)], new, cap=left)
         call = self._log("edit_file", tool_args, rc, out + err, started)
         self._after("write", rc)
         return call
@@ -392,9 +397,3 @@ class WorkerTools:
             log.flush()
             os.fsync(log.fileno())
         return call
-
-
-def _owner_name() -> str:
-    import pwd
-
-    return pwd.getpwuid(os.getuid()).pw_name

@@ -6,6 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from experimental.local_worker.tools import KILL_GRACE_SECONDS
+from experimental.local_worker.write_scope import normalize
+
+
+class RefusedStart(RuntimeError):
+    """No episode is run: the checkout is not its clean base, or a resume has no time left."""
 
 
 @dataclass(frozen=True)
@@ -28,6 +33,20 @@ class Limits:
         less the kill grace a timed-out step may still use."""
         return self.cleanup_reserve_seconds / 3 - KILL_GRACE_SECONDS
 
+    def resume_budget(self, parent_seconds: float) -> float:
+        """A resume's wall seconds: max_wall_seconds less the parent's pre-cut seconds
+        (parent_pre_cut_wall_seconds), one budget for the whole episode as max_steps is. Refused
+        (RefusedStart) unless it is more than the cleanup reserve: with no more, no turn could
+        start, and the base observation and the cleanup would not fit either."""
+        left = self.max_wall_seconds - parent_seconds
+        if left <= self.cleanup_reserve_seconds:
+            raise RefusedStart(
+                f"no wall time left to resume: max_wall_seconds {self.max_wall_seconds} less the"
+                f" parent's {parent_seconds} s before the cut leaves {left:.3f} s, not more than"
+                f" the {self.cleanup_reserve_seconds} s cleanup reserve"
+            )
+        return left
+
 
 @dataclass(frozen=True)
 class Task:
@@ -43,3 +62,8 @@ class Settings:
     limits: Limits
     seed: int | None = None
     temperature: float = 0.0
+    # write_file/edit_file only under these repo-relative entries (write_scope.py); None: anywhere
+    write_scope: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "write_scope", normalize(self.write_scope))

@@ -10,7 +10,8 @@
 #   [--start-nonce <hex>] before the action prints LOCAL_WORKER_STARTED <hex> on stderr first.
 #   local-worker-tool list   <run_root> <relpath>        list a directory of the checkout
 #   local-worker-tool read   <run_root> <relpath>        print a regular file of the checkout
-#   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
+#   local-worker-tool write  <run_root> <relpath> [--scope <entry>...]
+#                                                        replace a checkout file with stdin
 #   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
 #   local-worker-tool sweep  <run_root>                  kill this run's worker processes
 #   local-worker-tool status <run_root>                  git status of the checkout (porcelain v2,
@@ -39,6 +40,24 @@
 # code the model wrote ever runs under it (git runs with no filter, hook, driver or textconv; see
 # GIT_QUERY).
 # The uid boundary (the account cannot enter /Users/<owner>) sits under this as a second layer.
+#
+# write --scope <entry>... (the optional write scope, write_scope.py; the K arm's --write-path):
+# each entry is a canonical relpath (the rules above), a file or a directory. The write is refused
+# (exit 64, "out of write scope") unless the path it would land on equals an entry or lies under
+# one, the match of Nexus direct_operation_journal._is_path_in_scope (exact, or entry + "/"
+# prefix; byte for byte). That path is the canonical one, resolved here as the worker with
+# /bin/realpath (the shell's own `cd -P`/`pwd -P` keep the typed case and Unicode form): the
+# existing file itself, else its deepest existing directory followed by the components mkdir will
+# create, as typed. Every existing component is thus a real directory under its on-disk name, case
+# and Unicode form, so neither a symlink in the checkout nor a case or normalization variant of a
+# name can move a write out of scope. Entries are taken literally, never resolved (a symlink
+# planted at an entry must not widen it): an entry must name existing components in their on-disk
+# case and Unicode form, or every write under it is refused (refused, never let through). An
+# existing file with more than one hard link is refused too: its other names may lie outside the
+# scope, and no path check sees them. The profile then allows writes in the checkout only under
+# the entries (plus creating their ancestors, as directories only): Seatbelt checks the resolved
+# path, so a symlink swapped in after the check (by a process a sweep missed) cannot land the
+# write elsewhere either.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
 # CAIRNWORK_LOCAL_WORKER_RUNS / CAIRNWORK_LOCAL_WORKER_PYROOT set; running as the worker account,
@@ -96,14 +115,16 @@ require_run_root() {
 }
 
 # relpath: relative, no empty / "." / ".." / ".git" component, no newline, not starting with "-".
+# $2 names it in the refusal (default "path").
 require_relpath() {
   case "$1" in
-    "" | /* | -*) refuse "path must be a non-empty relative path" ;;
+    "" | /* | -*) refuse "${2:-path} must be a non-empty relative path" ;;
     *"
-"*) refuse "path has a newline" ;;
+"*) refuse "${2:-path} has a newline" ;;
   esac
   case "/$1/" in
-    *//* | */./* | */../* | */.[gG][iI][tT]/*) refuse "path has an empty, '.', '..' or '.git' component" ;;
+    *//* | */./* | */../* | */.[gG][iI][tT]/*)
+      refuse "${2:-path} has an empty, '.', '..' or '.git' component" ;;
   esac
 }
 
@@ -117,6 +138,52 @@ require_dir_inside_checkout() {
   case "$real/" in
     */.[gG][iI][tT]/*) refuse "$2 resolves into a .git directory" ;;
   esac
+}
+
+# --scope <entry>...: check each entry; the profile's write rules become the entries'.
+set_scope() {
+  SCOPE=""
+  WRITE_RULES=""
+  cr=$(printf '\r')
+  for s in "$@"; do
+    require_relpath "$s" "scope entry"
+    case "$s" in *"$cr"*) refuse "scope entry has a carriage return" ;; esac  # as write_scope.py
+    require_profile_safe "$CHECKOUT/$s" "scope entry"
+    SCOPE="$SCOPE$s
+"
+    WRITE_RULES="$WRITE_RULES (subpath \"$CHECKOUT/$s\")"
+    p=$s
+    while [ "${p%/*}" != "$p" ]; do  # mkdir -p may create the entry's ancestors (directories)
+      p=${p%/*}
+      CREATE_RULES="$CREATE_RULES (literal \"$CHECKOUT/$p\")"
+    done
+  done
+}
+
+# The relpath $1 equals a scope entry or lies under one (_is_path_in_scope).
+in_scope() {
+  printf '%s' "$SCOPE" | {
+    while IFS= read -r s; do
+      case "$1" in "$s" | "$s"/*) exit 0 ;; esac
+    done
+    exit 1
+  }
+}
+
+# The write of $TARGET (relpath $1; $2 its deepest existing directory) lands in scope.
+require_in_scope() {
+  if [ -e "$TARGET" ]; then
+    landed=$(/bin/realpath -- "$TARGET") || refuse "write target cannot be resolved"
+    links=$(/usr/bin/stat -f %l -- "$TARGET") || refuse "write target cannot be resolved"
+    [ "$links" = 1 ] || refuse "out of write scope: $1 has $links hard links (other names unseen)"
+  else
+    landed=$(/bin/realpath -- "$2")${TARGET#"$2"} || refuse "write directory cannot be resolved"
+  fi
+  case "$landed" in
+    "$CHECKOUT"/*) ;;
+    *) refuse "write resolves outside the checkout" ;;
+  esac
+  in_scope "${landed#"$CHECKOUT"/}" || refuse "out of write scope: $1"
 }
 
 ancestors() {   # SBPL literals for every ancestor directory of $1 (metadata only)
@@ -141,8 +208,11 @@ profile() {  # the tool profile: list, read, write, pytest (and so every line of
     "$CHECKOUT" "$RUN_ROOT" "$RUN_ROOT" "$PYROOT"
   printf '(allow file-read-metadata%s%s)\n' "$(ancestors "$CHECKOUT")" "$(ancestors "$PYROOT")"
   printf '(deny file-write*)\n'
-  printf '(allow file-write* (subpath "%s") (subpath "%s/tmp")' "$CHECKOUT" "$RUN_ROOT"
+  printf '(allow file-write* %s (subpath "%s/tmp")' "$WRITE_RULES" "$RUN_ROOT"
   printf ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))\n'
+  [ -z "$CREATE_RULES" ] ||
+    printf '(allow file-write-create (require-all (vnode-type DIRECTORY) (require-any%s)))\n' \
+      "$CREATE_RULES"
   printf '(deny file-write* (regex #"/\\.[gG][iI][tT](/|$)"))\n'
   printf '(deny file-read* file-write* (subpath "%s/q"))\n' "$RUN_ROOT"  # the queries' alone
   printf '(deny signal)\n(allow signal (target same-sandbox))\n'
@@ -323,6 +393,17 @@ shift 2
 require_run_root "$RUN_ROOT"
 require_profile_safe "$PYROOT" python_root
 umask 007
+SCOPE_SET=""
+WRITE_RULES="(subpath \"$CHECKOUT\")"
+CREATE_RULES=""
+if [ "$ACTION" = write ] && [ "$#" -ge 2 ] && [ "$2" = --scope ]; then
+  [ "$#" -ge 3 ] || refuse "--scope needs at least one entry"
+  WPATH=$1
+  shift 2
+  set_scope "$@"
+  SCOPE_SET=1
+  set -- "$WPATH"
+fi
 
 case "$ACTION" in
   list | read | write)
@@ -367,6 +448,7 @@ case "$ACTION" in
     probe=$parent
     while [ ! -d "$probe" ]; do probe=${probe%/*}; done
     require_dir_inside_checkout "$probe" write
+    [ -z "$SCOPE_SET" ] || require_in_scope "$1" "$probe"
     sandboxed "$(profile)" "$RUN_ROOT/tmp" /bin/sh -c 'mkdir -p -- "$1" && cat > "$2"' sh \
       "$parent" "$TARGET"
     ;;

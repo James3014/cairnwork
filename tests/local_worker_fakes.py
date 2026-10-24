@@ -86,6 +86,11 @@ class World:
         if action == "write":
             if args[0].startswith("../"):
                 return 64, b"local-worker-tool: refusing: path\n"
+            scope = args[2:] if args[1:2] == ["--scope"] else None  # K's match, as the wrapper
+            if scope is not None and not any(
+                args[0] == s or args[0].startswith(s + "/") for s in scope
+            ):
+                return 64, b"local-worker-tool: refusing: out of write scope\n"
             self.files[args[0]] = stdin.decode()
             return 0, b""
         if action == "pytest":
@@ -184,8 +189,10 @@ def make_loop(tmp_path: Any, replies: list, world: World | None = None, **limits
     world.clock = clock
     wt = WorkerTools(tmp_path / ("0" * 32), tmp_path / "calls.jsonl", invoker=world)
     endpoint = FakeEndpoint(replies, clock, limits.pop("model_seconds", 1.0))
+    scope = limits.pop("write_scope", None)
     lim = Limits(context_cap=limits.pop("context_cap", 100_000), **limits)
-    loop = AgentLoop(wt, endpoint, TASK, Settings("served-model", lim, seed=7), clock=clock)
+    settings = Settings("served-model", lim, seed=7, write_scope=scope)
+    loop = AgentLoop(wt, endpoint, TASK, settings, clock=clock)
     return loop, world, endpoint, clock
 
 

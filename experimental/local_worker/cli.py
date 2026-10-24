@@ -7,6 +7,11 @@
     python -m experimental.local_worker.cli resume --parent-transcript \\
         <out>/private/<episode_id>/transcript.json [--cut-turn N] [--plan <out>/plans/x.txt] \\
         --task task.json --checkout <a FRESH run root>/checkout ... --arm A --seed 1000
+    (either one) [--write-path <repo-relative file or directory>]...: the K arm's write scope
+
+With --write-path, write_file and edit_file outside those entries are refused (write_scope.py);
+the manifest then carries write_scope_rule and each line its write_scope. A resume must repeat the
+parent's entries.
 
 Before anything runs: the canary report is bound (corpus_io.verify_canary), the server must list
 the requested model, and the manifest is created or must match. A resume starts from a fresh run
@@ -34,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from experimental.local_worker import corpus_io
+from experimental.local_worker import corpus_io, write_scope
 from experimental.local_worker.agent import (
     AgentLoop,
     Limits,
@@ -91,6 +96,8 @@ def build_manifest(a: argparse.Namespace, limits: Limits, endpoint: str) -> dict
         "cut_definition": CUT_DEFINITION,
         "canary": a.canary_binding,
         "created_at": datetime.now(UTC).isoformat(),
+        # only with --write-path: a corpus is all scoped or all not (the manifest is frozen)
+        **({"write_scope_rule": write_scope.WRITE_SCOPE_RULE} if a.write_scope else {}),
     }
 
 
@@ -120,7 +127,7 @@ def resume_prefix(parent: dict, cut_turn: int | None) -> tuple[list[dict], int, 
 
 
 def transcript(eid: str, task: Task, messages: list, out: LoopOutcome, loop: AgentLoop) -> dict:
-    turns = []
+    turns, scope = [], loop.settings.write_scope
     for t in out.turns:
         row = {k: v for k, v in asdict(t).items() if k != "tree"}
         row["tree"] = None if t.tree is None else {"head": t.tree.head, "entries": t.tree.entries}
@@ -134,6 +141,7 @@ def transcript(eid: str, task: Task, messages: list, out: LoopOutcome, loop: Age
         # SIGTERM/SIGINTs only counted (NB8): after the first, or once the loop had stopped. The
         # count is as of this write; the line itself never carries it (no schema field).
         "late_signals": loop.late_signals,
+        "write_scope": None if scope is None else list(scope),  # the entries, unredacted
     }
 
 
@@ -143,6 +151,7 @@ def _prepare(a: argparse.Namespace) -> dict[str, Any]:
     if checkout.name != "checkout":
         raise corpus_io.InputRefused("--checkout must be <run_root>/checkout")
     task = corpus_io.load_task(a.task)
+    a.write_scope = write_scope.normalize(a.write_path)
     if not corpus_io.ID_RE.fullmatch(a.arm):
         raise corpus_io.InputRefused(f"--arm must match {corpus_io.ID_RE.pattern}")
     a.canary_binding = corpus_io.verify_canary(a.canary_report, out_dir)
@@ -175,10 +184,13 @@ def _episode_id(a: argparse.Namespace, task: Task) -> str:
     return f"ep_{stamp}_{model}_{task.task_id}_{a.arm}_s{a.seed}_{secrets.token_hex(3)}"
 
 
-def _same_binding(parent: dict, task: Task, manifest_sha: str) -> None:
+def _same_binding(
+    parent: dict, task: Task, manifest_sha: str, scope: tuple[str, ...] | None
+) -> None:
     """Codex review of #239, B6: a resume continues the same task under the same configuration.
     The task (id, repo, prompt, public targets) must equal the parent's, and so must the manifest
-    (model, endpoint, limits, temperature, tools, prompts, harness version); the base sha is
+    (model, endpoint, limits, temperature, tools, prompts, harness version), and so must the write
+    scope (the parent transcript's unredacted entries); the base sha is
     pinned by run(expected_base=...) and the run root must be fresh (checked by the caller)."""
     want = {**asdict(task), "public_tests": list(task.public_tests)}
     got = {**parent["task"], "public_tests": list(parent["task"].get("public_tests", ()))}
@@ -187,6 +199,8 @@ def _same_binding(parent: dict, task: Task, manifest_sha: str) -> None:
         raise corpus_io.InputRefused(f"the parent episode is for another task: {diff} differ")
     if parent["record"]["manifest_sha256"] != manifest_sha:
         raise corpus_io.InputRefused("the parent ran under another manifest (model or limits)")
+    if parent.get("write_scope") != (None if scope is None else list(scope)):
+        raise corpus_io.InputRefused("the parent ran under another write scope (--write-path)")
 
 
 def run_episode(a: argparse.Namespace, resume: bool) -> int:
@@ -197,15 +211,17 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
     plan_sha, prefix = None, dict.fromkeys(PARENT_FIELDS)
     if resume:
         parent = corpus_io.load_transcript(a.parent_transcript, p["out_dir"])
-        _same_binding(parent, task, p["manifest_sha"])
+        _same_binding(parent, task, p["manifest_sha"], a.write_scope)
         if parent["record"]["resume_parent_episode_id"] is not None:
             raise corpus_io.InputRefused("resume from a fresh (L0) episode, not from a resume run")
         root = p["run_root"].name
         used = corpus_io.used_checkouts(p["out_dir"]) | {parent["record"]["checkout_id"]}
         if root in used:
             raise corpus_io.InputRefused(f"resume needs a fresh run root; {root} was used before")
-        messages, first_turn, offset = resume_prefix(parent, a.cut_turn)
+        messages, first_turn, _ = resume_prefix(parent, a.cut_turn)
         prefix = parent_prefix(parent["turns"], first_turn)
+        offset = prefix["parent_pre_cut_wall_seconds"]  # the line's own number: one arithmetic
+        p["limits"].resume_budget(offset)  # RefusedStart before any directory or tool call
         expected_base, parent_id = parent["record"]["base_sha"], parent["episode_id"]
         if a.plan:
             plan = corpus_io.load_plan(a.plan, p["out_dir"])
@@ -214,7 +230,7 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
     eid = _episode_id(a, task)
     priv = corpus_io.private_dir(p["out_dir"], eid)
     tools = WorkerTools(p["run_root"], priv / "calls.jsonl", mode="worker")
-    settings = Settings(a.model, p["limits"], a.seed, a.temperature)
+    settings = Settings(a.model, p["limits"], a.seed, a.temperature, a.write_scope)
     loop = AgentLoop(tools, p["endpoint"], task, settings)
     meta = {
         "episode_id": eid,
@@ -241,7 +257,7 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
             messages, first_turn=first_turn, elapsed_offset=offset, expected_base=expected_base
         )
         meta["server_model_id"] = next((t.server_model for t in out.turns if t.server_model), None)
-        record = build_record(meta, out, p["limits"].cut_seconds)
+        record = build_record(meta, out, p["limits"].cut_seconds, settings.write_scope)
         private = transcript(eid, task, messages, out, loop)
         private["record"] = record
         corpus_io.write_private_json(priv, "transcript.json", private)
@@ -278,6 +294,8 @@ def parser() -> argparse.ArgumentParser:
         sp.add_argument("--cut-seconds", type=float, default=900.0)
         sp.add_argument("--tool-cap-seconds", type=float, default=300.0)
         sp.add_argument("--max-completion-tokens", type=int, default=4096)
+        # The K arm's --write-path: repeatable, a repo-relative file or directory (write_scope.py)
+        sp.add_argument("--write-path", action="append", default=None)
         if name == "resume":
             sp.add_argument("--parent-transcript", type=Path, required=True)
             sp.add_argument("--cut-turn", type=int, default=None)
