@@ -105,7 +105,7 @@ def test_the_pre_check_never_reads_an_unknown_marker_as_unused(tmp_path, make):
     else:
         used.chmod(0o000)
     try:
-        with pytest.raises((TestCommitRejected, PermissionError)):
+        with pytest.raises(PermissionError if make == "unreadable" else TestCommitRejected):
             _burn(intake, oid, record=False)
     finally:
         used.chmod(0o700)
@@ -126,3 +126,36 @@ def test_a_marker_that_cannot_be_created_stops_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(vc.os, "open", vanished)
     with pytest.raises(FileNotFoundError):
         vc._burn(intake, "c" * 40, record=True)
+
+
+def test_the_record_is_exclusive(tmp_path):
+    from cairnwork.deferred_tests import TestCommitRejected
+    from cairnwork.intake import Intake
+    from cairnwork.verify_candidate import _burn
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    _burn(intake, "d" * 40, record=True)
+    with pytest.raises(TestCommitRejected, match="TEST_COMMIT_ALREADY_EXPOSED"):
+        _burn(intake, "d" * 40, record=True)  # two runs racing past the pre-check: one wins
+
+
+def test_a_used_commit_is_refused_before_any_scratch_clone(project, state, monkeypatch):
+    import cairnwork.verify_candidate as module
+    from cairnwork.intake import Intake
+
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    cand = candidate(project, base, {"src/calc.py": FIX})
+    used = state / "verify-used-tests"
+    used.mkdir(mode=0o700)
+    (used / test_commit).write_text("")
+
+    def no_scratch(*_args, **_kw):
+        raise AssertionError("a used commit reached the scratch clone")
+
+    monkeypatch.setattr(module, "_scratch", no_scratch)
+    out = module.verify_candidate(
+        Intake(state), repo=project, base=base, candidate=cand, allowed_files=("src/calc.py",),
+        verifiers=(("v", tuple(" ".join(CHECK[0][1]).split())),), test_commit=test_commit,
+    )  # fmt: skip
+    assert out["reason"].startswith("TEST_COMMIT_ALREADY_EXPOSED")
