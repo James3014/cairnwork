@@ -115,12 +115,13 @@ class LoopbackEndpoint:
         t = self.target
         conn = http.client.HTTPConnection(t.host, t.port, timeout=self._remaining(deadline))
         watchdog: threading.Timer | None = None
+        fired = threading.Event()  # set by the watchdog before it shuts the socket down
         try:
             conn.connect()
             sock = conn.sock
             if sock is None or not peer_is_loopback(sock.getpeername()):
                 raise EndpointError("connected peer is not a loopback address")
-            watchdog = threading.Timer(self._remaining(deadline), _shutdown, (sock,))
+            watchdog = threading.Timer(self._remaining(deadline), _shutdown, (sock, fired))
             watchdog.daemon = True
             watchdog.start()
             headers = {"Content-Type": "application/json"} if body is not None else {}
@@ -129,10 +130,12 @@ class LoopbackEndpoint:
             resp = conn.getresponse()
             data = _read_bounded(resp, sock, lambda: self._remaining(deadline))
             status = resp.status
+            if fired.is_set():  # a shut-down socket reads as end of body: never parse that
+                raise EndpointTimeout("endpoint passed the deadline")
         except TimeoutError as exc:
             raise EndpointTimeout(f"endpoint timed out: {exc}") from None
         except (OSError, http.client.HTTPException) as exc:
-            if self.clock() >= deadline:  # the watchdog shut the socket down
+            if fired.is_set() or self.clock() >= deadline:  # the watchdog shut the socket down
                 raise EndpointTimeout("endpoint passed the deadline") from None
             raise EndpointError(f"endpoint request failed: {type(exc).__name__}: {exc}") from None
         finally:
@@ -157,6 +160,8 @@ def _read_bounded(resp: http.client.HTTPResponse, sock: Any, remaining: Callable
         sock.settimeout(remaining())
         chunk = resp.read1(65536)  # one receive: read(n) would loop recv until n bytes
         if not chunk:
+            if getattr(resp, "length", None):  # Content-Length not reached: a cut-off body
+                raise http.client.IncompleteRead(b"".join(chunks), resp.length)
             return b"".join(chunks)
         size += len(chunk)
         if size > MAX_RESPONSE_BYTES:
@@ -165,7 +170,8 @@ def _read_bounded(resp: http.client.HTTPResponse, sock: Any, remaining: Callable
     return b"".join(chunks)
 
 
-def _shutdown(sock: socket.socket) -> None:
+def _shutdown(sock: socket.socket, fired: threading.Event) -> None:
+    fired.set()
     try:
         sock.shutdown(socket.SHUT_RDWR)
     except OSError:

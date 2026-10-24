@@ -133,6 +133,7 @@ def _drip_server(head: bytes, drip: bytes):
     [
         (b"HTTP/1.1 200 OK\r\nContent-Length: 400\r\n\r\n", b"{" * 400),  # body drip
         (b"HTTP/1.1 200 OK\r\n", b"X-Slow: " + b"a" * 400),  # header drip
+        (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", b"{" * 400),  # no length: until close
     ],
 )
 def test_a_dripping_server_cannot_pass_the_deadline(head, drip):
@@ -294,3 +295,23 @@ def test_changed_paths_are_capped_with_the_full_count(tmp_path):
     ):
         with pytest.raises(SchemaError):
             validate_record({**rec, "first_edit_cut": bad})
+
+
+def test_a_body_cut_off_before_its_length_is_an_error_not_json():
+    """A server that closes before Content-Length is reached sends a truncated body: the
+    endpoint reports the cut-off read, before the deadline, as an error (not a parse of half)."""
+    port = _drip_server(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n" + b'{"data": []}', b"")
+    with pytest.raises(endpoint.EndpointError, match="IncompleteRead"):
+        endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(time.monotonic() + 5)
+
+
+def test_a_read_ended_by_the_watchdog_is_a_timeout(monkeypatch):
+    """Whichever wins at the deadline, the socket timeout or the watchdog's shutdown (which
+    reads as end of body), the result is TIMEOUT. Here the watchdog is made to win."""
+    real_timer = threading.Timer
+    monkeypatch.setattr(endpoint.threading, "Timer", lambda t, fn, args: real_timer(0.3, fn, args))
+    port = _drip_server(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", b"{" * 400)
+    started = time.monotonic()
+    with pytest.raises(endpoint.EndpointTimeout):
+        endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(started + 5)
+    assert time.monotonic() - started < 1.5
