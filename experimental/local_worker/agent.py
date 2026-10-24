@@ -20,9 +20,11 @@ and nothing runs past start + max_wall_seconds.
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
 
-Once the base is verified, ``run`` never raises: a reply that breaks the tool-call protocol
-(agent_protocol.ProtocolError, e.g. an argument the tool does not take) and any unexpected error
-end the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs.
+Once the base is verified, ``run`` never raises: a reply that breaks the tool-call structure
+(agent_protocol.ProtocolError, e.g. a tool name that is not a string) and any unexpected error end
+the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs. A call the
+model can repair (agent_protocol.BadCall: an unknown tool, a missing or extra argument) is an
+``invalid_tool_call`` turn: the model is told why and the episode goes on.
 """
 
 from __future__ import annotations
@@ -290,12 +292,17 @@ class AgentLoop:
             log.action_type, log.error_category = "invalid_tool_call", "PROTOCOL_ERROR"
             raise
         except BadCall as exc:
-            log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
-            cid = calls[0].get("id") or f"call_{log.index}"
-            messages.append({"role": "tool", "tool_call_id": cid, "content": str(exc)})
-            return None
+            name, args, bad = "", {}, exc
+        else:
+            bad = None
+        # One id for the assistant's call and the tool reply, also for a BadCall (review of
+        # #239, NB7); decode_call already refused an id that is not a string.
         call = dict(calls[0], id=calls[0].get("id") or f"call_{log.index}")
         assistant["tool_calls"] = [call]
+        if bad is not None:
+            log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(bad)})
+            return None
         log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
         log.tool_args = args
         if name == "finish":

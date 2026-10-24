@@ -70,15 +70,17 @@ ALLOWED_ARGS = {
 
 
 class BadCall(ValueError):
-    """A tool call whose argument values the loop cannot run (unknown tool name, arguments that
-    are not a JSON object, a missing or ill-typed argument): the model is told why, the turn is
-    recorded as ``invalid_tool_call`` and nothing executes."""
+    """A tool call the loop cannot run but the model can repair (unknown tool name, arguments
+    that are not a JSON object, a missing, ill-typed or extra argument): the model is told why,
+    the turn is recorded as ``invalid_tool_call`` (INVALID_CALL) with no arguments at all, and
+    nothing executes. An extra argument is model text: neither its name nor its value is kept
+    in the line (Claude review of #239, NB6: it no longer aborts the episode)."""
 
 
 class ProtocolError(ValueError):
-    """A reply that breaks the tool-call protocol itself (a call or function that is not an
-    object, a tool name or id that is not a string, arguments that are neither a JSON string nor
-    an object, or an argument the tool does not take): the episode stops with a recorded
+    """A reply that breaks the tool-call structure itself (tool_calls that is not a list of
+    objects, a call or function that is not an object, a tool name or id that is not a string,
+    arguments that are neither a JSON string nor an object): the episode stops with a recorded
     ERROR_ABORT (abort_cause protocol_error); nothing executes and no argument is published."""
 
 
@@ -113,7 +115,7 @@ def decode_call(call: Any, n_targets: int) -> tuple[str, dict]:
         raise BadCall("arguments must be a JSON object")
     extra = set(args) - ALLOWED_ARGS[name]
     if extra:  # their names and values are model text: neither is kept in the public line
-        raise ProtocolError(f"{name} got {len(extra)} argument(s) it does not take")
+        raise BadCall(f"{name} got {len(extra)} argument(s) it does not take")
     for key in _REQUIRED[name]:
         if not isinstance(args.get(key), str):
             raise BadCall(f"{name} needs a string {key!r}")

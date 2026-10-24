@@ -55,15 +55,17 @@ def raw_call(function: Any, call_id: Any = "c0") -> dict:
 
 
 # -- B1: no model text through arguments a tool does not take, or through a path never used ----
-def test_an_unused_argument_is_a_recorded_protocol_abort(harness):
+def test_an_unused_argument_is_a_recoverable_invalid_call_that_publishes_nothing(harness):
+    """Claude review of #239, NB6: no longer an abort; still nothing of it in the line."""
     run, out = harness
     finish = reply("finish", status="DONE", path=SECRET)
-    assert run([EDIT_SRC, finish], "run") == 0
+    assert run([EDIT_SRC, finish, reply("finish", status="DONE")], "run") == 0
     [rec] = lines(out)
-    assert rec["verification"]["exit_reason"] == "ERROR_ABORT"
-    assert rec["termination"]["abort_cause"] == "protocol_error"
-    assert rec["turns"][-1]["action_type"] == "invalid_tool_call"
-    assert rec["turns"][-1]["error_category"] == "PROTOCOL_ERROR"
+    assert rec["verification"]["exit_reason"] == "COMPLETED"
+    assert rec["termination"]["abort_cause"] is None
+    bad = rec["turns"][1]
+    assert (bad["action_type"], bad["error_category"]) == ("invalid_tool_call", "INVALID_CALL")
+    assert bad["tool_args"] == {} and bad["tool_ran"] is False
     assert rec["termination"]["cleanup"] == "ok" and rec["verification"]["patch_lines_added"] == 1
     assert SECRET not in json.dumps(rec)
 
