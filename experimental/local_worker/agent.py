@@ -106,10 +106,10 @@ class AgentLoop:
         self.clock, self.now = clock, now
         tools.clock = clock  # every wrapper call is held to deadlines on this clock
         self.abort_detail: str | None = None
-        # NB8 (review of #239): signal state (interrupt, _stopped); deferred SystemExit & co.
-        self.interruptible = True
+        self.interruptible = True  # NB8 (review of #239): see interrupt and _stopped
         self.late_signals = 0
         self.deferred: BaseException | None = None
+        self._open: TurnLog | None = None  # the turn in progress (in out.turns, no t_end yet)
         self._start = 0.0
         self._offset = 0.0
         self._final = float("inf")  # start + max_wall_seconds: nothing runs past it
@@ -181,7 +181,10 @@ class AgentLoop:
         except KeyboardInterrupt as exc:  # the one interrupt, landing as _stopped was entered
             self.late_signals += pending is not None  # then it only interrupted the recording
             self._stopped(out, pending or exc)
-        finally:
+        finally:  # interruptible is False here: nothing below can be interrupted
+            if self._open is not None:  # the turn an interrupt or error stopped ends now
+                self._open.t_end = self._own()
+            out.turns = [t for t in out.turns if t.assistant_msg_index >= 0]  # the model replied
             self._cleanup(out)
             out.ended_at = self.now().astimezone(UTC8).isoformat()
             out.wall_seconds = self._own()
@@ -226,12 +229,10 @@ class AgentLoop:
                 out.timed_out = stop[0] == "TIMEOUT"
                 return
             log = TurnLog(index=turn, t_start=self._own())
-            try:
-                finished = self._step(log, messages, deadline)
-            finally:  # a turn counts once the model replied, also when its tool call then failed
-                log.t_end = self._own()
-                if log.assistant_msg_index >= 0:
-                    out.turns.append(log)
+            self._open = log  # recorded before it runs: an interrupt anywhere (also after its
+            out.turns.append(log)  # tool ran) leaves it in out.turns (Codex review of PR #248)
+            finished = self._step(log, messages, deadline)
+            log.t_end, self._open = self._own(), None
             if finished is not None:  # _step already cleared interruptible
                 out.exit_reason, out.needs_spec = "COMPLETED", finished == "NEEDS_SPEC"
                 return
