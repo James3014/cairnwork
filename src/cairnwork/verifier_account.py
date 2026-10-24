@@ -89,6 +89,10 @@ class VerifierAccountError(Exception):
         super().__init__(f"{self.code}: {detail}")
 
 
+class AccountBusy(VerifierAccountError):
+    """RESOURCE_LEASE_TIMEOUT: another run holds the account. Busy, not broken."""
+
+
 def _backend() -> Backend:
     backend = platform_backend()
     if backend is None:
@@ -383,7 +387,7 @@ class VerifierAccount:
                             raise lock_queue.TicketTimeout
                         time.sleep(min(_LOCK_POLL_SECONDS, remaining))
             except lock_queue.TicketTimeout:
-                raise VerifierAccountError(
+                raise AccountBusy(
                     f"RESOURCE_LEASE_TIMEOUT: account {self.user} busy for {timeout:g}s"
                 ) from None
             except OSError as exc:

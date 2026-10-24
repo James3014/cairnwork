@@ -211,6 +211,11 @@ made before Core is called, so there is no Core response, no notary record and n
 `cairnwork-attest statement` to sign; `statement` for that candidate fails as for any candidate
 without a VERIFIED record. UNCOMPARABLE means "no evidence", never "verified" and never "blocked".
 
+This includes `VERIFIER_ACCOUNT_UNUSABLE` (#234 PR-C): the verifier account cannot run its Python,
+found by a precheck before the test commit is burned (`tests_consumed: false`, so the same test
+commit can be retried) or by a base-stage run after it (`tests_consumed: true`). An account failure
+during the candidate's own run is never UNCOMPARABLE; it stays an internal error or FAILED.
+
 ## External candidates (v0.2, Issue #229)
 
 `cairnwork-verify run --test-commit` runs the verifiers on the candidate with the deferred tests

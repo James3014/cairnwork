@@ -135,7 +135,7 @@ def agy_dispatch(config: dict[str, Any]) -> Dispatch | None:
 
 def _run(intake: Intake, task_id: str) -> dict[str, Any]:
     """The runner submit starts. It keeps the inherited lock fd open until it exits."""
-    config = intake.config()
+    config, account = intake.config(), intake.verifier_account()
     task = intake.load_request(task_id)
     gate = None
     if task.card_hash.startswith("gh:"):  # an Issue task: re-check its trust before the attempt
@@ -154,9 +154,14 @@ def _run(intake: Intake, task_id: str) -> dict[str, Any]:
         ledger=intake.ledger,
         notary=intake.notary,
         journal=intake.journal,
-        worker=AgyWorker(model=config["model"], agy=config["agy"], dispatch=agy_dispatch(config)),
+        worker=AgyWorker(
+            model=config["model"],
+            agy=config["agy"],
+            dispatch=agy_dispatch(config),
+            verifier_user=getattr(account, "user", None),
+        ),  # fmt: skip
         run_root=intake.run_root,
-        verifier_account=intake.verifier_account(),
+        verifier_account=account,
         verifier_python=config["verifier_python"],
     )
     return {k: v for k, v in result.__dict__.items() if k != "logs"}

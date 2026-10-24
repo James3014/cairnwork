@@ -146,6 +146,12 @@ class VisibleTestsWorker:
         if self.account is None and not self.pass_fail_only:
             raise ValueError(NEEDS_ACCOUNT)
 
+    # Never isolated, whatever the inner worker is (#234): probe() runs candidate code (as the
+    # verifier account, or the owner) before the pipeline's base checks, so a later account
+    # failure there could be the candidate's doing. pipeline reads both with getattr.
+    isolated = False
+    not_isolated_because = "visible-tests probe runs candidate code before verification"
+
     def run(self, workdir: Path, task) -> None:
         extra = 0
         try:
