@@ -115,14 +115,16 @@ require_run_root() {
 }
 
 # relpath: relative, no empty / "." / ".." / ".git" component, no newline, not starting with "-".
+# $2 names it in the refusal (default "path").
 require_relpath() {
   case "$1" in
-    "" | /* | -*) refuse "path must be a non-empty relative path" ;;
+    "" | /* | -*) refuse "${2:-path} must be a non-empty relative path" ;;
     *"
-"*) refuse "path has a newline" ;;
+"*) refuse "${2:-path} has a newline" ;;
   esac
   case "/$1/" in
-    *//* | */./* | */../* | */.[gG][iI][tT]/*) refuse "path has an empty, '.', '..' or '.git' component" ;;
+    *//* | */./* | */../* | */.[gG][iI][tT]/*)
+      refuse "${2:-path} has an empty, '.', '..' or '.git' component" ;;
   esac
 }
 
@@ -143,7 +145,7 @@ set_scope() {
   SCOPE=""
   WRITE_RULES=""
   for s in "$@"; do
-    require_relpath "$s"
+    require_relpath "$s" "scope entry"
     require_profile_safe "$CHECKOUT/$s" "scope entry"
     SCOPE="$SCOPE$s
 "

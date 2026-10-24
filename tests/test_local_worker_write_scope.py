@@ -78,9 +78,12 @@ def test_an_absolute_path_is_refused_even_inside_the_scope(runs):
     assert not target.exists()
 
 
-@pytest.mark.parametrize("entry", ["../x", "/abs", "a/./b", "a//b", ".git", "sub/.GIT/x", "-n"])
+@pytest.mark.parametrize(
+    "entry", ["../x", "/abs", "a/./b", "a//b", ".git", "sub/.GIT/x", "-n", 'a"b']
+)
 def test_a_bad_scope_entry_refuses_the_call(runs, entry):
-    assert refused(write(runs, "a.txt", entry))
+    proc = write(runs, "sub/x.py", "sub", entry)  # the write itself would be in scope
+    assert refused(proc) and b"refusing: scope entry " in proc.stderr, proc.stderr
     assert (runs / TAG / "checkout" / "a.txt").read_text() == "hello\n"
 
 
