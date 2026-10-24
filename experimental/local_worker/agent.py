@@ -151,9 +151,13 @@ class AgentLoop:
         self.tools.deadline = min(self._final, self.clock() + step)
 
     def observe(self) -> TreeState:
+        """The worker's git status now; not observed unless it exited 0 with its whole output
+        captured (a capped capture is never parsed as complete: Claude review of #239, NB5)."""
         self._step_deadline()
         call = self.tools.status()
-        return _parse_status(call.raw) if call.exit_code == 0 else TreeState(observed=False)
+        if call.exit_code != 0 or not call.capture_complete:
+            return TreeState(observed=False)
+        return _parse_status(call.raw)
 
     def run(
         self,
@@ -345,7 +349,8 @@ class AgentLoop:
             out.cleanup = "failed"
             self.abort_detail = self.abort_detail or f"cleanup: {exc}"
             return
-        out.patch = parse_numstat(stat.raw) if stat.exit_code == 0 else None
+        whole = stat.exit_code == 0 and stat.capture_complete  # a capped count is no count
+        out.patch = parse_numstat(stat.raw) if whole else None
         out.cleanup = "ok" if sweep.exit_code == 0 and out.patch is not None else "failed"
         self._observe_last(out)
 

@@ -38,7 +38,9 @@ DEFAULT_MAX_OUTPUT_BYTES = 20_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
 CAPTURE_LIMIT = 8 * 1024 * 1024  # per stream; output goes to a temp file, never unbounded memory
 
-# (exit code or None on timeout, stdout, stderr)
+# (exit code or None on timeout, stdout, stderr). A stream longer than CAPTURE_LIMIT is a capped
+# capture (subprocess_invoker returns head + marker + tail, always more than CAPTURE_LIMIT bytes;
+# a stream it read whole is at most CAPTURE_LIMIT): ToolCall.capture_complete is then False.
 Invoked = tuple[int | None, bytes, bytes]
 Invoker = Callable[[list[str], bytes | None, float], Invoked]
 
@@ -71,7 +73,8 @@ def direct_argv(
 
 
 def _captured(fh) -> bytes:
-    """At most CAPTURE_LIMIT bytes of a capture file: its head and tail around a marker."""
+    """The whole capture file if it has at most CAPTURE_LIMIT bytes, else its head and tail
+    around a marker (more than CAPTURE_LIMIT bytes in all: that length says it was capped)."""
     size = os.fstat(fh.fileno()).st_size
     fh.seek(0)
     if size <= CAPTURE_LIMIT:
@@ -159,6 +162,9 @@ class ToolCall:
     isolation: str
     started_at: str
     raw: bytes = field(default=b"", repr=False, compare=False)
+    # False when stdout or stderr was capped (tools.CAPTURE_LIMIT): ``raw`` is then not the whole
+    # output, and a git query's result is not observed (Claude review of #239, NB5).
+    capture_complete: bool = True
 
     def record(self) -> dict:
         rec = asdict(self)
@@ -214,6 +220,7 @@ class WorkerTools:
         self.deadline: float | None = None
         self.clock: Callable[[], float] = time.monotonic
         self.calls_started = 0  # wrapper processes started: a tool may have changed the tree
+        self.last_complete = True  # whether the last wrapper call's output was captured whole
 
     # -- the actions -------------------------------------------------------------------------
     def list_dir(self, path: str = ".") -> ToolCall:
@@ -240,6 +247,9 @@ class WorkerTools:
             call = self._log("edit_file", tool_args, rc, out + err, started)
             self._after("read", rc)
             return call
+        if not self.last_complete:  # a capped read is not the file: never write it back
+            note = f"edit_file: {path} is too large to edit; nothing written\n"
+            return self._log("edit_file", tool_args, 1, note.encode(), started)
         try:
             text = out.decode("utf-8")
         except UnicodeDecodeError:
@@ -299,6 +309,7 @@ class WorkerTools:
         argv = self._argv(action, args, nonce)
         self.calls_started += 1
         rc, out, err = self.invoker(argv, stdin, timeout)
+        self.last_complete = len(out) <= CAPTURE_LIMIT and len(err) <= CAPTURE_LIMIT
         marker = f"{START_MARKER} {nonce}\n".encode()
         if not err.startswith(marker):
             # No rule, missing binary, refused sudo: the wrapper never ran. Fail closed.
@@ -325,7 +336,7 @@ class WorkerTools:
     ) -> ToolCall:
         started = time.monotonic()
         rc, out, err = self._invoke(action, args, stdin, cap)
-        call = self._log(action_type, tool_args, rc, out + err, started)
+        call = self._log(action_type, tool_args, rc, out + err, started, self.last_complete)
         self._after(action, rc)
         return call
 
@@ -341,7 +352,13 @@ class WorkerTools:
             self._call("sweep", "sweep", [], {}, cap=SWEEP_TIMEOUT_SECONDS)
 
     def _log(
-        self, action_type: str, tool_args: dict, rc: int | None, raw: bytes, started: float
+        self,
+        action_type: str,
+        tool_args: dict,
+        rc: int | None,
+        raw: bytes,
+        started: float,
+        complete: bool = True,
     ) -> ToolCall:
         output, truncated = _clip(raw, self.max_output_bytes)
         call = ToolCall(
@@ -359,6 +376,7 @@ class WorkerTools:
             isolation="sudo+seatbelt" if self.mode == "worker" else "seatbelt-only",
             started_at=datetime.now(UTC).isoformat(),
             raw=raw,
+            capture_complete=complete,
         )
         self.turn_index += 1
         line = json.dumps(call.record(), ensure_ascii=False, sort_keys=True) + "\n"
