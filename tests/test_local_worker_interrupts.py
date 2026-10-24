@@ -215,8 +215,10 @@ def test_a_signal_while_the_line_is_built_or_written_is_only_counted(harness, mo
     assert _transcript(out, rec)["late_signals"] == (1 if step == "build_record" else 0)
 
 
-def test_a_first_signal_during_cleanup_is_only_counted(tmp_path, on_sigterm):
-    """PR #248 review item 6: no signal before; the loop had finished when the sweep runs."""
+@pytest.mark.parametrize(("limits", "stop"), [({}, "COMPLETED"), ({"max_steps": 1}, "TURN_LIMIT")])
+def test_a_first_signal_during_cleanup_is_only_counted(tmp_path, on_sigterm, limits, stop):
+    """PR #248 review item 6: no signal before; the loop had stopped (the model finished, or a
+    limit) when the sweep runs."""
 
     class SweepSignal(World):
         def handle(self, action, args, stdin):
@@ -224,10 +226,10 @@ def test_a_first_signal_during_cleanup_is_only_counted(tmp_path, on_sigterm):
                 os.kill(os.getpid(), signal.SIGTERM)
             return super().handle(action, args, stdin)
 
-    loop, world, _, _ = make_loop(tmp_path, [READ], world=SweepSignal())
+    loop, world, _, _ = make_loop(tmp_path, [READ], world=SweepSignal(), **limits)
     on_sigterm(loop)
     out = _run(loop)
-    assert out.exit_reason == "COMPLETED" and not out.interrupted and loop.deferred is None
+    assert out.exit_reason == stop and not out.interrupted and loop.deferred is None
     assert out.cleanup == "ok" and out.patch == (0, 0, 0) and loop.late_signals == 1
     assert [c[0] for c in world.calls][-2:] == ["sweep", "numstat"]  # the cleanup went on
     validate_record(episode.build_record(META, out))
