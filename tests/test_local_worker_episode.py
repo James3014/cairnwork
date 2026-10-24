@@ -180,6 +180,7 @@ def test_canary_binding_accepts_a_fresh_worker_pass(canary):
         {"wrapper_sha256": "0" * 64},
         {"host": "other"},
         {"finished_at": (datetime.now(UTC) - timedelta(days=8)).isoformat()},
+        {"finished_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat()},  # future-dated
     ],
 )
 def test_canary_binding_refuses(canary, changes):

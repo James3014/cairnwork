@@ -118,7 +118,11 @@ def verify_canary(
     """Plan v2 point 9: the report's recomputed sha256 matches its sidecar; overall PASS in worker
     mode; bound to the installed wrapper (whose sha256 also equals this repository's copy, so the
     installed tool configuration is the one this loop expects), to this host, and at most 7 days
-    old. Returns the binding recorded in the manifest and in every line."""
+    old. Returns the binding recorded in the manifest and in every line.
+
+    The sidecar sha256 proves integrity only (the report was not changed after it was written);
+    it is not a signature and proves nothing about who wrote the report. A report dated in the
+    future (beyond 5 minutes of clock skew) is refused like a stale one."""
     data = _inside(report_path, out_dir).read_bytes()
     digest = sha256_bytes(data)
     sidecar = report_path.with_name(report_path.name + ".sha256")

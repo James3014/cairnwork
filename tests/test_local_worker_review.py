@@ -193,3 +193,34 @@ def test_status_with_a_nonzero_exit_is_not_observed(tmp_path):
     world.handle = handle
     out = loop.run(initial_messages(TASK))
     assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == "status_unavailable"
+
+
+# -- extra mutants from the review: M4 (_inside as a prefix check), M5 (peer check removed) ------
+def test_inside_is_a_path_check_not_a_string_prefix(tmp_path):
+    from experimental.local_worker import corpus_io
+
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out2").mkdir()
+    (tmp_path / "out2" / "canary.json").write_text("{}")
+    assert (
+        corpus_io._inside(tmp_path / "out" / "x", tmp_path / "out")
+        == (tmp_path / "out" / "x").resolve()
+    )
+    with pytest.raises(corpus_io.InputRefused):
+        corpus_io._inside(tmp_path / "out2" / "canary.json", tmp_path / "out")
+
+
+def test_request_checks_the_connected_peer(monkeypatch):
+    body = b'{"data": [{"id": "m"}]}'
+    head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+    port = _drip_server(head, b"")
+    ep = endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1")
+    monkeypatch.setattr(endpoint, "peer_is_loopback", lambda peer: False)
+    with pytest.raises(endpoint.EndpointError, match="not a loopback") as err:
+        ep.models(time.monotonic() + 5)
+    assert type(err.value) is endpoint.EndpointError
+    monkeypatch.undo()
+    port = _drip_server(head, b"")
+    assert endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(
+        time.monotonic() + 5
+    ) == ["m"]
