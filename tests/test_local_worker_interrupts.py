@@ -24,8 +24,10 @@ READ = reply("read_file", path="src/app.py")
 
 def test_only_the_first_signal_interrupts(tmp_path):
     loop, _, _, _ = make_loop(tmp_path, [])
+    assert loop.interruptible is True
     with pytest.raises(KeyboardInterrupt):
         loop.interrupt(signal.SIGTERM, None)
+    assert loop.interruptible is False  # N11: the handler itself clears it before it raises
     loop.interrupt(signal.SIGTERM, None)
     loop.interrupt(signal.SIGINT, None)
     assert loop.late_signals == 2
