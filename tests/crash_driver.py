@@ -1,8 +1,9 @@
 """Run one task in a separate process so a test can kill it (crash drills).
 
-Usage: python crash_driver.py <repo> <state dir> <fix text> [orphan]
+Usage: python crash_driver.py <repo> <state dir> <fix text> [orphan | survivor]
 With 'orphan', the worker starts a detached child tagged CAIRNWORK_ATTEMPT and
-sleeps, so the test can SIGKILL this process mid-worker.
+sleeps, so the test can SIGKILL this process mid-worker. 'survivor' starts such a
+child that runs tests/survivor_child.py instead (#244).
 Env CRASH_TEST_COMMIT gives the task a hidden-test commit.
 """
 
@@ -18,22 +19,27 @@ from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
 
 repo, state, fix = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-orphan = len(sys.argv) > 4 and sys.argv[4] == "orphan"
+mode = sys.argv[4] if len(sys.argv) > 4 else ""
+orphan = mode in ("orphan", "survivor")
+SURVIVOR = Path(__file__).with_name("survivor_child.py")
 base = subprocess.run(
     ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
 ).stdout.strip()
 
 
 class Worker:
-    def run(self, workdir, _task):
+    def run(self, workdir, task):
         (workdir / "src" / "calc.py").write_text(fix)
         if orphan:
             late = state / "orphan-wrote"
             code = (
                 f"import time, pathlib; time.sleep(4); pathlib.Path({str(late)!r}).write_text('x')"
             )
+            argv = [sys.executable, "-c", code]
+            if mode == "survivor":
+                argv = [sys.executable, str(SURVIVOR), str(state)]
             subprocess.Popen(
-                [sys.executable, "-c", code],
+                argv,
                 start_new_session=True,
                 env={**os.environ, "CAIRNWORK_ATTEMPT": workdir.name},
             )

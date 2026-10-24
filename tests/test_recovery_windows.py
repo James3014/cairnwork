@@ -1,8 +1,9 @@
 """#244: two recovery crash windows a TLA+ pilot flagged, verified here. Recovery is unchanged.
 
-1. Parent crash, process sweep unavailable, recovery marks the task FAILED, the operator
-   supersedes and resubmits: nothing in Cairnwork stops a process the dead attempt left behind
-   from still acting while the new attempt runs. CONFIRMED; pinned below as today's behaviour.
+1. Parent crash (SIGKILL mid-worker), process sweep unavailable, recovery marks the task FAILED,
+   the operator supersedes and resubmits: nothing in Cairnwork stops the child the dead run's
+   worker started from still acting while the new attempt runs. CONFIRMED; pinned below as
+   today's behaviour.
    The only signal is the Decision's ``sweep_unavailable`` (route ``recover`` exits 4, #189).
 2. Core recorded a verified verdict, then an exception (here: the verdict readback fails) and a
    crash before the FINISHED journal row: the live run would have said FAILED (INFRA_ERROR), but
@@ -11,6 +12,8 @@
 """
 
 import os
+import secrets
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -19,28 +22,17 @@ import time
 import pytest
 from conftest import git
 from test_pipeline import VERIFY, EditWorker
-from test_recovery import GOOD, crash, settle, stores
+from test_recovery import DRIVER, GOOD, settle, stores
 from test_recovery import project as project  # noqa: F401 - fixture
 
 import cairnwork.recovery as recovery
-from cairnwork.confined import ATTEMPT_ENV, SWEEP_UNAVAILABLE
+from cairnwork.confined import SWEEP_UNAVAILABLE
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
 
 pytestmark = pytest.mark.sandbox
-
-# The dead attempt's child: waits until the new attempt's worker is running, then acts.
-SURVIVOR = """
-import pathlib, sys, time
-go, wrote = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-deadline = time.monotonic() + 120
-while not go.exists() and time.monotonic() < deadline:
-    time.sleep(0.05)
-wrote.write_text("old attempt acted while the new one ran")
-time.sleep(120)
-"""
 
 
 def _spec(project, key):  # noqa: F811 - the crash driver's task (tests/crash_driver.py)
@@ -51,17 +43,38 @@ def _spec(project, key):  # noqa: F811 - the crash driver's task (tests/crash_dr
 
 
 class _WaitsForTheSurvivor(EditWorker):
-    def __init__(self, go, wrote):
+    """Signals the old attempt's child with a fresh token and waits for it to echo it back."""
+
+    def __init__(self, state):
         super().__init__({"src/calc.py": GOOD})
-        self.go, self.wrote, self.saw = go, wrote, False
+        self.go, self.wrote = state / "new-attempt-running", state / "old-attempt-wrote"
+        self.token, self.echoed = secrets.token_hex(16), ""
 
     def run(self, workdir, task):
         super().run(workdir, task)
-        self.go.write_text("x")
+        assert not self.wrote.exists()  # nothing the old child wrote before this attempt ran
+        self.go.write_text(self.token)
         deadline = time.monotonic() + 60
         while not self.wrote.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.saw = self.wrote.exists()
+        self.echoed = self.wrote.read_text() if self.wrote.exists() else ""
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _survivor_pid(state):
+    path = state / "survivor.pid"
+    deadline = time.monotonic() + 30
+    while not path.exists() or not path.read_text():
+        assert time.monotonic() < deadline, "the worker's child never started"
+        time.sleep(0.05)
+    return int(path.read_text())
 
 
 def test_a_survivor_of_an_unswept_crash_still_acts_after_supersede_and_resubmit(
@@ -69,24 +82,33 @@ def test_a_survivor_of_an_unswept_crash_still_acts_after_supersede_and_resubmit(
     tmp_path,
     monkeypatch,
 ):
-    """#244 window 1 (recovery.py _settle, runlock.py: children do not hold the run lock)."""
-    crash(project, tmp_path, "WORKER_STARTED")
-    ledger, notary, journal = stores(tmp_path)
-    (dead,) = ledger.in_flight()
-    old_attempt = journal.entries(dead.task_id)[-1].attempt_id
-    go, wrote = tmp_path / "new-attempt-running", tmp_path / "old-attempt-wrote"
-    survivor = subprocess.Popen(  # what the dead run's worker started, tagged like AgyWorker's
-        [sys.executable, "-c", SURVIVOR, str(go), str(wrote)],
-        env={**os.environ, ATTEMPT_ENV: old_attempt},
-        start_new_session=True,
+    """#244 window 1 (recovery.py _settle, runlock.py: children do not hold the run lock).
+    The dead run's own worker started the child; the run is SIGKILLed mid-worker."""
+    proc = subprocess.Popen(
+        [sys.executable, str(DRIVER), str(project), str(tmp_path), GOOD, "survivor"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    pid = None
     try:
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "worker-running").exists():
+            assert time.monotonic() < deadline and proc.poll() is None
+            time.sleep(0.1)
+        pid = _survivor_pid(tmp_path)
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait()
         monkeypatch.setattr(recovery, "sweep_marked", lambda *_a, **_k: SWEEP_UNAVAILABLE)
-        (decision,), _ = settle(tmp_path)
-        assert (decision.new_status, decision.sweep_unavailable) == ("FAILED", True)
-        assert survivor.poll() is None  # recovery could not stop it, and said so
-        ledger.set_status(dead.task_id, "SUPERSEDED")
-        worker = _WaitsForTheSurvivor(go, wrote)
+        (decision,), ledger = settle(tmp_path)
+        assert (decision.new_status, decision.reason, decision.sweep_unavailable) == (
+            "FAILED",
+            "INTERRUPTED_AFTER_WORKER_STARTED",
+            True,
+        )
+        assert _alive(pid)  # recovery could not stop it, and said so
+        ledger.set_status(decision.task_id, "SUPERSEDED")
+        _, notary, journal = stores(tmp_path)
+        worker = _WaitsForTheSurvivor(tmp_path)
         result = run_task(  # nothing refuses the takeover
             _spec(project, "k2"),
             ledger=ledger,
@@ -96,12 +118,15 @@ def test_a_survivor_of_an_unswept_crash_still_acts_after_supersede_and_resubmit(
             run_root=tmp_path / "runs",
         )
         assert result.status == "COMPLETED" and result.verified, result.reason
-        assert worker.saw  # the old attempt's process acted during the new attempt's worker run
-        assert survivor.poll() is None  # and is still alive after the new attempt finished
-        assert result.attempt_id != old_attempt
+        assert worker.echoed == worker.token  # the old child acted on the new worker's signal
+        assert _alive(pid)  # and is still alive after the new attempt finished
+        assert result.attempt_id != decision.attempt_id
     finally:
-        survivor.kill()
-        survivor.wait()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if pid is not None and _alive(pid):
+            os.kill(pid, signal.SIGKILL)
 
 
 class _ReadbackFails(Notary):
