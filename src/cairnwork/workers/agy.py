@@ -24,6 +24,7 @@ the wrapper (agy_receipts.py).
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import signal
 import subprocess
@@ -87,17 +88,41 @@ class AgyWorkerError(Exception):
     pass
 
 
+def _uid(user: str) -> int | None:
+    try:
+        return pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return None
+
+
 @dataclass(frozen=True)
 class AgyWorker:
     model: str = "gemini-3.8-flash-high"
     timeout_seconds: int = 900
     agy: str = "agy"
     dispatch: agy_dispatch.Dispatch | None = None
+    verifier_user: str | None = None  # the verifier account, if any (isolation, #234)
 
     @property
     def isolated(self) -> bool:
         """Runs as another uid (agy_run_as_user): pipeline may then report UNCOMPARABLE (#234)."""
-        return self.dispatch is not None and self.dispatch.run_as_user is not None
+        return not self.not_isolated_because
+
+    @property
+    def not_isolated_because(self) -> str:
+        """ "" only when agy runs as a uid that is neither root, the owner (os.getuid()) nor the
+        verifier account: a worker sharing one of them could break the base runs or the account."""
+        user = self.dispatch.run_as_user if self.dispatch is not None else None
+        if user is None:
+            return "agy_run_as_user is not set"
+        uid = _uid(user)
+        if uid is None:
+            return f"agy_run_as_user {user} does not exist"
+        if uid in (0, os.getuid()):
+            return f"agy_run_as_user {user} is uid {uid}: root or the owner"
+        if self.verifier_user is not None and uid == _uid(self.verifier_user):
+            return f"agy_run_as_user {user} is the verifier account (uid {uid})"
+        return ""
 
     def run(self, workdir: Path, task) -> None:
         dispatch = self.dispatch

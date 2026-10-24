@@ -151,6 +151,15 @@ class Intake:
             tmp.chmod(0o600)
             tmp.replace(path)
 
+    def clone_problem(self, clone: Path) -> str:
+        """#234: a clone the Issue runner works in must be the state's mirror, compared by real
+        path (a symlink alias is the same clone; another clone of the same origin is not, and its
+        refs and config can differ). "" when it is, or when the state names no mirror."""
+        mirror = self.config()["mirror"]
+        if mirror and os.path.realpath(mirror) != os.path.realpath(clone):
+            return f"CLONE_NOT_STATE_MIRROR: {clone} is not the state's mirror {mirror}"
+        return ""
+
     def test_store(self) -> DeferredStore:
         return DeferredStore.for_state(self.state, self.config().get("test_source"))
 

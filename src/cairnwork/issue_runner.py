@@ -357,9 +357,11 @@ def main(argv: list[str] | None = None) -> int:
     github = GitHub(args.gh, args.repo)
     clone = Path(args.clone).resolve()
     try:
+        if problem := intake.clone_problem(clone):  # before anything is fetched (#234)
+            raise RuntimeError(problem)
         _verify_origin(clone, github.repo)
         require_bot_gh(args.gh, github.repo, clone)
-    except RuntimeError as exc:
+    except (RuntimeError, IntakeRefused) as exc:
         print(json.dumps({"error": str(exc).split(":")[0], "detail": str(exc)}))
         return 3
     intake.prepare()

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork import runlock
+from cairnwork.account_check import base_stage, precheck
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.deferred_tests import (
     BASE_COMPARE_RULE,
@@ -78,8 +79,10 @@ def verify_candidate(
     """``verified`` is true only for a Core verdict bound to what was judged: the candidate, or
     with deferred tests the tree that ran (candidate plus tests) and its ``binding`` (#229), whose
     head is the candidate. ``status`` is VERIFIED, FAILED, REFUSED or UNCOMPARABLE (#234: the base
-    could not be compared; ``uncomparable`` says why, Core is never asked). Raises TaskRejected for
-    malformed input and IntakeRefused when drained or the mirror cannot be used."""
+    could not be compared; ``uncomparable`` says why, Core is never asked). The account precheck
+    runs before the test commit is burned; ``tests_consumed`` says whether the test commit is now
+    used up (a retry needs a new one). Raises TaskRejected for malformed input and IntakeRefused
+    when drained or the mirror cannot be used."""
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
@@ -106,6 +109,7 @@ def verify_candidate(
         _require_accepting(intake)  # a drain that came in while we waited for the lock
         with _marked(intake, result.attempt_id):
             try:
+                precheck(*verifying)  # before _burn: an unusable account consumes no tests
                 binding = _judge(intake, task, source, specs, candidate, notary, result, verifying)
             except (CandidateRejected, TestCommitRejected, WorkspaceError) as exc:
                 result.reason, status = str(exc), "REFUSED"
@@ -130,6 +134,7 @@ def verify_candidate(
         "logs": result.logs,
         "p2p": result.p2p,
         "uncomparable": uncomparable,  # {code, detail, rule} when status is UNCOMPARABLE (#234)
+        "tests_consumed": bool(test_commit) and _used(intake, test_commit).exists(),
     }
 
 
@@ -205,9 +210,8 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
     registered by creating ``<state>/verify-used-tests/<sha>`` exclusively, before the tests
     are fetched and so before any candidate code runs; a crash or a later refusal still
     counts as used. record=False only checks."""
-    used = intake.state / "verify-used-tests"
-    used.mkdir(mode=0o700, exist_ok=True)
-    marker = used / test_commit  # test_commit was checked to be 40 hex digits
+    marker = _used(intake, test_commit)
+    marker.parent.mkdir(mode=0o700, exist_ok=True)
     try:
         if record:
             os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
@@ -215,6 +219,10 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
             raise FileExistsError
     except FileExistsError:
         raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
+
+
+def _used(intake: Intake, test_commit: str) -> Path:
+    return intake.state / "verify-used-tests" / test_commit  # checked to be 40 hex digits
 
 
 def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> dict | None:
@@ -242,12 +250,14 @@ def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifyin
             # the same journal and row the worker path writes; cairnwork-attest reads it by
             # (task_id, attempt_id), both in this run's output
             intake.journal.record(result.task_id, result.attempt_id, "TEST_SOURCE", mode)
-            test_files = tests_with_teeth(task, specs, run_root, result, verifying)
+            with base_stage(*verifying):  # base runs: an account failure is no evidence (#234)
+                test_files = tests_with_teeth(task, specs, run_root, result, verifying)
             judged = lay_tests_over(
                 task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
             )
             binding = _binding(task, candidate, test_files, judged)
-        plan = p2p_for(task, specs, test_files, run_root, result, verifying)
+        with base_stage(*verifying):
+            plan = p2p_for(task, specs, test_files, run_root, result, verifying)
         result.candidate_commit = judged
         digest = request_digest(task.request() | {"candidate": candidate})
         if binding:  # what a receiver can recompute, unlike the scratch paths in the request

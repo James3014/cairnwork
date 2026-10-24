@@ -122,6 +122,15 @@ class VisibleTestsWorker:
         if self.account is None and not self.pass_fail_only:
             raise ValueError(NEEDS_ACCOUNT)
 
+    @property
+    def isolated(self) -> bool:
+        """The inner worker's isolation (pipeline reads it with getattr, #234)."""
+        return getattr(self.inner, "isolated", False) is True
+
+    @property
+    def not_isolated_because(self) -> str:
+        return getattr(self.inner, "not_isolated_because", "")
+
     def run(self, workdir: Path, task) -> None:
         self.inner.run(workdir, task)
         specs = visible_specs(task)
