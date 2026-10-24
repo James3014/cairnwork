@@ -131,6 +131,9 @@ def transcript(eid: str, task: Task, messages: list, out: LoopOutcome, loop: Age
         "messages": messages,
         "turns": turns,
         "abort_detail": loop.abort_detail,
+        # SIGTERM/SIGINTs only counted (NB8): after the first, or once the loop had stopped. The
+        # count is as of this write; the line itself never carries it (no schema field).
+        "late_signals": loop.late_signals,
     }
 
 

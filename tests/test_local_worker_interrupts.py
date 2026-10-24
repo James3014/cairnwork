@@ -4,6 +4,7 @@ SystemExit is recorded, the cleanup still runs and the line is written before it
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 
@@ -94,6 +95,19 @@ def test_a_system_exit_is_raised_only_after_the_line_is_written(harness, monkeyp
     [rec] = lines(out)
     assert rec["termination"]["abort_cause"] == "interrupted"
     assert rec["termination"]["cleanup"] == "ok"
+
+
+def _transcript(out, rec):
+    return json.loads((out / "private" / rec["episode_id"] / "transcript.json").read_text())
+
+
+def test_late_signals_reach_the_private_transcript_only(harness, monkeypatch):
+    run, out = harness
+    monkeypatch.setattr(local_worker_fakes, "World", Signalling)
+    assert run([READ], "run") == 0
+    [rec] = lines(out)
+    assert _transcript(out, rec)["late_signals"] == 1  # the second SIGTERM, during the sweep
+    assert "late_signals" not in json.dumps(rec)
 
 
 @pytest.fixture
