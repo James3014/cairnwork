@@ -53,7 +53,9 @@ class _WaitsForTheSurvivor(EditWorker):
     def run(self, workdir, task):
         super().run(workdir, task)
         assert not self.wrote.exists()  # nothing the old child wrote before this attempt ran
-        self.go.write_text(self.token)
+        part = self.go.with_name(self.go.name + ".part")
+        part.write_text(self.token)
+        os.replace(part, self.go)  # by rename: the child never reads an empty signal
         deadline = time.monotonic() + 60
         while not self.wrote.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
