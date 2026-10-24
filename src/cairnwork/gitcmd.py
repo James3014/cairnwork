@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 GIT_TIMEOUT_SECONDS = 60
 NETWORK_TIMEOUT_SECONDS = 300  # fetch and push over a network; local commands keep the default
@@ -92,6 +93,26 @@ def run_git(
     timeout is in seconds; pass NETWORK_TIMEOUT_SECONDS for a fetch or push over a network.
     A failure carries a bounded, sanitised tail of git's stderr (see stderr_tail).
     """
+    return _exec(repo, args, index_file, isolate_config, timeout, text=True)
+
+
+def run_git_bytes(repo: Path, *args: str, timeout: float = GIT_TIMEOUT_SECONDS) -> bytes:
+    """Like run_git, but stdout is raw bytes: no decoding and no newline translation.
+
+    A failure's ``CalledProcessError`` (``__cause__``) then carries bytes in ``stdout``.
+    """
+    return _exec(repo, args, None, False, timeout, text=False)
+
+
+def _exec(
+    repo: Path,
+    args: tuple[str, ...],
+    index_file: Path | None,
+    isolate_config: bool,
+    timeout: float,
+    *,
+    text: bool,
+) -> Any:  # str when text, else bytes
     if not timeout or timeout <= 0:
         raise ValueError(f"timeout must be a positive number of seconds, got {timeout!r}")
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -105,8 +126,8 @@ def run_git(
             ["git", *_SAFE_OPTIONS, "-C", str(repo), *args],  # noqa: S607
             check=True,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
+            text=text,
+            encoding="utf-8" if text else None,
             timeout=timeout,
             env=env,
         )
