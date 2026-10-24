@@ -119,12 +119,10 @@ def _settle(
     if dispatched and Path(dispatched[-1]) != roots[0]:
         roots.append(Path(dispatched[-1]))
     left = []
-    # The account goes first (#240): its checkouts hold files it wrote, which only it can remove,
-    # and the owner-side pass's chmod 0o700 would shut it out of them were the roots ever shared.
-    if account is not None:  # the verifier ran under the account's run root; the owner cannot rm it
-        _remove_account_leftovers(account, attempt_id)
     for owner_root in roots:
         _remove_leftovers(owner_root, attempt_id)
+    if account is not None:  # the verifier ran under the account's run root; the owner cannot rm it
+        _remove_account_leftovers(account, attempt_id)
     for owner_root in roots:
         left += _leftover_names(owner_root, attempt_id)
     if account is not None:

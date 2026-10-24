@@ -202,7 +202,7 @@ def _fingerprint(path):
 
 @pytest.mark.parametrize("mode", MODES)
 def test_links_out_of_the_checkout_change_nothing_outside_it(
-    repo, tmp_path, own_names, monkeypatch, mode
+    repo, tmp_path, own_names, monkeypatch, mode, request
 ):
     """Links (hard or symbolic) the test makes from its checkout to the source repo, an unrelated
     run's file and an owner-only state file: after the run and cleanup their contents, modes and
@@ -211,8 +211,12 @@ def test_links_out_of_the_checkout_change_nothing_outside_it(
     run_id = "w" + os.urandom(6).hex()
     own_names.append(f"{run_id}-")
     run_root.mkdir(parents=True, exist_ok=True)
-    unrelated = run_root / f"{run_id}-unrelated" / "f.txt"
+    # another run's file the account can read: not in the shared run root, whose new names other
+    # sessions' test fixtures sweep (test_verifier_account._clean_shared_run_root)
+    base = tmp_path if account is None else ACCOUNT.root
+    unrelated = base / f".cw240-unrelated-{run_id}" / "f.txt"
     unrelated.parent.mkdir()
+    request.addfinalizer(lambda: shutil.rmtree(unrelated.parent, ignore_errors=True))
     unrelated.write_text("other run\n")
     os.chmod(unrelated, 0o640)
     journal = tmp_path / "state" / "journal.sqlite"
@@ -253,8 +257,7 @@ def test_recovery_removes_a_crashed_account_checkout_and_staging_clone(
     project, tmp_path, own_names
 ):
     """A crash leaves the account's copy (with a directory the account closed to itself) and the
-    owner's staging clone. Recovery removes both, even when the owner-side pass covers the same
-    root: the account goes first, before the owner's chmod 0o700 could shut it out."""
+    owner's staging clone. Recovery removes both."""
     crash(project, tmp_path, "CANDIDATE", GOOD)
     ledger, notary, journal = stores(tmp_path)
     attempt = journal.entries(ledger.in_flight()[0].task_id)[-1].attempt_id
