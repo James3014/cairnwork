@@ -320,3 +320,34 @@ def test_each_stop_cause_is_recorded(tmp_path, exc, cause):
     assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == cause
     assert loop.abort_detail == f"{type(exc).__name__}: {exc}" and loop.deferred is None
     validate_record(episode.build_record(META, out))
+
+
+def _signal_while_unwinding(monkeypatch, loop, unwind):
+    """_step's turn: ``unwind`` runs; a SIGTERM lands while its exception is being handled."""
+
+    def step(log, messages, deadline):
+        unwind()
+
+    monkeypatch.setattr(loop, "_step", step)
+
+
+def test_w4_a_signal_while_a_generator_closes_defers_nothing(tmp_path, on_sigterm, monkeypatch):
+    """Review of PR #248 round 3, W4: the interrupt's context is a GeneratorExit, not an exit."""
+
+    def gen():
+        try:
+            yield
+        finally:  # runs during close(), with GeneratorExit being raised
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def close_a_generator():
+        g = gen()
+        next(g)
+        g.close()
+
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    _signal_while_unwinding(monkeypatch, loop, close_a_generator)
+    out = _run(loop)
+    assert out.abort_cause == "interrupted" and loop.deferred is None
+    validate_record(episode.build_record(META, out))
