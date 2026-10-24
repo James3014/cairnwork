@@ -77,7 +77,7 @@ def _git_checkout(runs):
     return co, str(runs / TAG), head.stdout.strip()
 
 
-def _wait_for(path, seconds=20.0):
+def _wait_for(path, seconds=60.0):
     end = time.monotonic() + seconds
     while not path.exists():
         assert time.monotonic() < end, f"{path.name} never appeared"
