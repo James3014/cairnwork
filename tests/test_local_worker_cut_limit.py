@@ -8,6 +8,9 @@ the limit, and the validator recomputes both the same way.
 
 from __future__ import annotations
 
+import os
+import signal
+
 import pytest
 from local_worker_fakes import META, TASK, World, make_loop, reply
 
@@ -75,3 +78,45 @@ def test_a_real_run_cut_inside_its_write_turn(tmp_path):
     validate_record(rec)
     assert rec["cut_900s"]["tree_differs_at_limit"] is True
     assert rec["cut_900s"]["turns_completed"] == 1
+
+
+def test_an_interrupted_tool_turn_spans_until_its_tree_was_observed(tmp_path, monkeypatch):
+    """Codex review of PR #248, round 2: interrupted as its write starts (at T), the turn's
+    surviving worker writes at T+5 before the sweep and the tree is observed at T+10. At T+2
+    the tree was unchanged; the line claimed True there. The turn now ends at the observation,
+    so any limit before it is null; after it, the observed tree."""
+    loop, _, _, clock = make_loop(tmp_path, [reply("write_file", path="src/a.py", content="a")])
+    interrupted_at: list[float] = []
+
+    class Late(World):
+        def handle(self, action, args, stdin):
+            if action == "write":
+                interrupted_at.append(loop._own())
+                os.kill(os.getpid(), signal.SIGTERM)
+            if action == "sweep":
+                clock.t += 5.0
+                self.files["src/late.py"] = "z\n"  # the surviving process, just before the sweep
+            if action == "status":
+                clock.t += 5.0
+            return super().handle(action, args, stdin)
+
+    world = Late(clock=clock)
+    loop.tools.invoker = world
+    before = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, loop.interrupt)
+    try:
+        out = loop.run(initial_messages(TASK))
+    finally:
+        signal.signal(signal.SIGTERM, before)
+    [turn] = out.turns
+    [t_int] = interrupted_at
+    assert turn.tool_ran and turn.tree is not None and turn.tree.observed
+    assert turn.t_end >= t_int + 10.0  # ends with the post-sweep observation
+    for limit, want in ((t_int + 2.0, None), (round(turn.t_end, 3) + 1.0, True)):
+        rec = episode.build_record(META, out, cut_seconds=limit)
+        validate_record(rec)
+        assert rec["cut_900s"]["tree_differs_at_limit"] is want, limit
+    rec = episode.build_record(META, out, cut_seconds=t_int + 2.0)
+    bad = dict(rec, cut_900s=dict(rec["cut_900s"], tree_differs_at_limit=True))
+    with pytest.raises(SchemaError, match="cut_900s differs"):
+        validate_record(bad)

@@ -386,8 +386,9 @@ class AgentLoop:
         self._observe_last(out)
 
     def _observe_last(self, out: LoopOutcome) -> None:
-        """The run stopped after a tool started but before its tree was observed: observe it now,
-        after the sweep (nothing else ran since), so its cut is known; else it stays unobserved."""
+        """The run stopped after a tool started, before its tree was observed: observe it now, after
+        the sweep (nothing else ran since); else it stays unobserved. The turn ends when this try
+        ends: its processes ran until the sweep, so a limit before that is null (Codex, PR #248)."""
         last = out.turns[-1] if out.turns else None
         if last is None or not last.tool_ran or (last.tree is not None and last.tree.observed):
             return
@@ -395,3 +396,5 @@ class AgentLoop:
             last.tree = self.observe()
         except (WorkerIsolationError, ToolDeadline):
             pass
+        finally:
+            last.t_end = self._own()
