@@ -5,6 +5,7 @@ The worker-mode canary needs the installed wrapper and sudoers rule; it is run b
 addendum. Here the same canary runs as the Owner so Seatbelt regressions show up in CI.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -274,7 +275,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     assert clean.returncode == 0, clean.stdout
     tree = parse_status(clean.stdout)
     assert tree.observed and tree.head == head.strip() and tree.entries == ()
-    before = sorted(p.name for p in (co / ".git").rglob("*"))
+    before = _git_snapshot(co)
     assert run(runs, "write", root, "a.txt", stdin=b"hello\nworld\n").returncode == 0
     assert run(runs, "write", root, "new dir/b.py", stdin=b"x\ny\nz\n").returncode == 0
     assert run(runs, "write", root, "x.log", stdin=b"l\n").returncode == 0
@@ -283,7 +284,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     stat = run(runs, "numstat", root)
     # staged with --force: the ignored x.log counts too (every file the run changed)
     assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0), stat.stdout
-    assert sorted(p.name for p in (co / ".git").rglob("*")) == before  # .git never written
+    assert _git_snapshot(co) == before  # .git never written: same paths, modes and bytes
     assert list((runs / TAG / "tmp").iterdir()) == []  # the throwaway index is removed
 
 
@@ -347,3 +348,62 @@ def test_git_queries_fail_on_an_unreadable_directory(runs):
     finally:
         hidden.chmod(0o700)
     assert list((runs / TAG / "tmp").iterdir()) == []  # temp dir removed on failure too
+
+
+def _git_snapshot(co):
+    """Every path under .git with its mode and the sha256 of its bytes (not just the names)."""
+    out = {}
+    for p in sorted((co / ".git").rglob("*")):
+        st = p.lstat()
+        data = p.read_bytes() if p.is_file() and not p.is_symlink() else b""
+        out[str(p.relative_to(co))] = (st.st_mode, hashlib.sha256(data).hexdigest())
+    return out
+
+
+@pytest.mark.sandbox
+def test_git_queries_run_no_configured_filter_and_leave_git_unchanged(runs):
+    """Codex review of #239: a clean/smudge/process filter configured in .git/config, in a
+    config file it includes, or named by a worktree .gitattributes never runs during status or
+    numstat, which count the bytes as they are; .git keeps every byte and mode."""
+    from experimental.local_worker.gitstate import parse_numstat, parse_status
+
+    co, root = _git_checkout(runs)
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    (co / "t.py").write_text("base1\n")  # tracked; the change keeps its size: status must hash it
+    subprocess.run([*git, "add", "t.py"], check=True)
+    subprocess.run([*git, "commit", "-qm", "t"], check=True)
+    tmp = runs / TAG / "tmp"  # worker-writable: a filter that ran could write its marker here
+    hook = "/usr/bin/touch {m}; /bin/cat"
+    included = tmp / "included.cfg"  # an include target the worker could have written
+    included.write_text(f'[filter "evil2"]\n\tclean = {hook.format(m=tmp / "m2")}\n')
+    with (co / ".git" / "config").open("a") as fh:
+        fh.write(f'[filter "evil"]\n\tclean = {hook.format(m=tmp / "m1")}\n')
+        fh.write(
+            f"\tsmudge = {hook.format(m=tmp / 'm1s')}\n\tprocess = /usr/bin/touch {tmp / 'm1p'}\n"
+        )
+        fh.write("\trequired = true\n")
+        fh.write(f"[include]\n\tpath = {included}\n")
+    (co / ".git" / "info").mkdir(exist_ok=True)
+    (co / ".git" / "info" / "attributes").write_text("*.py filter=evil\n")
+    (co / ".git" / "info" / "exclude").write_text("*.tmp\n")
+    before = _git_snapshot(co)
+    assert run(runs, "write", root, "a.py", stdin=b"one\ntwo\n").returncode == 0
+    assert run(runs, "write", root, ".gitattributes", stdin=b"*.txt filter=evil2\n").returncode == 0
+    assert run(runs, "write", root, "b.txt", stdin=b"three\n").returncode == 0
+    assert run(runs, "write", root, "t.py", stdin=b"base2\n").returncode == 0
+    assert run(runs, "write", root, "x.tmp", stdin=b"t\n").returncode == 0
+    tree = parse_status(run(runs, "status", root).stdout)
+    assert tree.observed and tree.paths() == [".gitattributes", "a.py", "b.txt", "t.py", "x.tmp"]
+    assert "! x.tmp" in tree.entries  # the real info/exclude still applies
+    stat = run(runs, "numstat", root)
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (6, 1), stat.stdout
+    assert sorted(p.name for p in tmp.iterdir()) == ["included.cfg"]  # no marker, no temp dir
+    assert _git_snapshot(co) == before
+
+
+def test_git_query_writes_only_new_files_in_its_mktemp_dir():
+    """Codex review of #239, B2: no mkdir -p, no cp onto a path, noclobber before any write."""
+    text = WRAPPER.read_text()
+    query = text[text.index("GIT_QUERY=") : text.index("real_git()")]
+    assert "mkdir -p" not in query and "/bin/cp " not in query
+    assert query.index("set -C") < query.index('>"$q/out"') < query.index('>"$o/HEAD"')

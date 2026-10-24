@@ -149,43 +149,65 @@ sandboxed() {
 }
 
 # The two fixed git queries (status, numstat): read-only on .git, as the worker under the same
-# profile. What git reads beyond the index and objects is pinned: no system or global config,
-# HOME and XDG_CONFIG_HOME are /var/empty (root-owned; never <run_root>/tmp, which the worker can
-# write), core.attributesFile and core.excludesFile are /dev/null, and no fsmonitor, untracked
-# cache, hooks, optional index locks, external diff or textconv. The checkout's own .git/config,
-# prepared by the Owner, still applies. The worker CAN write the worktree's .gitattributes and
-# .gitignore: git reads attributes from the empty tree (--attr-source), so no .gitattributes can
-# filter, convert or binarise anything ("-diff" would make numstat print "-"), and numstat stages
-# with --force (ignored files count) and diffs with --text; those two files are still part of the
-# change they make. numstat stages into a throwaway index and object directory under
-# <run_root>/tmp (the real objects only as an alternate), so .git is never written. The real git
-# binary is used, not the /usr/bin/git shim (its xcrun cache write outside the profile fails).
+# profile. Git runs on a throwaway git dir in a fresh mktemp directory (Codex review of #239, B2
+# and the filter item): its HEAD is the real HEAD commit, the real objects are only an alternate,
+# its config is two lines written here (so no repository config applies: no filter, include,
+# driver or hook from .git/config), its info/attributes switches every filter and conversion off,
+# and it copies the real info/exclude. No system or global config either; HOME and
+# XDG_CONFIG_HOME are /var/empty (root-owned; never <run_root>/tmp, which the worker can write);
+# core.attributesFile and core.excludesFile are /dev/null; no fsmonitor, untracked cache, hooks,
+# optional index locks, external diff or textconv. The worker CAN write the worktree's
+# .gitattributes and .gitignore: attributes come from the empty tree (--attr-source) and the
+# overlay, so no .gitattributes can filter, convert or binarise anything, and numstat stages with
+# --force (ignored files count) into a fresh index read from HEAD and diffs with --text; those
+# two files are still part of the change they make. status reads the real index; nothing in .git
+# is ever written. Every file the query writes is new (mkdir without -p, noclobber), inside the
+# mktemp directory. The real git binary is used, not the /usr/bin/git shim (its xcrun cache write
+# outside the profile fails).
 # shellcheck disable=SC2016  # expanded by the inner shell
 GIT_QUERY='set -euf
 c=$1
-export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0
-export GIT_TERMINAL_PROMPT=0 GIT_DIR="$c/.git" GIT_WORK_TREE="$c" GIT_CEILING_DIRECTORIES="${c%/*}"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_ATTR_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0 GIT_WORK_TREE="$c" GIT_CEILING_DIRECTORIES="${c%/*}"
 export HOME=/var/empty XDG_CONFIG_HOME=/var/empty
 G="$3 --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.fsmonitor=false -c core.untrackedCache=false -c safe.directory=*
  -c core.hooksPath=/dev/null -c diff.external= -c core.quotePath=true
  -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null"
 q=$(/usr/bin/mktemp -d "$TMPDIR/gitq.XXXXXXXXXX")  # unpredictable, 0700, created atomically
 trap '\''/bin/rm -rf "$q"'\'' EXIT
+set -C  # noclobber: a redirection below never writes through an existing file
 # Any git stderr (e.g. "could not open directory") or a nonzero exit fails the query (exit 3/4,
 # the message printed instead of a result): the caller then treats the tree as not observed.
 step() {
+  /bin/rm -f "$q/out" "$q/err"
   "$@" >"$q/out" 2>"$q/err" || { /bin/cat "$q/err"; exit 3; }
   [ ! -s "$q/err" ] || { /bin/cat "$q/err"; exit 4; }
 }
+export GIT_DIR="$c/.git"  # only to name the HEAD commit (config is read; nothing there runs)
+step $G rev-parse --verify --end-of-options "HEAD^{commit}"
+h=$(/bin/cat "$q/out")
+case ${#h}:$h in 40:*[!0-9a-f]* | 64:*[!0-9a-f]*) echo "bad HEAD"; exit 3 ;;
+  40:* | 64:*) ;; *) echo "bad HEAD"; exit 3 ;; esac
+o="$q/gitdir"
+/bin/mkdir "$o" "$o/refs" "$o/info" "$o/objects" "$o/objects/info"
+printf "%s\n" "$h" >"$o/HEAD"
+if [ ${#h} = 64 ]; then
+  printf "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n" >"$o/config"
+else
+  printf "[core]\n\trepositoryformatversion = 0\n" >"$o/config"
+fi
+printf "%s\n" "$c/.git/objects" >"$o/objects/info/alternates"
+printf "* -filter -text -ident -working-tree-encoding\n" >"$o/info/attributes"
+[ ! -f "$c/.git/info/exclude" ] || /bin/cat "$c/.git/info/exclude" >"$o/info/exclude"
+export GIT_DIR="$o"
 if [ "$2" = status ]; then
+  export GIT_INDEX_FILE="$c/.git/index"
   step $G status --porcelain=v2 --branch -z -uall --renames --ignored=matching
   /bin/cat "$q/out"
   exit 0
 fi
-/bin/mkdir "$q/objects"
-/bin/cp "$c/.git/index" "$q/index"
-export GIT_INDEX_FILE="$q/index" GIT_OBJECT_DIRECTORY="$q/objects"
-export GIT_ALTERNATE_OBJECT_DIRECTORIES="$c/.git/objects"
+export GIT_INDEX_FILE="$q/index"
+step $G read-tree HEAD
 step $G add -A --force
 step $G diff --cached --text --no-ext-diff --no-textconv --no-renames --numstat -z HEAD
 /bin/cat "$q/out"'
