@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from local_worker_fakes import BASE_SHA, FakeEndpoint, World, reply
+from local_worker_fakes import BASE_SHA, cli_harness, lines, reply
 
-from experimental.local_worker import cli, corpus_io, endpoint, episode, gitstate, tools
+from experimental.local_worker import corpus_io, endpoint, episode, gitstate
 from experimental.local_worker.episode_schema import TOP_EXTRA, TOP_SPEC, SchemaError
 from experimental.local_worker.episode_schema import validate_record as validate
 
@@ -59,46 +59,7 @@ L0_REPLIES = [
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
-    """The CLI with fake tools and endpoint injected; returns a runner and the output dir."""
-    out = tmp_path / "out"
-    task = tmp_path / "task.json"
-    task.write_text(
-        json.dumps(
-            {
-                "task_id": "TASK_01",
-                "repo": "repo_x",
-                "prompt": "SECRET-PROMPT-7f3 fix it",
-                "public_tests": ["tests/test_app.py"],
-            }
-        )
-    )
-    state: dict[str, Any] = {"replies": [], "world": None}
-    binding = {"report_sha256": "c" * 64, "report": "r.json"}
-    monkeypatch.setattr(corpus_io, "verify_canary", lambda path, out_dir: binding)
-    monkeypatch.setattr(cli, "LoopbackEndpoint", lambda url: FakeEndpoint(state["replies"]))
-
-    def tools_factory(run_root, log, mode):
-        assert mode == "worker"
-        state["world"] = World()
-        return tools.WorkerTools(run_root, log, mode=mode, invoker=state["world"])
-
-    monkeypatch.setattr(cli, "WorkerTools", tools_factory)
-
-    def run(replies: list, *extra: str) -> int:
-        state["replies"] = list(replies)
-        checkout = tmp_path / ("0" * 32) / "checkout"
-        checkout.mkdir(parents=True, exist_ok=True)
-        args = ["--task", str(task), "--checkout", str(checkout), "--out", str(out)]
-        args += ["--model", "served-model", "--context-cap", "65536", "--canary-report", "x"]
-        return cli.main([*extra[:1], *args, *extra[1:]])
-
-    return run, out
-
-
-def lines(out: Path) -> list[dict]:
-    files = sorted(out.glob("episodes-*.jsonl"))
-    assert len(files) == 1
-    return [json.loads(x) for x in files[0].read_text().splitlines()]
+    return cli_harness(tmp_path, monkeypatch)
 
 
 def test_run_writes_one_valid_line_with_the_spec_keys(harness):
@@ -149,9 +110,10 @@ def test_resume_from_the_cut_with_a_plan(harness):
     assert msgs[-3]["content"] == "PLAN: change x"  # then the reply and its tool message
     roles = [m["role"] for m in msgs[:6]]
     assert roles == ["system", "user", "assistant", "tool", "assistant", "tool"]
-    assert child["turns"][0]["t_start_seconds"] == parent["turns"][2]["t_start_seconds"]
+    pre = parent["first_edit_cut"]
+    assert child["parent_pre_cut_wall_seconds"] == pre["pre_cut_wall_seconds"]
     offset = child["wall_clock_seconds"] - child["own_wall_seconds"]  # the parent's pre-cut time
-    assert offset == pytest.approx(parent["first_edit_cut"]["pre_cut_wall_seconds"], abs=0.002)
+    assert offset == pytest.approx(pre["pre_cut_wall_seconds"], abs=0.002)
 
 
 def test_resume_refuses_a_turn_after_the_cut(harness):

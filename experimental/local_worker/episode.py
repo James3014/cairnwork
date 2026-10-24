@@ -253,6 +253,34 @@ def public_turn(t: TurnLog, base: TreeState) -> dict:
     }
 
 
+PARENT_FIELDS = (
+    "parent_pre_cut_read_actions",
+    "parent_pre_cut_tokens_accum",
+    "parent_pre_cut_wall_seconds",
+    "parent_pre_cut_turns_missing_usage",
+)
+
+
+def parent_prefix(rows: list[dict], cut_turn: int) -> dict:
+    """The parent_* fields of a resume run, from the parent transcript's turn rows before
+    ``cut_turn`` (the parent is a fresh run, so its clock is its own)."""
+    before = [r for r in rows if r["index"] < cut_turn]
+    start = next(r["t_start"] for r in rows if r["index"] == cut_turn)
+    tokens = [v for r in before for v in r["tokens"]]
+    return dict(
+        zip(
+            PARENT_FIELDS,
+            (
+                sum(r["action_type"] in READ_ACTIONS for r in before),
+                _sum(tokens),
+                round(float(start), 3),
+                sum(any(v is None for v in r["tokens"]) for r in before),
+            ),
+            strict=True,
+        )
+    )
+
+
 def token_totals(turns: list[dict]) -> dict:
     return {k: _sum([t[f"tokens_{k}"] for t in turns]) for k in ("prompt", "completion", "cached")}
 
@@ -293,8 +321,7 @@ class LoopOutcome:
     patch: tuple[int, int] | None = None
     started_at: str = ""
     ended_at: str = ""
-    wall_seconds: float = 0.0
-    elapsed_offset: float = 0.0  # a resumed run starts at the parent's pre-cut wall seconds
+    wall_seconds: float = 0.0  # this run's own seconds
 
 
 def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> dict:
@@ -302,12 +329,18 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
     model_name, harness_version, arm, seed, endpoint, server_model_id, manifest_sha256,
     canary_report_sha256, checkout_id and the resume_* / plan_sha256 fields).
 
-    Time: ``wall_clock_seconds`` is the episode's logical length; for a resume run it starts at
-    the parent's pre-cut seconds (t_start/t_end and cut_900s use the same clock).
-    ``own_wall_seconds`` is what this run itself spent (equal for a fresh run). To total M5 time
-    for L0 plus its resume arms, sum L0's ``wall_clock_seconds`` and each resume run's
-    ``own_wall_seconds``; summing the resume's wall_clock_seconds would count the pre-cut time
-    twice. wall_clock_start/end are this run's real timestamps."""
+    One basis, this run's own (review of #239, finding 1): turns' t_start/t_end, every cut
+    field (pre_cut_* counts, tokens and seconds cover only this run's turns) and
+    ``own_wall_seconds`` describe this run alone. A resume run carries its parent's prefix only
+    in the explicit ``parent_pre_cut_*`` fields (null for a fresh run), and the one field that
+    adds them up is ``wall_clock_seconds`` = parent_pre_cut_wall_seconds + own_wall_seconds,
+    the logical episode length its limits used. cut_900s asks what would have happened with the
+    900-second episode budget: on this run's own clock its limit is 900 minus the parent's
+    pre-cut seconds. To total M5 time for L0 plus its resume arms, sum L0's
+    ``wall_clock_seconds`` and each resume run's ``own_wall_seconds``; summing the resume's
+    wall_clock_seconds would count the pre-cut time twice. wall_clock_start/end are this run's
+    real timestamps."""
+    parent_wall = meta.get("parent_pre_cut_wall_seconds") or 0.0
     turns = [public_turn(t, out.base) for t in out.turns]
     added, removed = out.patch if out.patch is not None else (None, None)
     record = {
@@ -316,7 +349,7 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
         "base_sha": out.base.head,
         "wall_clock_start": out.started_at,
         "wall_clock_end": out.ended_at,
-        "wall_clock_seconds": round(out.elapsed_offset + out.wall_seconds, 3),
+        "wall_clock_seconds": round(parent_wall + out.wall_seconds, 3),
         "own_wall_seconds": round(out.wall_seconds, 3),
         "total_turns": len(turns),
         "first_edit_cut": first_edit_cut(out.turns, out.base),
@@ -345,7 +378,7 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
             "cleanup": out.cleanup,
         },
         "cut_900s": cut_at(
-            turns, out.exit_reason, out.wall_seconds + out.elapsed_offset, cut_seconds
+            turns, out.exit_reason, out.wall_seconds, max(0.0, cut_seconds - parent_wall)
         ),
     }
     return record

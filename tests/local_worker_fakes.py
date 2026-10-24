@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import copy
 import difflib
+import itertools
 import json
+from pathlib import Path
 from typing import Any
 
-from experimental.local_worker import tools
+from experimental.local_worker import cli, corpus_io, tools
 from experimental.local_worker.agent import AgentLoop, Limits, Settings, Task
 from experimental.local_worker.endpoint import EndpointTimeout
 from experimental.local_worker.tools import WorkerTools
@@ -152,3 +154,48 @@ def make_loop(tmp_path: Any, replies: list, world: World | None = None, **limits
     lim = Limits(context_cap=limits.pop("context_cap", 100_000), **limits)
     loop = AgentLoop(wt, endpoint, TASK, Settings("served-model", lim, seed=7), clock=clock)
     return loop, world, endpoint, clock
+
+
+def cli_harness(tmp_path: Any, monkeypatch: Any):
+    """The CLI with fake tools and endpoint injected: (run, out). Each run gets a fresh run root
+    unless ``root`` names one (a 32-hex tag)."""
+    out = tmp_path / "out"
+    task = tmp_path / "task.json"
+    task.write_text(
+        json.dumps(
+            {
+                "task_id": "TASK_01",
+                "repo": "repo_x",
+                "prompt": "SECRET-PROMPT-7f3 fix it",
+                "public_tests": ["tests/test_app.py"],
+            }
+        )
+    )
+    state: dict[str, Any] = {"replies": [], "world": None}
+    binding = {"report_sha256": "c" * 64, "report": "r.json"}
+    monkeypatch.setattr(corpus_io, "verify_canary", lambda path, out_dir: binding)
+    monkeypatch.setattr(cli, "LoopbackEndpoint", lambda url: FakeEndpoint(state["replies"]))
+
+    def tools_factory(run_root, log, mode):
+        assert mode == "worker"
+        state["world"] = World()
+        return tools.WorkerTools(run_root, log, mode=mode, invoker=state["world"])
+
+    monkeypatch.setattr(cli, "WorkerTools", tools_factory)
+    tags = (f"{n:032x}" for n in itertools.count(1))
+
+    def run(replies: list, *extra: str, root: str | None = None) -> int:
+        state["replies"] = list(replies)
+        checkout = tmp_path / "runs" / (root or next(tags)) / "checkout"
+        checkout.mkdir(parents=True, exist_ok=True)
+        args = ["--task", str(task), "--checkout", str(checkout), "--out", str(out)]
+        args += ["--model", "served-model", "--context-cap", "65536", "--canary-report", "x"]
+        return cli.main([*extra[:1], *args, *extra[1:]])
+
+    return run, out
+
+
+def lines(out: Path) -> list[dict]:
+    files = sorted(out.glob("episodes-*.jsonl"))
+    assert len(files) == 1
+    return [json.loads(x) for x in files[0].read_text().splitlines()]

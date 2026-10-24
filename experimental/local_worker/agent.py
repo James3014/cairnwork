@@ -180,9 +180,16 @@ class AgentLoop:
         self.clock, self.now = clock, now
         self.abort_detail: str | None = None
         self._start = 0.0
+        self._offset = 0.0
 
     def _elapsed(self) -> float:
+        """Seconds on the logical episode clock (a resume starts at the parent's pre-cut time):
+        what the limits use."""
         return self.clock() - self._start
+
+    def _own(self) -> float:
+        """Seconds this run itself has spent: what every recorded time uses (TurnLog t_*)."""
+        return self._elapsed() - self._offset
 
     def observe(self, timeout: float) -> TreeState:
         self.tools.timeout_seconds = max(timeout, 1.0)
@@ -201,6 +208,7 @@ class AgentLoop:
         once the base is verified: every stop is recorded in the returned outcome."""
         lim = self.limits
         self._start = self.clock() - elapsed_offset
+        self._offset = elapsed_offset
         deadline = self._start + lim.max_wall_seconds - lim.cleanup_reserve_seconds
         base = self.observe(lim.cleanup_reserve_seconds)
         if not base.observed or base.entries or base.head is None:
@@ -222,8 +230,7 @@ class AgentLoop:
             self._abort(out, "status_unavailable", exc)
         self._cleanup(out)
         out.ended_at = self.now().astimezone(UTC8).isoformat()
-        out.wall_seconds = self._elapsed() - elapsed_offset
-        out.elapsed_offset = elapsed_offset
+        out.wall_seconds = self._own()
         return out
 
     def _abort(self, out: LoopOutcome, cause: str, exc: Exception) -> None:
@@ -237,11 +244,11 @@ class AgentLoop:
                 out.exit_reason, out.limit_hit = stop
                 out.timed_out = stop[0] == "TIMEOUT"
                 return
-            log = TurnLog(index=turn, t_start=self._elapsed())
+            log = TurnLog(index=turn, t_start=self._own())
             try:
                 finished = self._step(log, messages, deadline)
             finally:  # a turn counts once the model replied, also when its tool call then failed
-                log.t_end = self._elapsed()
+                log.t_end = self._own()
                 if log.assistant_msg_index >= 0:
                     out.turns.append(log)
             if finished is not None:

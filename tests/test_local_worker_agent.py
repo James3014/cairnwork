@@ -25,6 +25,7 @@ META: dict[str, Any] = {
     "resume_parent_episode_id": None,
     "resume_cut_turn_index": None,
     "plan_sha256": None,
+    **dict.fromkeys(episode.PARENT_FIELDS),
     "endpoint": "http://127.0.0.1:8000/v1",
     "server_model_id": "served-model",
     "manifest_sha256": "1" * 64,
@@ -271,7 +272,7 @@ def test_resume_continues_from_the_prefix(tmp_path):
     out = loop.run(list(prefix), first_turn=4, elapsed_offset=120.0, expected_base=BASE_SHA)
     assert endpoint.payloads[0]["messages"] == prefix
     assert [t.index for t in out.turns] == [4, 5]
-    assert out.turns[0].t_start == pytest.approx(120.0)
+    assert out.turns[0].t_start == pytest.approx(0.0)  # this run's own clock
     assert first_edit_cut(out.turns, out.base)["cut_turn_index"] == 4
 
 
@@ -348,7 +349,8 @@ def test_usage_missing_only_after_the_cut_keeps_the_sum(tmp_path):
 def test_own_wall_seconds_excludes_the_resumed_prefix(tmp_path):
     loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], model_seconds=10.0)
     out = loop.run(initial_messages(TASK), first_turn=3, elapsed_offset=120.0)
-    rec = build_record(dict(META, resume_parent_episode_id="ep_parent"), out)
+    parent = dict(zip(episode.PARENT_FIELDS, (3, 480, 120.0, 0), strict=True))
+    rec = build_record(dict(META, resume_parent_episode_id="ep_parent", **parent), out)
     validate_record(rec)
     assert rec["own_wall_seconds"] == pytest.approx(20.0)  # two model replies, 10 s each
     assert rec["wall_clock_seconds"] == pytest.approx(120.0 + 20.0)

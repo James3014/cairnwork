@@ -12,6 +12,7 @@ from typing import Any
 from experimental.local_worker.episode import (
     CUT_FIELDS,
     EXIT_REASONS,
+    PARENT_FIELDS,
     SCHEMA_VERSION,
     SOURCE_FIELDS,
     TEXT_ARGS,
@@ -56,6 +57,10 @@ TOP_EXTRA: dict[str, tuple[Any, bool]] = {  # Plan v2 point 10 and the bindings
     "own_wall_seconds": (FLOAT, False),
     "first_source_edit": (DICT, False),
     "turns_missing_usage": (INT, False),
+    "parent_pre_cut_read_actions": (INT, True),
+    "parent_pre_cut_tokens_accum": (INT, True),
+    "parent_pre_cut_wall_seconds": (FLOAT, True),
+    "parent_pre_cut_turns_missing_usage": (INT, True),
 }
 CUT: dict[str, tuple[Any, bool]] = dict(
     zip(
@@ -222,13 +227,23 @@ def _check_counts(rec: dict) -> None:
     missing = sum(any(t[k] is None for k in keys) for t in turns)
     if rec["turns_missing_usage"] != missing:
         raise SchemaError("turns_missing_usage differs from the turns without full usage")
-    if rec["own_wall_seconds"] > rec["wall_clock_seconds"] + 0.001:
-        raise SchemaError("own_wall_seconds exceeds wall_clock_seconds")
-    if (
-        rec["resume_parent_episode_id"] is None
-        and rec["own_wall_seconds"] != rec["wall_clock_seconds"]
-    ):
-        raise SchemaError("a fresh run's own_wall_seconds must equal wall_clock_seconds")
+    _check_parent(rec)
+
+
+def _check_parent(rec: dict) -> None:
+    """Fresh run: no parent_* field. Resume run: all set (the token sum null exactly when a
+    prefix turn lacked usage), and wall_clock_seconds = parent pre-cut + own seconds."""
+    parent = [rec[k] for k in PARENT_FIELDS]
+    if rec["resume_parent_episode_id"] is None:
+        if any(v is not None for v in parent):
+            raise SchemaError("a fresh run has no parent_pre_cut_* values")
+    else:
+        reads, tokens, wall, missing = parent
+        if reads is None or wall is None or missing is None or (tokens is None) != (missing > 0):
+            raise SchemaError("a resume run needs consistent parent_pre_cut_* values")
+    total = (rec["parent_pre_cut_wall_seconds"] or 0.0) + rec["own_wall_seconds"]
+    if abs(rec["wall_clock_seconds"] - total) > 0.002:
+        raise SchemaError("wall_clock_seconds must be parent pre-cut seconds + own seconds")
 
 
 def validate_record(rec: Any) -> None:

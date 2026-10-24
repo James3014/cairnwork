@@ -49,10 +49,12 @@ from experimental.local_worker.agent import (
 from experimental.local_worker.endpoint import DEFAULT_URL, EndpointError, LoopbackEndpoint
 from experimental.local_worker.episode import (
     NULL_RULE,
+    PARENT_FIELDS,
     SCHEMA_VERSION,
     TOKENS_ACCUM_FORMULA,
     LoopOutcome,
     build_record,
+    parent_prefix,
 )
 from experimental.local_worker.tools import WorkerTools
 
@@ -170,12 +172,15 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
     task: Task = p["task"]
     messages = initial_messages(task)
     first_turn, offset, expected_base, parent_id = 0, 0.0, None, None
-    plan_sha = None
+    plan_sha, prefix = None, dict.fromkeys(PARENT_FIELDS)
     if resume:
         parent = corpus_io.load_transcript(a.parent_transcript, p["out_dir"])
         if parent["task"]["task_id"] != task.task_id:
             raise corpus_io.InputRefused("the parent episode is for another task")
+        if parent["record"]["resume_parent_episode_id"] is not None:
+            raise corpus_io.InputRefused("resume from a fresh (L0) episode, not from a resume run")
         messages, first_turn, offset = resume_prefix(parent, a.cut_turn)
+        prefix = parent_prefix(parent["turns"], first_turn)
         expected_base, parent_id = parent["record"]["base_sha"], parent["episode_id"]
         if a.plan:
             plan = corpus_io.load_plan(a.plan, p["out_dir"])
@@ -202,6 +207,7 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
         "resume_parent_episode_id": parent_id,
         "resume_cut_turn_index": first_turn if resume else None,
         "plan_sha256": plan_sha,
+        **prefix,
         "endpoint": p["endpoint"].url,
         "server_model_id": next((t.server_model for t in out.turns if t.server_model), None),
         "manifest_sha256": p["manifest_sha"],
