@@ -14,10 +14,11 @@ from pathlib import Path
 
 from cairnwork.core_request import AcceptanceSpec
 from cairnwork.deferred_tests import (
+    BaseUncomparable,
     TestCommitRejected,
+    base_comparison,
     check_roots_on_base,
     ensure_test_commit,
-    failed_on_base,
     new_tests,
     test_paths,
 )
@@ -28,7 +29,8 @@ from cairnwork.verifiers import run_verifiers
 
 def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...]:
     """Check a task's deferred tests once the worker is done: plain test files on the
-    base whose test cases really fail there. Returns their paths."""
+    base whose test cases really fail there. Returns their paths; raises TestCommitRejected
+    when they do not (NO_TEETH) and BaseUncomparable when the base cannot tell (#234)."""
     check_roots_on_base(task.repo, task.base_commit, task.test_roots)  # before any base run
     ensure_test_commit(task.repo, task.test_commit, task.test_store)
     paths = test_paths(task.repo, task.base_commit, task.test_commit, task.test_roots)
@@ -45,12 +47,13 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
         base_commit=task.base_commit,
         import_paths=task.import_paths,
     )
-    teeth = failed_on_base(runs, targets)
+    comparison = base_comparison(runs, targets)  # decided before the base logs go
     for run in runs:  # not evidence for Core; would show the tests to later workers
         shutil.rmtree(Path(run.log_path).parent, ignore_errors=True)
-    if not teeth:
-        codes = [run.returncode for run in runs]
-        raise TestCommitRejected("TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
+    if comparison.kind == "UNCOMPARABLE":
+        raise BaseUncomparable(comparison)
+    if comparison.kind != "TEETH":
+        raise TestCommitRejected(comparison.code, comparison.detail)
     return paths
 
 

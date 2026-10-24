@@ -23,12 +23,18 @@ is selected. On a flat layout `tests/test_base.py` therefore brings in `tests/te
 
 ## Failure paths (none can end VERIFIED)
 
+Since #234 a failed base probe is UNCOMPARABLE (no evidence about the base), not a refusal: Core is
+never asked and no receipt exists. `cairnwork-verify` reports `status: "UNCOMPARABLE"`; the worker
+path ends FAILED with reason `UNCOMPARABLE: P2P_BASE_PROBE_UNUSABLE: ...` when the worker ran as
+another uid (`agy_run_as_user`), else plainly `P2P_BASE_PROBE_UNUSABLE: ...`. A probe that worked
+but found no base-passing test (no degradation) is still only recorded (`targets: 0`).
+
 | Situation | Result |
 |---|---|
 | base probe times out, reports nothing usable, or its report exceeds the 4 MiB report cap (a suite too large for one guard report; #184) in `whole-suite` | degrade once to `module-dir`; recorded as `degraded: base-probe-timeout` / `base-probe-failed` / `base-probe-report-over-cap` |
-| degraded to `module-dir` but it would run the same files (flat layout) | task REFUSED, `P2P_BASE_PROBE_UNUSABLE: <reason>; module-dir selects the same files` (no second probe) |
-| `module-dir` (or the degraded run) cannot be probed either | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` |
-| degraded to `module-dir` and it selects no test file, or none of them passes on the base | task REFUSED, `P2P_BASE_PROBE_UNUSABLE` (a failed probe is never "nothing to run") |
+| degraded to `module-dir` but it would run the same files (flat layout) | task UNCOMPARABLE (#234; before: REFUSED), `P2P_BASE_PROBE_UNUSABLE: <reason>; module-dir selects the same files` (no second probe) |
+| `module-dir` (or the degraded run) cannot be probed either | task UNCOMPARABLE (#234; before: REFUSED), `P2P_BASE_PROBE_UNUSABLE` |
+| degraded to `module-dir` and it selects no test file, or none of them passes on the base | task UNCOMPARABLE (#234; before: REFUSED), `P2P_BASE_PROBE_UNUSABLE` (a failed probe is never "nothing to run") |
 | candidate P2P run exceeds the budget | the observation is not a pass, Core says not verified (no re-run) |
 | a P2P run fails on the candidate only because a test failed | re-run once; a pass on the re-run is what Core sees (same verdict as a clean pass) and the first run is recorded (`rerun`: failed tests (sanitised), returncode, timed_out, mutated, survivors, ran; bound into the re-run's artifact hash); the task result's `p2p` also carries `p2p_rerun_passed` (true: passed after re-run; false: failed again; absent: clean pass or no re-run), so reports can separate the cases; a second failure blocks |
 | a P2P run fails for any other reason (checkout mutated, surviving process, oversized log, no usable guard report) | blocks as it is, no re-run |

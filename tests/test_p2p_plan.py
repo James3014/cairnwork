@@ -11,6 +11,7 @@ import pytest
 
 from cairnwork import p2p
 from cairnwork.core_request import VerifierObservation
+from cairnwork.deferred_tests import BaseUncomparable
 from cairnwork.p2p import P2PPlan, P2PRejected, plan_p2p, run_plan
 from cairnwork.verifiers import VerifierRun, VerifierSpec
 
@@ -39,22 +40,32 @@ def plan(monkeypatch, existing, probe_results, mode="whole-suite"):
     monkeypatch.setattr(p2p, "_probe", fake_probe)
     try:
         return plan_p2p(TASK, (), (), mode, 30, "/runs", RESULT, VERIFYING), probed
-    except P2PRejected as exc:
+    except (P2PRejected, BaseUncomparable) as exc:
         return exc, probed
 
 
-def test_degraded_probe_with_an_empty_module_dir_selection_is_refused_not_verified(monkeypatch):
+def uncomparable(got) -> bool:
+    """#234: a failed base probe is no evidence (UNCOMPARABLE), never a P2PRejected refusal."""
+    return (
+        isinstance(got, BaseUncomparable)
+        and not isinstance(got, P2PRejected)
+        and got.comparison.kind == "UNCOMPARABLE"
+        and got.comparison.code == "P2P_BASE_PROBE_UNUSABLE"
+    )
+
+
+def test_degraded_probe_with_an_empty_module_dir_selection_is_uncomparable(monkeypatch):
     # F1: nested tests that map to no changed file and no root-level tests: module-dir selects
     # nothing. After a whole-suite probe timeout that must not become "nothing to run".
     got, probed = plan(monkeypatch, ("tests/unit/test_x.py",), [(None, "base-probe-timeout")])
-    assert isinstance(got, P2PRejected)
+    assert uncomparable(got)
     assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "base-probe-timeout" in str(got)
     assert probed == [("tests/unit/test_x.py",)]
 
 
-def test_degraded_probe_that_failed_with_an_empty_module_dir_selection_is_refused(monkeypatch):
+def test_degraded_probe_that_failed_with_an_empty_module_dir_selection_is_uncomparable(monkeypatch):
     got, _ = plan(monkeypatch, ("tests/unit/test_x.py",), [(None, "base-probe-failed")])
-    assert isinstance(got, P2PRejected) and "base-probe-failed" in str(got)
+    assert uncomparable(got) and "base-probe-failed" in str(got)
 
 
 def test_module_dir_chosen_directly_with_nothing_selected_runs_nothing(monkeypatch):
@@ -75,13 +86,13 @@ def test_a_degraded_probe_records_the_rule_actually_used(monkeypatch):
     assert got.spec.verifier_id == "p2p-module-dir"
 
 
-def test_degraded_probe_whose_module_dir_tests_all_fail_on_the_base_is_refused(monkeypatch):
+def test_degraded_probe_whose_module_dir_tests_all_fail_on_the_base_is_uncomparable(monkeypatch):
     # G1: module-dir selected files after the degradation, but none of their tests passes on
     # the base, so the target set is empty: still not "nothing to run"
     existing = ("tests/a/test_b.py", "tests/z/test_slow.py")
     outcomes = {"tests/a/test_b.py::test_1": "failed", "tests/a/test_b.py::test_2": "skipped"}
     got, probed = plan(monkeypatch, existing, [(None, "base-probe-timeout"), (outcomes, "")])
-    assert isinstance(got, P2PRejected) and len(probed) == 2
+    assert uncomparable(got) and len(probed) == 2
     assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "passes on the base" in str(got)
 
 
@@ -99,13 +110,13 @@ def test_a_report_over_the_cap_degrades_to_module_dir_with_that_reason(monkeypat
     assert probed == [existing, ("tests/test_calc.py",)]
 
 
-def test_a_degraded_probe_that_would_run_the_same_files_is_refused_without_a_second_probe(
+def test_a_degraded_probe_that_would_run_the_same_files_is_uncomparable_without_a_second_probe(
     monkeypatch,
 ):
     # #184 flat layout: module-dir selects exactly the files whole-suite could not report on,
     # so probing again is pointless; the refusal names the cause, not a module-dir probe
     got, probed = plan(monkeypatch, ("tests/test_calc.py",), [(None, "base-probe-report-over-cap")])
-    assert isinstance(got, P2PRejected) and probed == [("tests/test_calc.py",)]
+    assert uncomparable(got) and probed == [("tests/test_calc.py",)]
     assert "P2P_BASE_PROBE_UNUSABLE" in str(got) and "base-probe-report-over-cap" in str(got)
     assert "module-dir selects the same files" in str(got)
 

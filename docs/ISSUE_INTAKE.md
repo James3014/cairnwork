@@ -25,7 +25,12 @@
        - worker 結束後，Cairnwork 才抓取測試；在 base 上跑的 log 用完就刪。
        - 任務開始前，如果這個測試 commit 已經在本機出現過（例如重試，或之前另一個任務用過同一個），就拒絕（`TEST_COMMIT_ALREADY_EXPOSED`）。重試時要把測試推成一個新的 commit。兩個**同時執行**的任務用同一個測試 commit 時擋不住，所以一個測試 commit 只給一張 Issue 用。
        - **限制**：worker 和 Cairnwork 用同一個系統帳號，而修正的驗證 log 是 Core 公證的證據，必須保留。所以重試時如果新的測試內容和上一次相同，worker 仍可能從上一次的 log 讀到。要徹底解決，必須讓 worker 改在獨立的帳號或環境裡執行（追蹤中）。
-     - **確認測試有效**：在「base + 測試」上跑 verifier，JUnit 報告裡必須有延後測試檔的測試案例失敗，而且沒有 verifier 用其他方式出錯。測試原本就通過、只是 import 失敗、或只有別的檔案失敗，都拒絕（`TESTS_DO_NOT_FAIL_ON_BASE`）。
+     - **確認測試有效**（三態，#234，規則 `base-compare-v1`）：在「base + 測試」上跑 verifier，看 guard 紀錄（不是 JUnit 檔）。每個 verifier 都判，不提早結束：
+       - 有延後測試的案例失敗，而且每個 verifier 都正常跑完（exit 0 或 1、有 guard 紀錄、沒有收集錯誤）→ 有牙齒，繼續。
+       - 每個 verifier 都正常跑完，但延後測試沒有失敗（原本就會過，或只有別的檔案失敗）→ 拒絕（`TESTS_DO_NOT_FAIL_ON_BASE`）。
+       - 只要有一個 verifier 在 base 上沒辦法比較 → **UNCOMPARABLE**（沒有證據，不算通過也不算擋下），即使另一個 verifier 有牙齒：guard 記到收集錯誤 `BASE_COLLECTION_ERROR`（通常是 exit 2），exit 5 以外的其他非 0／1（沒有收集錯誤的 exit 2，例如被中斷；exit 3、4 等）`BASE_PYTEST_ERROR`，exit 5 `BASE_NO_TESTS`，逾時 `BASE_TIMEOUT`，沒有沙盒而沒執行 `BASE_NOT_EXECUTED`，報告超過上限 `BASE_REPORT_OVER_CAP`，沒有 guard 紀錄 `BASE_NO_REPORT`。P2P 的 base 探測不能用（`P2P_BASE_PROBE_UNUSABLE`）也是 UNCOMPARABLE；探測成功但沒有任何測試在 base 上通過，只記在 `p2p`（`targets: 0`），不是 UNCOMPARABLE。
+       - UNCOMPARABLE 不送 Core、沒有 notary 紀錄、不簽收據。`cairnwork-verify` 回 `status: "UNCOMPARABLE"`；worker 路徑記 FAILED，reason 是 `UNCOMPARABLE: <碼>: <細節>`。**Issue 留言目前還不會顯示 UNCOMPARABLE**：照舊是一般的失敗留言、標成 `cairnwork:failed`；之後另開 PR，用派工時就存下來的分類來顯示「沒有證據」。base 執行都在 worker 之後，所以只有 worker 用另一個 uid 跑（設了 `agy_run_as_user`）時才標 UNCOMPARABLE；worker 和 owner 同一個 uid 時，worker 有機會故意弄壞 base，這時照舊是一般的 FAILED（reason 是 `<碼>: <細節>`，沒有 `UNCOMPARABLE:` 前綴）。
+       - **寫延後測試的人注意**：修正才新增的函式或類別，要在**測試函式裡面** import（`def test_x():\n    from calc import new_thing`），不要放在檔案開頭。放在檔案開頭時，base 上這個檔案根本收集不到（exit 2），結果是 UNCOMPARABLE，不是有牙齒；放進函式裡，base 上是執行時失敗（exit 1），才算有牙齒。
      - **驗證修正**：把測試疊到修正上，再跑 verifier、交給 Core 公證。PR 的內容就是這個 commit，修正和測試一起送出。
      - **base 的決定方式**：有 `test_commit` 時，base 是它的父 commit，而且必須在 origin/main 的歷史裡，不是當下的 main。
      - **限制**：測試分支放在公開 repo 上。worker 拿不到 commit id，也不會被告知分支名稱，但如果 worker 有網路，理論上能自己去找。要徹底杜絕，必須限制 worker 的網路，這要等 worker 改在獨立環境裡執行。分支名稱不要用一看就知道的名字。分支要保留到 Cairnwork 收尾（開出 PR 或判定失敗）之後才刪：worker 結束時 Cairnwork 才用 commit id 抓取測試，而 GitHub 只允許抓取還有分支指得到的 commit。
@@ -96,7 +101,8 @@ cairnwork-verify --state DIR cleanup     # 某次執行被強制結束後，在 
 ```
 
 - 檢查和 worker 的產出完全相同：候選必須是 base 上的單一 commit、只動 `allowed_files`（不能刪檔、不能有 symlink 或 submodule）；給了 `--test-commit` 就在 worker 之後才疊上延後測試（同樣的「從未出現過」和單一父 commit 規則）；verifier 在沙盒裡跑（同樣的白名單，任何 skipped 都算失敗）；最後交給 Core 公證，回應必須綁定這個 commit。
-- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`、`executed_tree`、`binding`。結束碼：0 通過，2 拒絕或未通過，3 用法錯誤，1 內部錯誤。
+- 只印一個 JSON：`status`（`VERIFIED`、`FAILED`、`REFUSED`、`UNCOMPARABLE`）、`verified`、`reason`、`core_status`（Core 自己回的字，是否通過以 `verified` 為準）、`judged_commit`、`executed_tree`、`binding`、`uncomparable`（UNCOMPARABLE 時是 `{code, detail, rule: "base-compare-v1"}`，其他時候是 `null`）。結束碼：0 通過，2 拒絕、不可比較或未通過（看 `status`），3 用法錯誤，1 內部錯誤。
+- **不相容的新值（#234）**：`UNCOMPARABLE` 是新的 `status`，表示 base 本身沒辦法比較（見上方「確認測試有效」），沒有證據，既不是通過也不是擋錯。以前這些情況回 `REFUSED`（`TESTS_DO_NOT_FAIL_ON_BASE` 或 `P2P_BASE_PROBE_UNUSABLE`）。用 `status == "REFUSED"` 判斷「擋下了」的呼叫端要另外處理 `UNCOMPARABLE`，不能把它算成擋錯或通過；只看結束碼的呼叫端不受影響（仍是 2）。
 - **收據綁定（#229）**：給了 `--test-commit` 時，verifier 跑的是暫存 clone 裡「候選＋延後測試」的 commit（`judged_commit`）。這個 commit 只存在於暫存 clone，跑完就刪，而且它的 id 含 commit 時間，別人重算不出來。所以 Core 公證的對象改成它的 **tree**（`target_revision = git-tree:<executed_tree>`），收據主體是 **PR head（候選本身）**，`binding` 記下 `rule`（疊合規則 `overlay-v1`）、`base`、`head`、`test_commit`、`test_paths`、`executed_tree`、verifier 指令（`verifiers`，不含 P2P 選出的額外測試）。`sha256(binding)` 取代 Core 請求的 `acceptance_contract.requirements_hash`，Core 回應會回傳這份 contract 的 hash，換掉或拼接 binding 都對不上。notary 紀錄升到 schema 3，多一欄可為 NULL 的 `binding_json`（用 `ALTER` 遷移，舊列是 NULL、照舊驗）。之後 `cairnwork-attest statement --candidate <候選>` 簽出 v0.2 收據，收件方離線驗證的方式見 `docs/ATTESTATION.md`「External candidates」。沒給 `--test-commit` 時 `judged_commit` 就是候選，`binding` 是 `null`，一切照舊（綁 commit、v0.1 收據）。這個變更之前簽的外部候選收據（主體是暫存 commit）依然驗不了。
 - 和 `submit` 一樣：state 沒有 `ACCEPTING`（drain 中）就拒絕（`VERIFY_NOT_ACCEPTING`），拿到執行鎖之後會再檢查一次。
 - 所有檢查都在這次執行專用的暫存 clone（`<state>/verify-scratch/`，結束就刪）裡跑：從 state 設定的 `mirror`（沒設就從 `--repo-path`）clone，再把 base 和候選從 `--repo-path` fetch 進暫存 clone。外部的候選**不會**進共用的 mirror，也不會寫進呼叫者的 repo（所以不會讓之後的測試 commit 看起來「已出現過」）。
