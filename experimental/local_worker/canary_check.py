@@ -29,6 +29,7 @@ WRITE_TARGETS = (
     "checkout_git_hook",
     "checkout_git_hook_upper",
     "checkout_git_config_via_link",
+    "git_query_dir",
 )
 REQUIRED_PROBES = {
     "a_read_denied": {f"code read {n}" for n in READ_TARGETS} | {"no secret in any tool output"},

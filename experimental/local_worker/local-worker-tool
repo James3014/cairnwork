@@ -18,17 +18,23 @@
 #
 # <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
 # created by the Owner (0750: the worker may not rename or plant entries in it) together with
-# <run_root>/checkout and <run_root>/tmp (0770). <relpath> is relative to the checkout, with no "..",
-# "." (except a bare "." for list), empty or ".git" (any case) component.
+# <run_root>/checkout, <run_root>/tmp and <run_root>/q (0770). q is the git queries' scratch
+# directory: only the query profile below can read or write it, so test code (which runs under the
+# tool profile, as the same uid) cannot rewrite a query's output. <relpath> is relative to the
+# checkout, with no "..", "." (except a bare "." for list), empty or ".git" (any case) component.
 #
-# Every action except sweep runs under a Seatbelt profile built HERE (never supplied by the caller):
+# Every action except sweep runs under a Seatbelt profile built HERE (never supplied by the caller).
+# The tool profile (list, read, write, pytest):
 #   * no network at all (the tools do not need it; Splash is the agent loop's business, not theirs);
 #   * no reads under /Users, /Volumes, /private/tmp, /private/var/tmp, /private/var/folders except
 #     this run's checkout, venv and tmp and the worker Python tree, so the owner's home, the
 #     verifier tree, private test bundles, the harness and every other run (same uid!) are unreadable;
 #   * writes only inside <run_root>/checkout and <run_root>/tmp, never into any .git component (a
-#     worker-written hook or config would later run as the Owner);
+#     worker-written hook or config would later run as the Owner), and nothing in <run_root>/q;
 #   * signals only to processes in the same sandbox (not the agy worker's runs, which share the uid).
+# The query profile (status, numstat): the same network, read and signal limits, reads of the
+# checkout (its .git included) and <run_root>/q only, writes only inside <run_root>/q. No code the
+# model wrote ever runs under it (git runs with no filter, hook, driver or textconv; see GIT_QUERY).
 # The uid boundary (the account cannot enter /Users/<owner>) sits under this as a second layer.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
@@ -82,6 +88,7 @@ require_run_root() {
   CHECKOUT=$1/checkout
   [ ! -L "$CHECKOUT" ] && [ -d "$CHECKOUT" ] || refuse "run_root has no real checkout directory"
   [ ! -L "$1/tmp" ] && [ -d "$1/tmp" ] || refuse "run_root has no real tmp directory"
+  [ ! -L "$1/q" ] && [ -d "$1/q" ] || refuse "run_root has no real q directory"
   [ ! -w "$1" ] || [ "$(id -un)" != "$WORKER" ] || refuse "run_root is writable by the worker"
 }
 
@@ -118,11 +125,15 @@ ancestors() {   # SBPL literals for every ancestor directory of $1 (metadata onl
   done
 }
 
-profile() {
+profile_head() {  # no network; no reads of the user, volume and temp trees (allowed back below)
   printf '(version 1)\n(allow default)\n(deny network*)\n'
   printf '(deny mach-lookup (global-name "com.apple.dnssd.service"))\n'
   printf '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp")'
   printf ' (subpath "/private/var/tmp") (subpath "/private/var/folders"))\n'
+}
+
+profile() {  # the tool profile: list, read, write, pytest (and so every line of test code)
+  profile_head
   printf '(allow file-read* (subpath "%s") (subpath "%s/venv") (subpath "%s/tmp") (subpath "%s"))\n' \
     "$CHECKOUT" "$RUN_ROOT" "$RUN_ROOT" "$PYROOT"
   printf '(allow file-read-metadata%s%s)\n' "$(ancestors "$CHECKOUT")" "$(ancestors "$PYROOT")"
@@ -130,26 +141,41 @@ profile() {
   printf '(allow file-write* (subpath "%s") (subpath "%s/tmp")' "$CHECKOUT" "$RUN_ROOT"
   printf ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))\n'
   printf '(deny file-write* (regex #"/\\.[gG][iI][tT](/|$)"))\n'
+  printf '(deny file-read* file-write* (subpath "%s/q"))\n' "$RUN_ROOT"  # the queries' alone
   printf '(deny signal)\n(allow signal (target same-sandbox))\n'
 }
 
+query_profile() {  # the git queries: read the checkout (.git too) and q, write only inside q
+  profile_head
+  printf '(allow file-read* (subpath "%s") (subpath "%s/q"))\n' "$CHECKOUT" "$RUN_ROOT"
+  printf '(allow file-read-metadata%s)\n' "$(ancestors "$CHECKOUT")"
+  printf '(deny file-write*)\n'
+  printf '(allow file-write* (subpath "%s/q") (literal "/dev/null"))\n' "$RUN_ROOT"
+  printf '(deny signal)\n(allow signal (target same-sandbox))\n'
+}
+
+# sandboxed <profile text> <HOME and TMPDIR> <command...>
 # The sandboxed command gets stdout AND stderr on the Owner's stdout (2>&1 below). Our own stderr,
 # where the start marker went, is never handed to it: test code that lseeks/truncates fd 2 can then
 # only damage its own output, not the Owner's proof that this wrapper started.
 sandboxed() {
+  sb_profile=$1
+  sb_tmp=$2
+  shift 2
   cd -- "$CHECKOUT"
   exec /usr/bin/env -i \
-    HOME="$RUN_ROOT/tmp" \
-    TMPDIR="$RUN_ROOT/tmp" \
+    HOME="$sb_tmp" \
+    TMPDIR="$sb_tmp" \
     PATH="$WORKER_PATH" \
     LANG=en_US.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     "$TAG_ENV=${RUN_ROOT##*/}" \
-    "$SANDBOX_EXEC" -p "$(profile)" "$@" 2>&1
+    "$SANDBOX_EXEC" -p "$sb_profile" "$@" 2>&1
 }
 
-# The two fixed git queries (status, numstat): read-only on .git, as the worker under the same
-# profile. Git runs on a throwaway git dir in a fresh mktemp directory (Codex review of #239, B2
+# The two fixed git queries (status, numstat): read-only on the checkout and .git, as the worker
+# under the query profile, with TMPDIR=<run_root>/q (Claude review of #239, NB1: under the tool
+# profile, test code left running by a pytest call could rewrite the query's output files). Git runs on a throwaway git dir in a fresh mktemp directory (Codex review of #239, B2
 # and the filter item): its HEAD is the real HEAD commit, the real objects are only an alternate,
 # its config is two lines written here (so no repository config applies: no filter, include,
 # driver or hook from .git/config), its info/attributes switches every filter and conversion off,
@@ -161,8 +187,8 @@ sandboxed() {
 # overlay, so no .gitattributes can filter, convert or binarise anything, and numstat stages with
 # --force (ignored files count) into a fresh index read from HEAD and diffs with --text; those
 # two files are still part of the change they make. status reads the real index; nothing in .git
-# is ever written. Every file the query writes is new (mkdir without -p, noclobber), inside the
-# mktemp directory. The real git binary is used, not the /usr/bin/git shim (its xcrun cache write
+# (nor anywhere in the checkout: the profile allows writes only in q) is ever written. Every file
+# the query writes is new (mkdir without -p, noclobber), inside the mktemp directory. The real git binary is used, not the /usr/bin/git shim (its xcrun cache write
 # outside the profile fails).
 # shellcheck disable=SC2016  # expanded by the inner shell
 GIT_QUERY='set -euf
@@ -286,12 +312,12 @@ case "$ACTION" in
   list)
     [ ! -L "$TARGET" ] && [ -d "$TARGET" ] || refuse "not a directory: $1"
     require_dir_inside_checkout "$TARGET" list
-    sandboxed /bin/ls -1Ap -- "$TARGET"
+    sandboxed "$(profile)" "$RUN_ROOT/tmp" /bin/ls -1Ap -- "$TARGET"
     ;;
   read)
     [ ! -L "$TARGET" ] && [ -f "$TARGET" ] || refuse "not a regular file: $1"
     require_dir_inside_checkout "${TARGET%/*}" read
-    sandboxed /bin/cat -- "$TARGET"
+    sandboxed "$(profile)" "$RUN_ROOT/tmp" /bin/cat -- "$TARGET"
     ;;
   write)
     [ ! -L "$TARGET" ] || refuse "target is a symlink: $1"
@@ -301,14 +327,16 @@ case "$ACTION" in
     probe=$parent
     while [ ! -d "$probe" ]; do probe=${probe%/*}; done
     require_dir_inside_checkout "$probe" write
-    sandboxed /bin/sh -c 'mkdir -p -- "$1" && cat > "$2"' sh "$parent" "$TARGET"
+    sandboxed "$(profile)" "$RUN_ROOT/tmp" /bin/sh -c 'mkdir -p -- "$1" && cat > "$2"' sh \
+      "$parent" "$TARGET"
     ;;
   pytest)
-    sandboxed "$PY" -m pytest -p no:cacheprovider "$@"
+    sandboxed "$(profile)" "$RUN_ROOT/tmp" "$PY" -m pytest -p no:cacheprovider "$@"
     ;;
   status | numstat)
     GIT_BIN=$(real_git) || exit 64
-    sandboxed /bin/sh -c "$GIT_QUERY" sh "$CHECKOUT" "$ACTION" "$GIT_BIN"
+    sandboxed "$(query_profile)" "$RUN_ROOT/q" /bin/sh -c "$GIT_QUERY" sh "$CHECKOUT" "$ACTION" \
+      "$GIT_BIN"
     ;;
   sweep)
     ME=$$

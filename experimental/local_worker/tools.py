@@ -331,7 +331,11 @@ class WorkerTools:
 
     def _after(self, action: str, rc: int | None) -> None:
         # Test code can leave processes behind (and a timed-out command certainly may): sweep
-        # after every pytest run and every timeout, so nothing keeps changing the checkout.
+        # after every pytest run and every timeout. The sweep finds a process by its run tag or
+        # its cwd; one that cleared its environment and left the run root survives it and can go
+        # on changing the checkout (wrapper: sweep_pids). It cannot falsify what status and
+        # numstat report: they write only in <run_root>/q, which its profile can neither read nor
+        # write (Claude review of #239, NB1), so they report the tree as it is when they run.
         # The time for this sweep was kept free when the tool call's timeout was chosen.
         if action in TOOL_ACTIONS and (action == "pytest" or rc is None):
             self._call("sweep", "sweep", [], {}, cap=SWEEP_TIMEOUT_SECONDS)

@@ -245,10 +245,11 @@ def canary_checks(user: str = "_cairnwork_worker") -> dict:
 
 
 def make_runs(tmp_path: Any) -> Path:
-    """A runs directory with one run root (TAG: checkout, tmp, an empty .git) and a sibling."""
+    """A runs directory with one run root (TAG: checkout, tmp, q, an empty .git) and a sibling."""
     runs = (tmp_path / "runs").resolve()
     (runs / TAG / "checkout" / "sub").mkdir(parents=True)
     (runs / TAG / "tmp").mkdir()
+    (runs / TAG / "q").mkdir()
     (runs / TAG / "checkout" / ".git").mkdir()
     (runs / TAG / "checkout" / "a.txt").write_text("hello\n")
     (runs / ("f" * 32)).mkdir()
