@@ -58,8 +58,13 @@ def test_a_write_in_scope_lands(runs, path, scope):
 )
 def test_a_write_out_of_scope_is_refused_and_writes_nothing(runs, path, scope):
     before = sorted(p.relative_to(runs) for p in runs.rglob("*"))
+    existed = (runs / TAG / "checkout" / path).exists()
     proc = write(runs, path, *scope)
-    assert refused(proc) and b"out of write scope" in proc.stderr, proc.stderr
+    # The wrapper is macOS-only: it reads an existing target's link count with BSD stat. On Linux
+    # /usr/bin/stat is GNU's, so an existing target ("a.txt") is refused as unresolvable instead.
+    on_linux = existed and sys.platform != "darwin"
+    off_macos = on_linux and b"write target cannot be resolved" in proc.stderr
+    assert refused(proc) and (b"out of write scope" in proc.stderr or off_macos), proc.stderr
     assert sorted(p.relative_to(runs) for p in runs.rglob("*")) == before
     assert (runs / TAG / "checkout" / "a.txt").read_text() == "hello\n"
 
