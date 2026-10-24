@@ -14,8 +14,7 @@ One pass does two things:
 * **settle**: for every ``cairnwork:running`` Issue, a COMPLETED, Core-verified task is
   pushed as branch ``cairnwork/<issue>-<attempt>`` and opened as a **draft** PR (it is
   reviewed and merged like any other PR; Cairnwork never merges). A FAILED task gets
-  a fixed-vocabulary comment (issue_publish; "no evidence" for an UNCOMPARABLE one, #234) and
-  ``cairnwork:failed``.
+  a fixed-vocabulary comment (issue_publish) and ``cairnwork:failed``.
 
 GitHub calls use ``--gh`` (the bot's wrapper, checked); an error leaves the Issue for next pass.
 """
@@ -46,7 +45,6 @@ from cairnwork.issue_publish import (
     pr_body,
     refusal_text,
     require_bot_gh,
-    uncomparable_code,
 )
 from cairnwork.issue_task import TASK_FENCE, IssueRefused, parse_task_block
 from cairnwork.lineage import require_on_main
@@ -214,9 +212,8 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
                 results.append({"issue": number, "pr": url})
                 _post_verified(intake, github, clone, status)  # never touches the result
             else:
-                github.relabel(number, FAILED_LABEL, RUNNING)  # UNCOMPARABLE too: no evidence
-                code = uncomparable_code(intake, str(status.get("task_id", "")))
-                github.comment(number, failure_text(status, code))
+                github.relabel(number, FAILED_LABEL, RUNNING)
+                github.comment(number, failure_text(status))
                 results.append({"issue": number, "status": status["status"]})
         except (
             OwnershipUnknown,

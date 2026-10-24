@@ -1,8 +1,6 @@
-"""#234: base_comparison maps each base run to TEETH, NO_TEETH or UNCOMPARABLE, and the Issue
-comment says "no evidence" for an UNCOMPARABLE attempt; B2: the guard's record carries the
-collection errors. The verify and worker paths are in test_uncomparable_paths.py."""
-
-# ruff: noqa: F811 (the imported setup fixture is used as a test argument)
+"""#234: base_comparison maps each base run to TEETH, NO_TEETH or UNCOMPARABLE; B2: the guard's
+record carries the collection errors. The verify and worker paths are in
+test_uncomparable_paths.py."""
 
 import json
 import subprocess
@@ -10,17 +8,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from test_issue_runner import (
-    FakeGitHub,
-    issue,
-    setup,  # noqa: F401 - pytest fixture, F811 on use
-)
 
-import cairnwork.issue_runner as runner
 from cairnwork import report_guard
 from cairnwork.deferred_tests import Comparison, base_comparison
-from cairnwork.intake import Intake
-from cairnwork.issue_publish import failure_text, uncomparable_code
 
 TARGET = "tests/test_regression.py::test_regression"
 TARGETS = frozenset({TARGET})
@@ -41,7 +31,13 @@ def run(name="v", rc=1, *, failed=(TARGET,), **fields):
 
 # one row per line of the #234 mapping table: (base run, kind, code)
 ROWS = [
-    pytest.param(run(rc=2, failed=()), "UNCOMPARABLE", "BASE_COLLECTION_ERROR", id="rc2"),
+    pytest.param(
+        run(rc=2, failed=(), collect_errors=("tests/test_x.py",)),
+        "UNCOMPARABLE",
+        "BASE_COLLECTION_ERROR",
+        id="rc2-collect-error",
+    ),
+    pytest.param(run(rc=2, failed=()), "UNCOMPARABLE", "BASE_PYTEST_ERROR", id="rc2-interrupted"),
     pytest.param(run(rc=3, failed=()), "UNCOMPARABLE", "BASE_PYTEST_ERROR", id="rc3"),
     pytest.param(run(rc=4, failed=()), "UNCOMPARABLE", "BASE_PYTEST_ERROR", id="rc4"),
     pytest.param(run(rc=5, failed=()), "UNCOMPARABLE", "BASE_NO_TESTS", id="rc5"),
@@ -55,14 +51,14 @@ ROWS = [
         "UNCOMPARABLE",
         "BASE_COLLECTION_ERROR",
         id="guard-collect-error",
-    ),  # fmt: skip
+    ),
     pytest.param(run(rc=0, failed=()), "NO_TEETH", "TESTS_DO_NOT_FAIL_ON_BASE", id="passes"),
     pytest.param(
         run(failed=("tests/test_old.py::test_other",)),
         "NO_TEETH",
         "TESTS_DO_NOT_FAIL_ON_BASE",
         id="only-another-test-fails",
-    ),  # fmt: skip
+    ),
     pytest.param(run(), "TEETH", "", id="target-fails"),
     pytest.param(run(failed=(f"{TARGET}[case-1]",)), "TEETH", "", id="parametrised-target"),
 ]
@@ -107,58 +103,6 @@ def test_the_worker_reason_says_uncomparable_only_for_an_isolated_worker():
     assert found.worker_reason(isolated=True) == "UNCOMPARABLE: BASE_TIMEOUT: v: BASE_TIMEOUT"
     assert found.worker_reason(isolated=False) == "BASE_TIMEOUT: v: BASE_TIMEOUT"
     assert found.worker_reason(isolated="yes") == "BASE_TIMEOUT: v: BASE_TIMEOUT"  # only True
-
-
-def _intake(tmp_path, isolated=True):
-    return SimpleNamespace(
-        config=lambda: {"agy_run_as_user": "cw-worker" if isolated else None}, run_root=tmp_path
-    )
-
-
-def _runner_log(tmp_path, task_id, reason, status="FAILED"):
-    out = {"task_id": task_id, "status": status, "reason": reason, "verified": False}
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / f"{task_id}.runner.log").write_text("git noise\n" + json.dumps(out) + "\n")
-
-
-def test_the_uncomparable_code_comes_from_the_runner_output_of_an_isolated_worker(tmp_path):
-    _runner_log(tmp_path, "t1", "UNCOMPARABLE: BASE_NO_TESTS: v: BASE_NO_TESTS (exit 5)")
-    assert uncomparable_code(_intake(tmp_path), "t1") == "BASE_NO_TESTS"
-    assert uncomparable_code(_intake(tmp_path, isolated=False), "t1") == ""  # same uid: forgeable
-    assert uncomparable_code(_intake(tmp_path), "t2") == ""  # no log
-    _runner_log(tmp_path, "t3", "BASE_NO_TESTS: v: BASE_NO_TESTS (exit 5)")  # plain FAILED
-    assert uncomparable_code(_intake(tmp_path), "t3") == ""
-    _runner_log(tmp_path, "t4", "UNCOMPARABLE: BASE_NO_TESTS: x", status="COMPLETED")
-    assert uncomparable_code(_intake(tmp_path), "t4") == ""
-    _runner_log(tmp_path, "t5", "UNCOMPARABLE: `x` @someone: y")  # not a code: not echoed
-    assert uncomparable_code(_intake(tmp_path), "t5") == ""
-    assert uncomparable_code(_intake(tmp_path), "../t1") == ""
-
-
-def test_the_issue_comment_says_no_evidence_and_only_the_code():
-    failed = {"status": "FAILED", "phase": "FINISHED"}
-    text = failure_text(failed, "BASE_COLLECTION_ERROR")
-    assert "沒有證據（`UNCOMPARABLE: BASE_COLLECTION_ERROR`）" in text and "沒有完成" not in text
-    assert "沒有完成" in failure_text(failed) and "UNCOMPARABLE" not in failure_text(failed)
-    assert "UNCOMPARABLE" not in failure_text({"status": "COMPLETED"}, "BASE_TIMEOUT")
-    assert "@x" not in failure_text(failed, "@x") and "沒有完成" in failure_text(failed, "@x")
-
-
-@pytest.mark.parametrize("isolated", [True, False])
-def test_settle_comments_no_evidence_and_relabels_as_failed(setup, monkeypatch, isolated):
-    intake, github = setup["intake"], FakeGitHub([issue()])
-    taken = runner.take(intake, github, setup["clone"])[0]
-    task_id = taken["task_id"]
-    _runner_log(intake.run_root, task_id, "UNCOMPARABLE: BASE_TIMEOUT: v: BASE_TIMEOUT (exit None)")
-    status = {"task_id": task_id, "status": "FAILED", "core_verified": False, "phase": "FINISHED"}
-    monkeypatch.setattr(Intake, "status", lambda self, **kw: status)
-    config = intake.config() | {"agy_run_as_user": "cw-worker" if isolated else None}
-    monkeypatch.setattr(Intake, "config", lambda self: config)
-    runner.settle(intake, github, setup["clone"])
-    text = github.comments[-1][1]
-    assert github.labels[7] == {runner.FAILED_LABEL}
-    assert ("`UNCOMPARABLE: BASE_TIMEOUT`" in text) is isolated
-    assert "v: BASE_TIMEOUT" not in text and "exit None" not in text  # never the detail
 
 
 # B2 (#234): the guard records whether its record exists and which collectors failed

@@ -199,7 +199,6 @@ def _test_functions(repo: Path, blob: str) -> dict[str, str]:
 
 
 BASE_COMPARE_RULE = "base-compare-v1"  # how base runs map to a Comparison (#234)
-_RC_CODES = {2: "BASE_COLLECTION_ERROR", 3: "BASE_PYTEST_ERROR", 5: "BASE_NO_TESTS"}
 
 
 @dataclass(frozen=True)
@@ -232,10 +231,10 @@ def _base_problem(run) -> str:
         return "BASE_TIMEOUT" if run.timed_out else "BASE_NOT_EXECUTED"
     if run.report_too_big:
         return "BASE_REPORT_OVER_CAP"
-    if rc not in (0, 1):
-        return _RC_CODES.get(rc, "BASE_PYTEST_ERROR")  # 4 (usage error) and any other code too
-    if run.collect_errors:
+    if run.collect_errors:  # the guard saw a collector fail (exit 2 alone may be an interrupt)
         return "BASE_COLLECTION_ERROR"
+    if rc not in (0, 1):  # 5: nothing collected; 2 without collect_errors, 3, 4, others: pytest
+        return "BASE_NO_TESTS" if rc == 5 else "BASE_PYTEST_ERROR"
     return "" if run.recorded else "BASE_NO_REPORT"
 
 

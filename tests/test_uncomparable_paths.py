@@ -23,7 +23,8 @@ from cairnwork_attest.record import RecordNotFound, read_record
 TARGET = "tests/test_regression.py::test_regression"
 TEETH = {"rc": 1, "outcomes": {TARGET: "failed"}}
 BASE_ROWS = [  # (base run, code): one per row of the mapping table
-    pytest.param({"rc": 2}, "BASE_COLLECTION_ERROR", id="rc2"),
+    pytest.param({"rc": 2, "collect_errors": ("tests/x.py",)}, "BASE_COLLECTION_ERROR", id="rc2"),
+    pytest.param({"rc": 2}, "BASE_PYTEST_ERROR", id="rc2-interrupted"),
     pytest.param({"rc": 3}, "BASE_PYTEST_ERROR", id="rc3"),
     pytest.param({"rc": 4}, "BASE_PYTEST_ERROR", id="rc4"),
     pytest.param({"rc": 5}, "BASE_NO_TESTS", id="rc5"),
@@ -47,6 +48,7 @@ def _run(spec, run_root, run_id, rc=1, outcomes=None, recorded=True, **flags):
     return verifiers.VerifierRun(
         spec, rc, flags.get("timed_out", False), (), log, seen, outcomes,
         recorded=recorded, report_too_big=flags.get("report_too_big", False),
+        collect_errors=flags.get("collect_errors", ()),
     )  # fmt: skip
 
 
