@@ -22,7 +22,10 @@ task's declared public test targets, or the one the model picks by ``target_inde
 
 Once the base is verified, ``run`` never raises: a reply that breaks the tool-call structure
 (agent_protocol.ProtocolError, e.g. a tool name that is not a string) and any unexpected error end
-the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs. A call the
+the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs, in a
+``finally``. The first SIGTERM/SIGINT (cli.py installs ``interrupt``) stops the loop as
+"interrupted"; later ones are only counted, and a SystemExit is recorded and handed to the caller
+to re-raise after the line is written (review of #239, NB8). A call the
 model can repair (agent_protocol.BadCall: an unknown tool, a missing or extra argument) is an
 ``invalid_tool_call`` turn: the model is told why and the episode goes on.
 """
@@ -32,7 +35,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
@@ -55,8 +57,9 @@ from experimental.local_worker.endpoint import (
 from experimental.local_worker.episode import LoopOutcome, TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
+from experimental.local_worker.loop_config import Limits as Limits  # re-exported
+from experimental.local_worker.loop_config import Settings, Task
 from experimental.local_worker.tools import (
-    KILL_GRACE_SECONDS,
     ToolCall,
     ToolDeadline,
     WorkerIsolationError,
@@ -64,43 +67,6 @@ from experimental.local_worker.tools import (
 )
 
 UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
-
-
-@dataclass(frozen=True)
-class Limits:
-    context_cap: int
-    max_steps: int = 40
-    max_wall_seconds: float = 1800.0
-    cut_seconds: float = 900.0
-    tool_cap_seconds: float = 300.0
-    cleanup_reserve_seconds: float = 60.0
-    max_completion_tokens: int = 4096
-
-    def __post_init__(self) -> None:
-        if self.step_seconds < 1.0:
-            raise ValueError(f"cleanup_reserve_seconds must be >= {3 * (KILL_GRACE_SECONDS + 1)}")
-
-    @property
-    def step_seconds(self) -> float:
-        """Timeout of each bookkeeping step (status, sweep, numstat): a third of the reserve,
-        less the kill grace a timed-out step may still use."""
-        return self.cleanup_reserve_seconds / 3 - KILL_GRACE_SECONDS
-
-
-@dataclass(frozen=True)
-class Task:
-    task_id: str
-    repo: str
-    prompt: str
-    public_tests: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class Settings:
-    model: str
-    limits: Limits
-    seed: int | None = None
-    temperature: float = 0.0
 
 
 class RefusedStart(RuntimeError):
@@ -132,6 +98,13 @@ class AgentLoop:
         self.clock, self.now = clock, now
         tools.clock = clock  # every wrapper call is held to deadlines on this clock
         self.abort_detail: str | None = None
+        # Claude review of #239, NB8: the first SIGTERM/SIGINT while the loop runs interrupts it;
+        # later ones, and any during the cleanup and the line write, are only counted. A
+        # BaseException that is no interrupt (SystemExit) is recorded and kept for the caller
+        # to re-raise once the line is written.
+        self.interruptible = True
+        self.late_signals = 0
+        self.deferred: BaseException | None = None
         self._start = 0.0
         self._offset = 0.0
         self._final = float("inf")  # start + max_wall_seconds: nothing runs past it
@@ -207,10 +180,24 @@ class AgentLoop:
             self._abort(out, "protocol_error", exc)
         except Exception as exc:  # noqa: BLE001 - recorded, never lost: the line is still written
             self._abort(out, "internal_error", exc)
-        self._cleanup(out)
-        out.ended_at = self.now().astimezone(UTC8).isoformat()
-        out.wall_seconds = self._own()
+        except BaseException as exc:  # noqa: BLE001 - SystemExit & co.: re-raised after the line
+            out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
+            self.deferred = exc
+        finally:
+            self.interruptible = False  # from here on a signal is only counted
+            self._cleanup(out)
+            out.ended_at = self.now().astimezone(UTC8).isoformat()
+            out.wall_seconds = self._own()
         return out
+
+    def interrupt(self, signum: int, frame: Any) -> None:
+        """SIGTERM/SIGINT handler (cli.py installs it): KeyboardInterrupt the first time while
+        the loop runs (recorded as interrupted), else only counted (late_signals)."""
+        if not self.interruptible:
+            self.late_signals += 1
+            return
+        self.interruptible = False
+        raise KeyboardInterrupt
 
     def _abort(self, out: LoopOutcome, cause: str, exc: Exception) -> None:
         out.exit_reason, out.abort_cause = "ERROR_ABORT", cause
@@ -356,6 +343,17 @@ class AgentLoop:
         return render(call)
 
     def _cleanup(self, out: LoopOutcome) -> None:
+        """Sweep, numstat and the last tree, as far as they get: whatever stops them (even
+        SystemExit) leaves cleanup "failed" and the line still gets written."""
+        try:
+            self._cleanup_steps(out)
+        except BaseException as exc:  # noqa: BLE001 - the caller re-raises it after the line
+            out.cleanup = "failed"
+            self.abort_detail = self.abort_detail or f"cleanup: {type(exc).__name__}: {exc}"
+            if not isinstance(exc, Exception):
+                self.deferred = self.deferred or exc
+
+    def _cleanup_steps(self, out: LoopOutcome) -> None:
         try:
             self._step_deadline()
             sweep = self.tools.sweep()
