@@ -79,7 +79,7 @@ def test_an_absolute_path_is_refused_even_inside_the_scope(runs):
 
 
 @pytest.mark.parametrize(
-    "entry", ["../x", "/abs", "a/./b", "a//b", ".git", "sub/.GIT/x", "-n", 'a"b']
+    "entry", ["../x", "/abs", "a/./b", "a//b", ".git", "sub/.GIT/x", "-n", "x\r", "a\rb", 'a"b']
 )
 def test_a_bad_scope_entry_refuses_the_call(runs, entry):
     proc = write(runs, "sub/x.py", "sub", entry)  # the write itself would be in scope

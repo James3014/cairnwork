@@ -144,8 +144,10 @@ require_dir_inside_checkout() {
 set_scope() {
   SCOPE=""
   WRITE_RULES=""
+  cr=$(printf '\r')
   for s in "$@"; do
     require_relpath "$s" "scope entry"
+    case "$s" in *"$cr"*) refuse "scope entry has a carriage return" ;; esac  # as write_scope.py
     require_profile_safe "$CHECKOUT/$s" "scope entry"
     SCOPE="$SCOPE$s
 "
