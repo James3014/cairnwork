@@ -77,10 +77,18 @@ def test_resume_refuses_a_resume_parent(harness):
 
 
 def test_cut_900s_budget_shrinks_by_the_parent_prefix():
-    turns = [{"t_end_seconds": 50.0, "tree_differs_from_base": True}]
+    turns = [
+        {
+            "t_start_seconds": 10.0,
+            "t_end_seconds": 50.0,
+            "tool_ran": True,
+            "tree_differs_from_base": True,
+        }
+    ]
     got = episode.cut_at(turns, "COMPLETED", 60.0, max(0.0, 900.0 - 870.0))
     assert got["limit_seconds"] == 30.0 and got["within_limit"] is False
     assert got["exit_reason"] == "TIMEOUT" and got["turns_completed"] == 0
+    assert got["tree_differs_at_limit"] is None  # the turn spans the 30 s limit
 
 
 # -- finding 5: no overrun of the deadline -----------------------------------------------------

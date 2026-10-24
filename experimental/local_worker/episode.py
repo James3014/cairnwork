@@ -148,15 +148,24 @@ def tree_at(turns: list[dict]) -> bool | None:
     return ran[-1]["tree_differs_from_base"] if ran else False
 
 
+def tree_at_limit(turns: list[dict], limit: float) -> bool | None:
+    """The tree at ``limit`` seconds: tree_at of the turns ended by then; null when a turn whose
+    tool ran spans the limit (started before it, ended after it), since when that tool changed
+    the tree was never observed (Codex review of PR #248)."""
+    if any(t["tool_ran"] and t["t_start_seconds"] < limit < t["t_end_seconds"] for t in turns):
+        return None
+    return tree_at([t for t in turns if t["t_end_seconds"] <= limit])
+
+
 def cut_at(turns: list[dict], exit_reason: str, wall: float, limit: float) -> dict:
-    """What the episode would have been with a ``limit``-second wall clock (addendum §0a item 4)."""
-    done = [t for t in turns if t["t_end_seconds"] <= limit]
+    """What the episode would have been with a ``limit``-second wall clock (addendum §0a item 4).
+    turns_completed counts the turns ended by the limit; a turn spanning it is not completed."""
     return {
         "limit_seconds": limit,
         "within_limit": wall <= limit,
         "exit_reason": exit_reason if wall <= limit else "TIMEOUT",
-        "turns_completed": len(done),
-        "tree_differs_at_limit": tree_at(done),
+        "turns_completed": sum(t["t_end_seconds"] <= limit for t in turns),
+        "tree_differs_at_limit": tree_at_limit(turns, limit),
     }
 
 
