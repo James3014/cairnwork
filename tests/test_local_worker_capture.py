@@ -87,3 +87,19 @@ def test_edit_file_never_writes_back_a_capped_read(tmp_path, small_limit):
     assert call.exit_code == 1 and "too large" in call.output
     assert world.files["src/app.py"] == big
     assert [c[0] for c in world.calls] == ["read"]  # no write was started
+
+
+def test_a_capped_base_listing_publishes_no_plain_path(tmp_path, monkeypatch):
+    """A listing that is longer than the cap may still end on a NUL and parse; it is not used."""
+    world = World()
+    real = world.__call__
+
+    def invoker(argv, stdin, timeout):
+        monkeypatch.setattr(tools, "CAPTURE_LIMIT", 5 if "tracked" in argv else LIMIT * 100)
+        return real(argv, stdin, timeout)
+
+    loop, _, _, _ = make_loop(tmp_path, [reply("read_file", path="src/app.py")], world=world)
+    loop.tools.invoker = invoker
+    out = loop.run(initial_messages(TASK))
+    assert out.base_paths is None and out.cleanup == "ok"
+    assert out.turns[0].exit_code == 0  # the read itself was whole
