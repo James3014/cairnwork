@@ -134,7 +134,7 @@ def verify_candidate(
         "logs": result.logs,
         "p2p": result.p2p,
         "uncomparable": uncomparable,  # {code, detail, rule} when status is UNCOMPARABLE (#234)
-        "tests_consumed": bool(test_commit) and _used(intake, test_commit).exists(),
+        "tests_consumed": tests_consumed(intake, test_commit),
     }
 
 
@@ -219,6 +219,14 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
             raise FileExistsError
     except FileExistsError:
         raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
+
+
+def tests_consumed(intake: Intake, test_commit: str) -> bool:
+    """Is ``test_commit`` now marked used, so a retry needs a new one (#234)? Unknown: True."""
+    try:
+        return bool(OID.fullmatch(test_commit)) and _used(intake, test_commit).exists()
+    except OSError:
+        return True
 
 
 def _used(intake: Intake, test_commit: str) -> Path:

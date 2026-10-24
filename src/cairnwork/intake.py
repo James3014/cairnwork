@@ -155,13 +155,17 @@ class Intake:
             tmp.replace(path)
 
     def clone_problem(self, clone: Path) -> str:
-        """#234: a clone the Issue runner works in must be the state's mirror, compared by real
-        path (a symlink alias is the same clone; another clone of the same origin is not, and its
-        refs and config can differ). "" when it is, or when the state names no mirror."""
+        """#234: a clone the Issue runner works in must be the state's mirror, the same directory
+        (a symlink or case alias is the same clone; another clone of the same origin is not, and
+        its refs and config can differ). "" when it is, or when the state names no mirror."""
         mirror = self.config()["mirror"]
-        if mirror and os.path.realpath(mirror) != os.path.realpath(clone):
-            return f"CLONE_NOT_STATE_MIRROR: {clone} is not the state's mirror {mirror}"
-        return ""
+        if not mirror:
+            return ""
+        try:  # the same file (st_dev, st_ino): symlink and case aliases are the mirror
+            same = os.path.samefile(mirror, clone)
+        except OSError:
+            same = False
+        return "" if same else f"CLONE_NOT_STATE_MIRROR: {clone} is not the state's mirror {mirror}"
 
     def test_store(self) -> DeferredStore:
         return DeferredStore.for_state(self.state, self.config().get("test_source"))
@@ -184,13 +188,17 @@ class Intake:
     def prepare(self) -> None:
         """Create the state directory owner-only, or refuse one anyone else can use."""
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.check_state()
+        for name in ("requests", "runs", "deferred-tests"):
+            (self.state / name).mkdir(mode=0o700, exist_ok=True)
+
+    def check_state(self) -> None:
+        """BAD_STATE unless the state is a directory we own with mode 0700 (no side effects)."""
         info = self.state.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
             raise IntakeRefused("BAD_STATE", f"{self.state} is not a directory owned by us")
         if info.st_mode & 0o077:
             raise IntakeRefused("BAD_STATE", f"{self.state} must be mode 0700")
-        for name in ("requests", "runs", "deferred-tests"):
-            (self.state / name).mkdir(mode=0o700, exist_ok=True)
 
     @contextmanager
     def _intake_lock(self) -> Iterator[None]:

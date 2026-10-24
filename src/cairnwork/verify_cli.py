@@ -23,7 +23,7 @@ from typing import Any, NoReturn
 from cairnwork.deferred_tests import TestCommitRejected
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.pipeline import TaskRejected
-from cairnwork.verify_candidate import cleanup, verify_candidate
+from cairnwork.verify_candidate import cleanup, tests_consumed, verify_candidate
 
 
 class _Parser(argparse.ArgumentParser):
@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     except TaskRejected as exc:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
-        return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
+        detail = f"{type(exc).__name__}: {exc}"
+        used = tests_consumed(intake, getattr(args, "test_commit", ""))  # a retry needs new tests?
+        return _emit({"error": "INTERNAL", "detail": detail, "tests_consumed": used}, 1)
     return _emit(result, 0 if result["verified"] is True else 2)  # UNCOMPARABLE is never 0
 
 

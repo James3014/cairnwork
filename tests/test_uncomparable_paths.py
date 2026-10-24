@@ -3,6 +3,7 @@ and the worker path a FAILED attempt whose reason says UNCOMPARABLE only for an 
 either way Core is never asked and there is no receipt. The stubbed rows replace only the base and
 probe runs; the sandbox tests run everything for real."""
 
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ from test_deferred_tests import CHECK, REGRESSION, make_test_commit
 from test_pipeline import EditWorker
 from verify_helpers import FIX, candidate, verify
 
-from cairnwork import p2p, pipeline_judge, verifiers
+from cairnwork import p2p, pipeline_judge, verifiers, verify_cli
 from cairnwork.core_request import VerifierObservation
 from cairnwork.intake import Intake
 from cairnwork.journal import Journal
@@ -358,3 +359,29 @@ def test_an_isolated_worker_wrapped_by_visible_tests_stays_failed(project, tmp_p
     assert result.status == "FAILED" and calls == []
     assert result.reason.startswith("VERIFIER_ACCOUNT_UNUSABLE: "), result.reason
     assert "probe runs candidate code before verification" in result.reason
+
+
+def test_verify_a_candidate_run_account_failure_is_internal(
+    project, state, stub, monkeypatch, capsys
+):
+    """The candidate's code ran as the account: never UNCOMPARABLE. cairnwork-verify says INTERNAL
+    and, as everywhere, whether the test commit is used up."""
+    stub(TEETH, {"rc": 1, "outcomes": {"tests/test_calc.py::test_add": "passed"}})
+    staged = pipeline_judge.run_verifiers
+
+    def candidate_breaks(repo, commit, specs, root, run_id, **kw):
+        if run_id.endswith("-v"):
+            _account_error()
+        return staged(repo, commit, specs, root, run_id, **kw)
+
+    monkeypatch.setattr(pipeline_judge, "run_verifiers", candidate_breaks)
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    cand = candidate(project, base, {"src/calc.py": FIX})
+    code = verify_cli.main([
+        "--state", str(state), "run", "--repo-path", str(project), "--base", base,
+        "--candidate", cand, "--allowed-file", "src/calc.py",
+        "--verifier", " ".join(CHECK[0][1]), "--test-commit", test_commit,
+    ])  # fmt: skip
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["error"] == "INTERNAL" and "VerifierAccountError" in out["detail"]
+    assert out["tests_consumed"] is True

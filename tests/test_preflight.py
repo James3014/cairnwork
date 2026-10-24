@@ -68,16 +68,38 @@ def test_a_truncated_or_malformed_config_is_bad_config(tmp_path, capsys, raw):
     (state / "config.json").write_bytes(raw)  # truncated, not UTF-8, not an object
     code, report = _run(state, capsys=capsys)
     assert code == 1 and _codes(report)["config"] == "BAD_CONFIG"
-    assert {c for n, c in _codes(report).items() if n != "config"} == {"SKIPPED"}
+    assert {c for n, c in _codes(report).items() if n not in ("state", "config")} == {"SKIPPED"}
 
 
 def test_a_bad_config_or_a_missing_state_skips_the_rest(tmp_path, capsys):
     state = _state(tmp_path, nonsense=1)
     code, report = _run(state, capsys=capsys)
     assert code == 1 and _codes(report)["config"] == "BAD_CONFIG"
-    assert {c for n, c in _codes(report).items() if n != "config"} == {"SKIPPED"}
+    assert {c for n, c in _codes(report).items() if n not in ("state", "config")} == {"SKIPPED"}
     code, report = _run(tmp_path / "nowhere", capsys=capsys)
-    assert code == 1 and _codes(report)["config"] == "STATE_MISSING"
+    assert code == 1 and _codes(report)["state"] == "STATE_MISSING"
+    assert {c for n, c in _codes(report).items() if n != "state"} == {"SKIPPED"}
+
+
+def test_a_state_others_can_use_is_bad_state_and_left_alone(tmp_path, capsys):
+    state = _state(tmp_path)
+    state.chmod(0o755)
+    code, report = _run(state, capsys=capsys)
+    assert code == 1 and _codes(report)["state"] == "BAD_STATE"
+    assert sorted(p.name for p in state.iterdir()) == ["config.json"]  # no prepare() mkdirs
+    assert oct(state.stat().st_mode & 0o777) == "0o755"
+
+
+def test_an_unsafe_lock_queue_is_unusable_not_inconclusive(tmp_path, capsys, monkeypatch):
+    from cairnwork.verifier_account import VerifierAccount
+
+    root = tmp_path / "acct"
+    (root / ".verifier.queue").mkdir(parents=True)
+    (root / ".verifier.queue").chmod(0o777)
+    monkeypatch.setattr(Intake, "verifier_account", lambda self: VerifierAccount(root=root))
+    code, report = _run(_state(tmp_path), capsys=capsys)
+    assert code == 1 and _codes(report)["account"] == "VERIFIER_ACCOUNT_UNUSABLE"
+    assert "unsafe verifier queue directory" in report["checks"]["account"]["detail"]
 
 
 class Unusable:

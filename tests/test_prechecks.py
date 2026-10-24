@@ -83,6 +83,21 @@ def test_group_and_other_bits_decide_by_class(open_root, monkeypatch):
     assert account_check.blocked(str(python), "member").startswith(f"{home} 0705")
 
 
+@pytest.mark.parametrize(
+    ("mode", "ok"), [(0o070, False), (0o700, True)], ids=["owner-denies", "owner-allows"]
+)
+def test_the_owner_class_comes_before_the_group_class(open_root, monkeypatch, mode, ok):
+    home, python = _python_under(open_root, 0o755)
+    gids = frozenset({home.stat().st_gid})
+    monkeypatch.setattr(account_check, "_ids", lambda user: (os.getuid(), gids))  # owner + member
+    home.chmod(mode)  # owner bits and group bits disagree: POSIX uses the owner's
+    try:
+        why = account_check.blocked(str(python), "owner")
+    finally:
+        home.chmod(0o755)
+    assert (why == "") is ok, why
+
+
 def test_the_real_location_of_a_symlinked_python_is_walked(open_root, stranger):
     home, python = _python_under(open_root, 0o700)
     link_dir = open_root / "open"
@@ -154,6 +169,15 @@ def test_an_account_without_a_lock_file_is_unusable(tmp_path):
     account = VerifierAccount(root=tmp_path / "missing")
     with pytest.raises(BaseUncomparable, match="lock: .*No such file"):
         account_check.precheck(account, sys.executable)
+
+
+def test_an_unsafe_lock_queue_is_unusable_not_deferred(tmp_path):
+    from cairnwork.verifier_account import VerifierAccount
+
+    (tmp_path / ".verifier.queue").mkdir()
+    (tmp_path / ".verifier.queue").chmod(0o777)  # writable by others: lock_queue refuses it
+    with pytest.raises(BaseUncomparable, match="unsafe verifier queue directory"):
+        account_check.precheck(VerifierAccount(root=tmp_path), sys.executable)
 
 
 def test_base_stage_turns_only_account_errors_into_uncomparable(open_root, stranger):
@@ -263,6 +287,14 @@ def test_a_symlink_alias_of_the_mirror_is_accepted(mirror, tmp_path, monkeypatch
         assert '"error": "STOP"' in capsys.readouterr().out
 
 
+def test_a_case_alias_of_the_mirror_is_accepted(mirror, tmp_path, monkeypatch, capsys):
+    alias = mirror.parent / mirror.name.upper()
+    if not alias.exists():
+        pytest.skip("case-sensitive filesystem: no case alias")
+    assert _main(_state(tmp_path, mirror), alias, monkeypatch) == 3
+    assert '"error": "STOP"' in capsys.readouterr().out
+
+
 def test_another_clone_of_the_same_origin_is_refused(mirror, tmp_path, monkeypatch, capsys):
     other = tmp_path / "other"
     git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), str(other))
@@ -279,9 +311,10 @@ def test_a_copy_whose_config_diverged_is_refused(mirror, tmp_path, monkeypatch, 
     assert Intake(_state(tmp_path, mirror)).clone_problem(copy).startswith("CLONE_NOT_STATE_MIRROR")
 
 
-def test_a_truncated_config_is_bad_config_at_startup(mirror, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("text", ['{"verifier_account": fal', '{"nonsense": 1}'])
+def test_a_bad_config_is_exit_3_at_startup(mirror, tmp_path, monkeypatch, capsys, text):
     state = _state(tmp_path, mirror)
-    (state / "config.json").write_text('{"verifier_account": fal')
+    (state / "config.json").write_text(text)  # truncated, or valid JSON with an unknown key
     assert _main(state, mirror, monkeypatch) == 3
     assert '"error": "BAD_CONFIG"' in capsys.readouterr().out
 

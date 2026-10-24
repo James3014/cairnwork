@@ -5,15 +5,16 @@
 
 Checks (each ``{"code", "detail"}``, code ``OK`` when it passes):
 
-* ``config``: the state directory exists (``STATE_MISSING``) and its config.json loads (else its
-  IntakeRefused code, e.g. ``BAD_CONFIG``); the other
+* ``state``: the state directory exists (``STATE_MISSING``; everything else is then ``SKIPPED``)
+  and is ours with mode 0700 (``BAD_STATE``, Intake.check_state, without prepare()'s mkdirs);
+* ``config``: its config.json loads (else its IntakeRefused code, e.g. ``BAD_CONFIG``); the other
   checks need it and are ``SKIPPED`` when it fails;
 * ``verifier_python``: the configured interpreter (or the account's) exists and is executable
   (``VERIFIER_PYTHON_MISSING``);
 * ``account``: the verifier account can run it (``VERIFIER_ACCOUNT_UNUSABLE``, with the first
-  directory it cannot traverse); ``walk`` lists every directory checked; when the account's lock
-  stays busy for ``--lock-wait`` seconds (or its queue is unreadable) ``available()`` never ran,
-  so the result is ``ACCOUNT_CHECK_INCONCLUSIVE`` (not a pass; wait longer and run it again);
+  directory it cannot traverse, or a lock that cannot be used); ``walk`` lists every directory
+  checked; when the account's lock stays busy for ``--lock-wait`` seconds ``available()`` never
+  ran, so the result is ``ACCOUNT_CHECK_INCONCLUSIVE`` (not a pass; wait longer, run it again);
 * ``mirror``: the configured mirror is a directory (``MIRROR_MISSING``);
 * ``clone``: with ``--clone``, it is the state's mirror by real path (``CLONE_NOT_STATE_MIRROR``,
   the check ``cairnwork-issues`` makes at startup);
@@ -99,18 +100,32 @@ def _isolation(intake: Intake, config: dict[str, Any]) -> dict[str, Any]:
     return _result("WORKER_NOT_ISOLATED", why) if why else _result(OK, "isolated")
 
 
+def _state(intake: Intake) -> dict[str, Any]:
+    """Intake.prepare()'s checks without its side effects."""
+    if not intake.state.is_dir():
+        return _result("STATE_MISSING", f"{intake.state} is not a directory")
+    try:
+        intake.check_state()
+    except IntakeRefused as exc:
+        return _result(exc.code, exc.detail)
+    return _result(OK, str(intake.state))
+
+
 def preflight(state: Path, clone: str | None, lock_wait: float = 60.0) -> dict[str, Any]:
     intake = Intake(state)
     names = ("verifier_python", "account", "mirror", "clone", "worker_isolation")
+    found = _state(intake)
     try:
-        if not state.is_dir():
-            raise IntakeRefused("STATE_MISSING", f"{state} is not a directory")
+        if found["code"] == "STATE_MISSING":
+            raise IntakeRefused("SKIPPED", "no state directory")
         config = intake.config()
     except IntakeRefused as exc:
         skipped = {name: _result("SKIPPED", "config did not load") for name in names}
-        return {"ok": False, "checks": {"config": _result(exc.code, exc.detail), **skipped}}
+        checks = {"state": found, "config": _result(exc.code, exc.detail), **skipped}
+        return {"ok": False, "checks": checks}
     python = config["verifier_python"] or getattr(intake.verifier_account(), "python", None)
     checks = {
+        "state": found,
         "config": _result(OK, str(state / "config.json")),
         "verifier_python": _python(python),
         "account": _account(intake, python, lock_wait),

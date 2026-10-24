@@ -92,9 +92,10 @@ def precheck(
 ) -> str | None:
     """Raise UNCOMPARABLE ``VERIFIER_ACCOUNT_UNUSABLE`` when ``available()`` says the account (if
     any) cannot run ``python`` (or its own); ``blocked`` only explains. None: checked (or no
-    account). It never queues behind a run (``timeout`` 0: one try): when the lock is busy or its
-    queue unreadable nothing is decided (the walk ignores ACLs, so it never refuses), the reason is
-    returned, and the run's own exclusive() and available() decide later, as before (#234)."""
+    account). It never queues behind a run (``timeout`` 0: one try): only when the lock is busy is
+    nothing decided (the walk ignores ACLs, so it never refuses); the reason is returned and the
+    run's own exclusive() and available() decide later, as before (#234). A lock that cannot be
+    used at all (no account root, an unsafe queue) is unusable."""
     if account is None:
         return None
     py = python or account.python
@@ -102,8 +103,10 @@ def precheck(
         with account.exclusive(timeout):
             if account.available(py):
                 return None
-    except VerifierAccountError as exc:  # busy, or the lock queue is unreadable: deferred
-        return str(exc)
+    except VerifierAccountError as exc:
+        if "RESOURCE_LEASE_TIMEOUT" in str(exc):  # busy: deferred
+            return str(exc)
+        raise unusable(f"account {account.user} lock: {exc}") from exc  # e.g. an unsafe queue
     except OSError as exc:  # e.g. no account root to hold the lock file
         raise unusable(f"account {account.user} lock: {exc}") from exc
     hint = blocked(py, account.user) or "no blocked directory found; check sudo and import pytest"
