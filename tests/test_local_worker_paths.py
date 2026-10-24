@@ -12,7 +12,16 @@ import json
 import subprocess
 
 import pytest
-from local_worker_fakes import META, TAG, TASK, World, make_loop, make_runs, reply
+from local_worker_fakes import (
+    META,
+    NO_AUTO_MAINTENANCE,
+    TAG,
+    TASK,
+    World,
+    make_loop,
+    make_runs,
+    reply,
+)
 from local_worker_fakes import run_wrapper as run
 
 from experimental.local_worker import episode
@@ -125,7 +134,7 @@ def test_tracked_lists_the_base_files_and_directories(tmp_path):
     co, root = runs / TAG / "checkout", str(runs / TAG)
     (co / ".git").rmdir()
     (co / "sub" / "keep.txt").write_text("k\n")
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "-A"], check=True)
     subprocess.run([*git, "commit", "-qm", "base"], check=True)

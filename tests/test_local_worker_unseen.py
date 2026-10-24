@@ -10,7 +10,7 @@ import socket
 import subprocess
 
 import pytest
-from local_worker_fakes import BASE_SHA, TAG, make_runs
+from local_worker_fakes import BASE_SHA, NO_AUTO_MAINTENANCE, TAG, make_runs
 from local_worker_fakes import run_wrapper as run
 
 from experimental.local_worker.cuts import CUT_DEFINITION, first_edit_cut, first_source_edit
@@ -24,7 +24,7 @@ def test_status_lists_empty_dirs_fifos_and_sockets(tmp_path):
     co, root = runs / TAG / "checkout", str(runs / TAG)
     (co / ".git").rmdir()
     (co / "sub" / "keep.txt").write_text("k\n")
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "-A"], check=True)
     subprocess.run([*git, "commit", "-qm", "base"], check=True)

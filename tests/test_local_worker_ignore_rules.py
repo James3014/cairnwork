@@ -5,7 +5,16 @@ changed ignore file is therefore itself a source change, in either order of plan
 import subprocess
 
 import pytest
-from local_worker_fakes import BASE_SHA, TAG, TASK, World, make_loop, make_runs, reply
+from local_worker_fakes import (
+    BASE_SHA,
+    NO_AUTO_MAINTENANCE,
+    TAG,
+    TASK,
+    World,
+    make_loop,
+    make_runs,
+    reply,
+)
 from local_worker_fakes import run_wrapper as run
 
 from experimental.local_worker.agent import initial_messages
@@ -77,7 +86,7 @@ def test_real_git_lists_a_self_ignoring_gitignore_as_ignored(tmp_path):
     (co / "sub" / "keep.txt").write_text("k\n")
     (co / "src").mkdir()
     (co / "src" / "app.py").write_text("x = 1\n")
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "-A"], check=True)
     subprocess.run([*git, "commit", "-qm", "base"], check=True)

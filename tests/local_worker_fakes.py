@@ -22,6 +22,9 @@ from experimental.local_worker.tools import WorkerTools
 BASE_SHA = "a" * 40
 WRAPPER = Path(tools.__file__).with_name("local-worker-tool")
 TAG = "0123456789abcdef0123456789abcdef"
+# A test commit may start git's auto maintenance in the background; its lock files race the
+# queries and .git snapshots (PR #246). Every git call that commits in a test passes these.
+NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
 TASK = Task("TASK_01", "repo_x", "SECRET-PROMPT-7f3 fix the bug", ("tests/test_app.py",))
 META: dict[str, Any] = {
     "episode_id": "ep_test",

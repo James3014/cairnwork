@@ -8,7 +8,7 @@ wrapper now sums the hunk headers of the ``--text -U0`` patch and reports the bi
 import subprocess
 
 import pytest
-from local_worker_fakes import TAG, make_runs
+from local_worker_fakes import NO_AUTO_MAINTENANCE, TAG, make_runs
 from local_worker_fakes import run_wrapper as run
 
 from experimental.local_worker.gitstate import parse_numstat
@@ -40,7 +40,7 @@ def test_a_nul_byte_no_longer_hides_a_files_lines(tmp_path):
     lines = "".join(f"line {i}\n" for i in range(10))
     (co / "big.py").write_text(lines)
     (co / "sql.txt").write_text("-- a comment\n++ not a header\nkeep\n")
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "-A"], check=True)
     subprocess.run([*git, "commit", "-qm", "base"], check=True)

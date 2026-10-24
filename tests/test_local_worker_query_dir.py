@@ -12,7 +12,7 @@ import sys
 import time
 
 import pytest
-from local_worker_fakes import TAG, WRAPPER, make_runs
+from local_worker_fakes import NO_AUTO_MAINTENANCE, TAG, WRAPPER, make_runs
 from local_worker_fakes import run_wrapper as run
 
 WRITER = """
@@ -69,7 +69,7 @@ def _git_checkout(runs):
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
     (co / "sub" / "keep.txt").write_text("k\n")
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     subprocess.run([*git, "add", "-A"], check=True)
     subprocess.run([*git, "commit", "-qm", "base"], check=True)
