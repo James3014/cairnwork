@@ -12,7 +12,7 @@ import local_worker_fakes
 import pytest
 from local_worker_fakes import META, TASK, World, cli_harness, lines, make_loop, reply
 
-from experimental.local_worker import episode
+from experimental.local_worker import cli, corpus_io, episode
 from experimental.local_worker.agent import initial_messages
 from experimental.local_worker.episode_schema import validate_record
 
@@ -196,3 +196,20 @@ def test_a_signal_before_the_loop_starts_escapes_and_no_line_is_written(harness,
     with pytest.raises(KeyboardInterrupt):
         run([READ], "run")
     assert not list(out.glob("episodes-*.jsonl"))
+
+
+@pytest.mark.parametrize("step", ["build_record", "append_episode"])
+def test_a_signal_while_the_line_is_built_or_written_is_only_counted(harness, monkeypatch, step):
+    """PR #248 review item 1: run() has returned; cli.py builds and appends the line."""
+    run, out = harness
+    owner = cli if step == "build_record" else corpus_io
+    monkeypatch.setattr(owner, step, _sigterm_then(getattr(owner, step)))
+    try:
+        assert run([READ], "run") == 0
+    except KeyboardInterrupt:
+        pytest.fail("a signal after run() returned escaped the CLI")
+    [rec] = lines(out)
+    assert rec["verification"]["exit_reason"] == "COMPLETED"
+    assert rec["termination"]["interrupted"] is False
+    # the transcript is written after build_record and before append_episode
+    assert _transcript(out, rec)["late_signals"] == (1 if step == "build_record" else 0)
