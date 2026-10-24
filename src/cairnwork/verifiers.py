@@ -238,24 +238,25 @@ def _run_all(
 
 
 def _remove_checkout(work: Path, clone_id: str, account) -> None:
-    """Remove a verifier's work dir and checkout; a leftover is only disk space, never a verdict.
+    """Remove a verifier's work dir and checkout; a leftover is only disk space, never a verdict,
+    but it is reported (ALERT on stderr), never silent.
 
-    Under the account the checkout is the account's own copy (#240, account_checkout.py): the
-    account removes it first; the owner then removes the rest of ``work`` (it owns ``work`` and
-    any staging clone a failure left) without chmodding or walking the account's tree.
-    remove_attempt_clone is the owner path only: its chmod 0o700 pass cannot touch the account's
-    directories and, run first, could shut the account out of what is inside."""
-    if account is not None:
-        try:
-            account.remove(work)
-        finally:  # whatever the account's removal did, the owner removes what it can
-            shutil.rmtree(work, ignore_errors=True)
-        return
+    Under the account the checkout is the account's own copy (#240, account_checkout.py): only
+    the account can remove it (``account.remove``), and that is what guarantees it goes; the owner
+    then removes the rest of ``work`` (it owns ``work`` and any staging clone a failure left)
+    without chmodding or walking the account's tree. remove_attempt_clone is the owner path only:
+    its chmod 0o700 pass cannot touch the account's directories."""
     try:
-        remove_attempt_clone(work, clone_id)
+        if account is not None:
+            account.remove(work)
+        else:
+            remove_attempt_clone(work, clone_id)
     except WorkspaceError:
-        pass  # the run's verdict stands; a leftover directory is only disk space
-    shutil.rmtree(work, ignore_errors=True)
+        pass  # the run's verdict stands; what is left is reported below
+    finally:  # whatever the first removal did, the owner removes what it can
+        shutil.rmtree(work, ignore_errors=True)
+        if os.path.lexists(work):
+            print(f"ALERT verifier cleanup: {work} was not removed", file=sys.stderr, flush=True)
 
 
 def _remove_scratch(dirs, account) -> None:

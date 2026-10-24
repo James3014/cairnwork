@@ -5,11 +5,12 @@ setting explicit times (a template cache keyed by mtime), chmod and restore, an 
 the same bytes, and deleting the top-level ``.git`` (the verifier's scratch, never judged) pass. A
 leftover file (ignored by .gitignore or not), a retained modification, ``.git`` moved to a path
 inside the checkout, a symlink swapped in, or a directory left without permissions is "checkout
-changed". Every work dir is removed afterwards. The account side is one ``run_verifiers`` call (one
-lock hold). A link witness checks that links the test makes to files outside its checkout leave
-those files' contents, modes and link counts as they were, and a crash leftover (the account's
-copy with a mode-0 directory, plus the owner's staging clone) is removed by recovery.
-"""
+changed". The checkout is owned by the uid the test runs as (in account mode: the account's own
+copy), and every work dir, that copy included, is removed afterwards without a cleanup ALERT. The
+account side is one ``run_verifiers`` call (one lock hold). A link witness checks that links the
+test makes to files outside its checkout leave those files' contents, modes and link counts as they
+were, and a crash leftover (the account's copy with a mode-0 directory, plus the owner's staging
+clone) is removed by recovery."""
 
 import hashlib
 import os
@@ -67,6 +68,9 @@ SCENARIOS = {
         "    os.replace(tmp, data)\n"
     ),
     "gitdelete": "def test_gitdelete():\n    shutil.rmtree(ROOT / '.git')\n",
+    "owns": (  # the checkout is the running uid's own (account mode: the account's copy)
+        f"def test_owns():\n    assert ROOT.stat().st_uid == {DATA}.stat().st_uid == os.getuid()\n"
+    ),
     "leave": "def test_leave():\n    (ROOT / 'pkg' / 'left.txt').write_text('x')\n",
     "ignored": "def test_ignored():\n    (ROOT / 'pkg' / 'run.log').write_text('x')\n",
     "modify": f"def test_modify():\n    {DATA}.write_text('kept\\n')\n",
@@ -93,6 +97,7 @@ EXPECTED = {
     "utime": (True, set()),
     "chmod": (True, set()),
     "replace": (True, set()),
+    "owns": (True, set()),  # under the account: its own copy (account_checkout.py)
     "gitdelete": (True, set()),  # policy: the top-level .git is not judged (verifiers.py)
     "leave": (False, {"extra pkg/left.txt"}),
     "ignored": (False, {"extra pkg/run.log"}),  # ignore rules do not apply to the comparison
@@ -124,7 +129,8 @@ def _run(repo, run_root, account, run_id, scenarios):
     for run in runs:
         assert run.ran, run.log_path.read_text()  # the guard saw the test run and pass
         assert run.returncode == 0, run.log_path.read_text()  # the candidate test succeeded
-    assert not list(run_root.glob(f"{run_id}-v*.work")), "a work directory was left behind"
+    # in account mode only account.remove can delete the copy: this pins that it did
+    assert not list(run_root.glob(f"{run_id}-v*.work")), "a work dir or the copy was left behind"
     assert not list(run_root.glob(f"{run_id}-v*.work/{STAGE}")), "a staging clone was left"
     return {run.spec.verifier_id: run for run in runs}
 
@@ -171,11 +177,12 @@ MODES = [
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_checkout_writes_match_between_modes(repo, tmp_path, own_names, mode):
+def test_checkout_writes_match_between_modes(repo, tmp_path, own_names, capsys, mode):
     run_root, account = _mode_run_root(mode, tmp_path)
     run_id = "w" + os.urandom(6).hex()
     own_names.append(f"{run_id}-")
     _check(_run(repo, run_root, account, run_id, SCENARIOS))
+    assert "ALERT verifier cleanup" not in capsys.readouterr().err
 
 
 _LINKS = (
@@ -249,6 +256,29 @@ def test_a_failing_account_removal_still_lets_the_owner_remove_its_part(tmp_path
     with pytest.raises(RuntimeError):
         verifiers._remove_checkout(work, "x", Failing())
     assert not work.exists()
+
+
+def test_a_leftover_after_cleanup_is_reported_not_silent(tmp_path, capsys):
+    """An account whose removal did nothing (``rm`` runs with check=False) leaves its copy, which
+    the owner cannot remove: the run's verdict stands, but the leftover is an ALERT on stderr."""
+    work = tmp_path / "x.work"
+    copy = work / "x" / "closed"  # stands in for the account's copy: the owner's rmtree fails
+    copy.mkdir(parents=True)
+    (copy / "f").write_text("account")
+    os.chmod(copy, 0o500)
+
+    class Inert:
+        def remove(self, path):
+            pass
+
+    try:
+        verifiers._remove_checkout(work, "x", Inert())
+        assert work.exists()
+        assert f"ALERT verifier cleanup: {work} was not removed" in capsys.readouterr().err
+    finally:
+        os.chmod(copy, 0o700)
+    verifiers._remove_checkout(work, "x", Inert())
+    assert not work.exists() and "ALERT" not in capsys.readouterr().err
 
 
 @pytest.mark.sandbox
