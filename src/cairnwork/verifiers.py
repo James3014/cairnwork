@@ -4,22 +4,25 @@ Verifiers come from the task, so they are untrusted text. Only one shape is
 accepted: ``python3 -m pytest [-q] [-p no:cacheprovider] tests/<file>.py[::<name>]...``.
 Anything else is rejected before it runs, and nothing goes through a shell.
 
-Each run happens in a new clone of the candidate commit made from Cairnwork's
-repository (never in the worker's clone), with a minimal environment (no
-GIT_*, no inherited credentials, HOME and TMPDIR inside the run directory,
-bytecode and the pytest cache disabled) and a timeout. A verifier passes only
-if it exits 0 and leaves the checkout identical to the candidate tree; a
-verifier that writes into the checkout fails. The pytest run must also leave a
-JUnit report showing at least one test run and none failed, errored, skipped or
-xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with rootdir
-and confcutdir at the checkout, so no ini in the candidate or a parent directory
-applies, and plugin autoloading is off; the ini holds only allow-listed keys from
-the task's base commit and plugins load by explicit -p (pytest_config.py). Output
-streams to a log file with a size cap, the run's process group is killed afterwards, and logs and
-reports live in a private directory, created with O_EXCL|O_NOFOLLOW. A process
-that starts its own session escapes the group kill; only a sandbox stops that.
-The observation hash binds the candidate commit, verifier id, full argv, exit
-code, timeout, mutations, test result and log hash.
+Each run happens in a new clone of the candidate commit made from Cairnwork's repository (never
+in the worker's clone), with a minimal environment (no GIT_*, no inherited credentials, HOME and
+TMPDIR inside the run directory, bytecode and the pytest cache disabled) and a timeout. A
+verifier passes only if it exits 0 and, at the end, the checkout matches the candidate tree: a
+final comparison (treecompare.py) of paths, bytes, symlink targets and the owner-execute bit. It
+does not cover the top-level .git (the verifier's scratch: never used by the owner afterwards),
+files next to the checkout, times, ownership, link counts or other mode bits, and a change made
+and undone during the run is not seen. Under a verifier account the checkout is the account's
+own copy: a test may write, utime and chmod it, and it is compared, as in owner mode (#240,
+account_checkout.py).
+The pytest run must also leave a JUnit report showing at least one test run and none failed,
+errored, skipped or xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with
+rootdir and confcutdir at the checkout, so no ini in the candidate or a parent directory
+applies, and plugin autoloading is off; the ini holds only allow-listed keys from the task's
+base commit and plugins load by explicit -p (pytest_config.py). Output streams to a log file
+with a size cap, the run's process group is killed afterwards, and logs and reports live in a
+private directory, created with O_EXCL|O_NOFOLLOW. A process that starts its own session escapes
+the group kill; only a sandbox stops that. The observation hash binds the candidate commit,
+verifier id, full argv, exit code, timeout, mutations, test result and log hash.
 
 The run is confined with macOS Seatbelt (see cairnwork_sandbox): no network, reads only
 from the system, the interpreter and the checkout, writes only to the checkout
@@ -51,6 +54,7 @@ import hashlib
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -58,16 +62,16 @@ from pathlib import Path
 
 import cairnwork_sandbox
 from cairnwork import pytest_config, report_channel, report_guard
+from cairnwork.account_checkout import checkout_differences, make_account_checkout
+from cairnwork.account_checkout import remove_checkout as _remove_checkout
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
-from cairnwork.treecompare import tree_differences
 from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lock_wait_seconds
 from cairnwork.verifier_exec import (  # low-level run primitives, split out for the 400-line cap
     _execute,
     _file_sha256,
     _record_digest,
-    _same_directory,
     _write_new,
 )
 from cairnwork.verifier_spec import (  # re-exported for existing importers
@@ -76,7 +80,7 @@ from cairnwork.verifier_spec import (  # re-exported for existing importers
     parse_verifier,
     protected_verifier_inputs,
 )
-from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
+from cairnwork.workspace import create_attempt_clone
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
@@ -203,16 +207,19 @@ def _run_all(
         clone_id = f"{run_id}-v{index}"
         # The checkout sits alone in its own work directory, which the tests may write:
         # some create files next to their repository (Nexus-new: nexus-runtime-targets),
-        # and that must stay inside this run. Sticky: the account cannot move the checkout.
+        # and that must stay inside this run. Under the account the checkout is its own copy, which
+        # it may rename (sticky only protects the owner's names): _same_directory catches that.
         work = Path(run_root) / f"{clone_id}.work"
         work.parent.mkdir(parents=True, exist_ok=True)
         work.mkdir(mode=0o700)
         try:
-            if account is not None:
+            if account is None:
+                checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
+            else:  # the account's own copy: it may write, utime and chmod as the owner may (#240)
                 os.chmod(work, 0o3770)
-            checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
-            if account is not None:
-                account.grant_read(checkout)  # whatever the caller's umask was
+                checkout = make_account_checkout(
+                    account, python, repo, candidate_commit, work, clone_id
+                )
             runs.append(
                 _run_one(
                     repo,
@@ -228,19 +235,22 @@ def _run_all(
                 )
             )
         finally:
-            try:
-                remove_attempt_clone(work, clone_id)
-            except WorkspaceError:
-                pass  # the run's verdict stands; a leftover directory is only disk space
-            _remove_scratch((work,), account)
+            _remove_checkout(work, clone_id, account)
     return tuple(runs)
 
 
 def _remove_scratch(dirs, account) -> None:
+    """HOME and TMPDIR of a finished run: as with the checkout (remove_checkout), a failing removal
+    never costs the verdict, which is decided by now, and a leftover is an ALERT on stderr."""
     for scratch in dirs:
         if account is not None:
-            account.remove(scratch)
+            try:
+                account.remove(scratch)
+            except (VerifierAccountError, OSError, subprocess.SubprocessError):
+                pass  # the owner's rmtree below removes what it can; the rest is reported
         shutil.rmtree(scratch, ignore_errors=True)
+        if os.path.lexists(scratch):
+            print(f"ALERT verifier cleanup: {scratch} was not removed", file=sys.stderr, flush=True)
 
 
 def _prepare_run(private: Path, ini: Path, ini_text: bytes, channel=None):
@@ -329,10 +339,7 @@ def _run_one_in(
     else:
         _write_new(log_path, b"no sandbox backend available: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
-    if _same_directory(checkout, before):  # not renamed away, no symlink put in place
-        mutated = tuple(tree_differences(repo, candidate_commit, checkout))
-    else:
-        mutated = ("checkout replaced",)
+    mutated = checkout_differences(repo, candidate_commit, checkout, before, account, python)
     verdict = channel.read() if channel else report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0

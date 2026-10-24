@@ -277,9 +277,10 @@ def test_an_unknown_account_count_is_unknown_not_zero():
 
 
 def test_a_strict_caller_umask_does_not_break_the_account_run(project):
-    # Issue #91: grant_read must open the checkout to the account whatever the umask — on Linux the
-    # clone's group is the owner's (setgid is stripped from the run work dir), so a strict umask
-    # leaves it unreadable to the account unless read is granted to *other*. Runs on both platforms.
+    # Issue #91: grant_read must open the staging clone to the account whatever the umask, so that
+    # it can make its own copy (#240) — on Linux the clone's group is the owner's (setgid is
+    # stripped from the run work dir), so a strict umask leaves it unreadable to the account unless
+    # read is granted to *other*. Runs on both platforms.
     old = os.umask(0o077)  # e.g. a Gateway service started with umask 077
     try:
         result = verify(project, None, "tests/test_ok.py")
@@ -319,25 +320,23 @@ def test_tests_can_run_git_in_the_checkout_they_do_not_own(project):
     assert result.observation.passed, log  # cairnwork#37: launchd's distnoted is not an escape
 
 
-def test_account_may_write_next_to_the_repo_but_not_move_the_checkout(project):
-    """cairnwork#38 under the account: the sticky work directory takes new files, but the
-    checkout (owner's) cannot be renamed away or replaced."""
+def test_account_may_write_next_to_the_repo_and_a_replaced_checkout_fails(project):
+    """cairnwork#38 under the account: the sticky work directory takes new files. Since #240 the
+    checkout is the account's own copy, so it can move it away and plant a symlink, as in owner
+    mode; the owner then compares nothing and reports the checkout replaced."""
     code = (
         "import os\n"
         "from pathlib import Path\n"
         "repo = Path(__file__).resolve().parents[1]\n"
         "def test_layout():\n"
         "    (repo.parent / 'nexus-runtime-targets').mkdir()\n"
-        "    try:\n"
-        "        os.rename(repo, repo.parent / 'moved')\n"
-        "    except PermissionError:\n"
-        "        return\n"
-        "    raise AssertionError('moved the checkout')\n"
+        "    os.rename(repo, repo.parent / 'moved')\n"
+        "    os.symlink(repo.parent / 'moved', repo)\n"
     )
     result = verify(project, {"tests/test_layout.py": code}, "tests/test_layout.py")
     log = result.log_path.read_text()
     assert result.outcomes == {"tests/test_layout.py::test_layout": "passed"}, log
-    assert result.mutated == (), log
+    assert result.mutated == ("checkout replaced",) and not result.observation.passed, log
     clone_id = result.log_path.parent.name.split(".")[0]
     assert not (ACCOUNT.run_root / f"{clone_id}.work").exists(), "work directory left behind"
 
