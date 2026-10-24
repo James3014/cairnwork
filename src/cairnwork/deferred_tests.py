@@ -210,10 +210,13 @@ class Comparison:
     code: str = ""
     detail: str = ""
 
-    def worker_reason(self, *, isolated: bool) -> str:
+    def worker_reason(self, *, isolated: bool, why: str = "") -> str:
         """Base runs come after WORKER_STARTED, and a worker with the owner's uid could have broken
-        the base on purpose: only an isolated worker's attempt may say UNCOMPARABLE."""
-        return ("UNCOMPARABLE: " if isolated is True else "") + f"{self.code}: {self.detail}"
+        the base on purpose: only an isolated worker's attempt may say UNCOMPARABLE. ``why`` the
+        worker is not isolated (AgyWorker.not_isolated_because) is kept in the reason (#234)."""
+        if isolated is True:
+            return f"UNCOMPARABLE: {self.code}: {self.detail}"
+        return f"{self.code}: {self.detail}" + (f" (worker not isolated: {why})" if why else "")
 
 
 class BaseUncomparable(Exception):

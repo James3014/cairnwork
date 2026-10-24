@@ -90,7 +90,10 @@ class Intake:
 
     def config(self) -> dict[str, Any]:
         path = self.state / "config.json"
-        loaded = json.loads(path.read_text()) if path.exists() else {}
+        try:
+            loaded = json.loads(path.read_text()) if path.exists() else {}
+        except ValueError as exc:  # truncated or not UTF-8: refused, never a traceback (#234)
+            raise IntakeRefused("BAD_CONFIG", f"{path} is not valid JSON: {exc}") from exc
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
         for key in (
@@ -151,6 +154,19 @@ class Intake:
             tmp.chmod(0o600)
             tmp.replace(path)
 
+    def clone_problem(self, clone: Path) -> str:
+        """#234: a clone the Issue runner works in must be the state's mirror, the same directory
+        (a symlink or case alias is the same clone; another clone of the same origin is not, and
+        its refs and config can differ). "" when it is, or when the state names no mirror."""
+        mirror = self.config()["mirror"]
+        if not mirror:
+            return ""
+        try:  # the same file (st_dev, st_ino): symlink and case aliases are the mirror
+            same = os.path.samefile(mirror, clone)
+        except OSError:
+            same = False
+        return "" if same else f"CLONE_NOT_STATE_MIRROR: {clone} is not the state's mirror {mirror}"
+
     def test_store(self) -> DeferredStore:
         return DeferredStore.for_state(self.state, self.config().get("test_source"))
 
@@ -172,13 +188,17 @@ class Intake:
     def prepare(self) -> None:
         """Create the state directory owner-only, or refuse one anyone else can use."""
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.check_state()
+        for name in ("requests", "runs", "deferred-tests"):
+            (self.state / name).mkdir(mode=0o700, exist_ok=True)
+
+    def check_state(self) -> None:
+        """BAD_STATE unless the state is a directory we own with mode 0700 (no side effects)."""
         info = self.state.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
             raise IntakeRefused("BAD_STATE", f"{self.state} is not a directory owned by us")
         if info.st_mode & 0o077:
             raise IntakeRefused("BAD_STATE", f"{self.state} must be mode 0700")
-        for name in ("requests", "runs", "deferred-tests"):
-            (self.state / name).mkdir(mode=0o700, exist_ok=True)
 
     @contextmanager
     def _intake_lock(self) -> Iterator[None]:

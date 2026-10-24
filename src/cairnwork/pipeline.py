@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from cairnwork import runlock
+from cairnwork.account_check import base_stage, precheck
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.deferred_tests import (
     BaseUncomparable,
@@ -274,6 +275,11 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
     except TestCommitRejected as exc:
         result.reason = str(exc)
         return
+    try:  # before the worker: no worker quota spent, no test exposed (#234)
+        precheck(*verifying)
+    except BaseUncomparable as exc:  # nothing has run, so nothing a worker could have broken
+        result.reason = exc.comparison.worker_reason(isolated=True)
+        return
     attempt = create_attempt_clone(task.repo, task.base_commit, run_root, result.attempt_id)
     steps.reach("WORKER_STARTED")
     try:
@@ -294,17 +300,19 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
             mode = "bundle" if task.test_store and task.test_store.required else "auto"
             steps.reach("TEST_SOURCE", mode)  # the mode of this run, read by cairnwork_attest
             try:
-                test_files = tests_with_teeth(task, specs, run_root, result, verifying)
-                judged = lay_tests_over(
-                    task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
-                )
-                plan = p2p_for(task, specs, test_files, run_root, result, verifying)
+                with base_stage(*verifying):  # an account failure here: no evidence (#234)
+                    test_files = tests_with_teeth(task, specs, run_root, result, verifying)
+                    judged = lay_tests_over(
+                        task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
+                    )
+                    plan = p2p_for(task, specs, test_files, run_root, result, verifying)
             except TestCommitRejected as exc:
                 result.reason = str(exc)
                 return
             except BaseUncomparable as exc:  # FAILED either way; only the reason says which
                 isolated = getattr(worker, "isolated", False)  # another uid (agy_run_as_user)
-                result.reason = exc.comparison.worker_reason(isolated=isolated)
+                why = getattr(worker, "not_isolated_because", "")
+                result.reason = exc.comparison.worker_reason(isolated=isolated, why=why)
                 return
         result.candidate_commit = judged
         steps.reach("CANDIDATE", judged)

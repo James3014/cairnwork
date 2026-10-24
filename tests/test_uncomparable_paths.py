@@ -3,20 +3,25 @@ and the worker path a FAILED attempt whose reason says UNCOMPARABLE only for an 
 either way Core is never asked and there is no receipt. The stubbed rows replace only the base and
 probe runs; the sandbox tests run everything for real."""
 
+import json
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_deferred_tests import CHECK, REGRESSION, make_test_commit
 from test_pipeline import EditWorker
 from verify_helpers import FIX, candidate, verify
 
-from cairnwork import p2p, pipeline_judge, verifiers
+from cairnwork import p2p, pipeline_judge, verifiers, verify_cli
 from cairnwork.core_request import VerifierObservation
 from cairnwork.intake import Intake
 from cairnwork.journal import Journal
 from cairnwork.notary import Notary
 from cairnwork.ownership import OwnershipLedger
 from cairnwork.pipeline import TaskSpec, run_task
+from cairnwork.verifier_account import VerifierAccountError
 from cairnwork.verify_candidate import verify_candidate
 from cairnwork_attest.record import RecordNotFound, read_record
 
@@ -204,10 +209,179 @@ def test_a_base_run_that_leaves_no_guard_record_is_uncomparable(project, state):
     assert out["uncomparable"]["code"] == "BASE_NO_REPORT"
 
 
-def test_the_agy_worker_is_isolated_only_with_agy_run_as_user():
-    from cairnwork.workers.agy import AgyWorker
-    from cairnwork.workers.agy_dispatch import Dispatch
+# PR-C (#234): the account precheck before anything is spent, tests_consumed, and account failures
+# in the base stage (no candidate code has run as the account yet).
 
-    assert AgyWorker().isolated is False
-    assert AgyWorker(dispatch=Dispatch("/bin/d", 1, 1, 1)).isolated is False
-    assert AgyWorker(dispatch=Dispatch("/bin/d", 1, 1, 1, run_as_user="cw")).isolated is True
+
+class UnusableAccount:
+    """Stands in for VerifierAccount: available() says no, as for a venv under a 0750 home."""
+
+    user = "cairnwork-verifier"
+    python = sys.executable
+
+    def __init__(self):
+        self.probed = 0
+
+    @contextmanager
+    def exclusive(self, timeout=None):
+        yield
+
+    def available(self, python=None):
+        self.probed += 1
+        return False
+
+
+def _account_error(*a, **k):
+    raise VerifierAccountError("account cairnwork-verifier is not usable")
+
+
+def test_verify_prechecks_the_account_before_burning_the_test_commit(
+    project, state, stub, monkeypatch
+):
+    calls = stub({"rc": 5})
+    account: Any = UnusableAccount()
+    monkeypatch.setattr(Intake, "verifier_account", lambda self: account)
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    cand = candidate(project, base, {"src/calc.py": FIX})
+    run = lambda: verify_candidate(  # noqa: E731
+        Intake(state), repo=project, base=base, candidate=cand, allowed_files=("src/calc.py",),
+        verifiers=CHECK, test_commit=test_commit,
+    )  # fmt: skip
+    out = run()
+    assert account.probed == 1 and out["tests_consumed"] is False
+    assert_uncomparable(out, state, calls, "VERIFIER_ACCOUNT_UNUSABLE")
+    assert "cannot run" in out["uncomparable"]["detail"]
+    monkeypatch.setattr(Intake, "verifier_account", lambda self: None)  # fixed: the same tests
+    again = run()  # not TEST_COMMIT_ALREADY_EXPOSED: the first run burned nothing
+    assert_uncomparable(again, state, calls, "BASE_NO_TESTS")
+    assert again["tests_consumed"] is True
+
+
+def test_uncomparable_after_the_burn_says_the_tests_are_consumed(project, state, stub):
+    calls = stub({"rc": 2, "collect_errors": ("tests/x.py",)})
+    out = verify_stubbed(project, state)
+    assert_uncomparable(out, state, calls, "BASE_COLLECTION_ERROR")
+    assert out["tests_consumed"] is True
+
+
+@pytest.mark.parametrize("stage", ["-b", "-p"], ids=["base-run", "p2p-probe"])
+def test_an_account_failure_in_the_base_stage_is_uncomparable_and_consumed(
+    project, state, stub, monkeypatch, stage
+):
+    calls = stub(TEETH, {"rc": 1, "outcomes": {"tests/test_calc.py::test_add": "passed"}})
+    staged = p2p.run_verifiers if stage == "-p" else pipeline_judge.run_verifiers
+    raising = lambda repo, commit, specs, root, run_id, **kw: (  # noqa: E731
+        _account_error()
+        if run_id.endswith(stage)
+        else staged(repo, commit, specs, root, run_id, **kw)
+    )
+    monkeypatch.setattr(p2p if stage == "-p" else pipeline_judge, "run_verifiers", raising)
+    out = verify_stubbed(project, state)
+    assert_uncomparable(out, state, calls, "VERIFIER_ACCOUNT_UNUSABLE")
+    assert out["tests_consumed"] is True and "not usable" in out["uncomparable"]["detail"]
+
+
+def test_the_worker_path_prechecks_the_account_before_the_worker_starts(project, tmp_path):
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    state = tmp_path / "wstate"
+    state.mkdir()
+    ran = []
+    worker = EditWorker({"src/calc.py": FIX})
+    worker.run = lambda workdir, task: ran.append(workdir)
+    account: Any = UnusableAccount()
+    task = TaskSpec("k1", "card", "fix add", "add() is off by one", project, base,
+                    ("src/calc.py",), CHECK, test_commit=test_commit)  # fmt: skip
+    result = run_task(
+        task, ledger=OwnershipLedger(state / "own.sqlite"), notary=Notary(state / "notary.sqlite"),
+        journal=Journal(state / "journal.sqlite"), worker=worker, run_root=state / "runs",
+        verifier_account=account,
+    )  # fmt: skip
+    assert result.status == "FAILED" and ran == [] and account.probed == 1
+    assert result.reason.startswith("UNCOMPARABLE: VERIFIER_ACCOUNT_UNUSABLE: "), result.reason
+    phases = [e.phase for e in Journal(state / "journal.sqlite").entries(result.task_id)]
+    assert "WORKER_STARTED" not in phases and phases[-1] == "FINISHED"
+
+
+@pytest.mark.parametrize("isolated", [True, False], ids=["isolated", "same-uid"])
+def test_an_account_failure_after_the_worker_is_uncomparable_only_when_isolated(
+    project, tmp_path, stub, monkeypatch, isolated
+):
+    calls = stub(TEETH)
+    monkeypatch.setattr(pipeline_judge, "run_verifiers", _account_error)  # the base run
+    worker = (IsolatedWorker if isolated else EditWorker)({"src/calc.py": FIX})
+    result = run_worker(project, tmp_path, worker)
+    assert result.status == "FAILED" and calls == []
+    prefix = "UNCOMPARABLE: " if isolated else ""
+    assert result.reason.startswith(f"{prefix}VERIFIER_ACCOUNT_UNUSABLE: "), result.reason
+
+
+def test_an_account_failure_in_the_candidate_run_is_never_uncomparable(project, tmp_path, stub):
+    stub(TEETH, {"rc": 1, "outcomes": {"tests/test_calc.py::test_add": "passed"}})
+    real = pipeline_judge.run_verifiers
+
+    def candidate_breaks(repo, commit, specs, root, run_id, **kw):
+        if run_id.endswith("-v"):  # the candidate's own run: its code ran as the account
+            _account_error()
+        return real(repo, commit, specs, root, run_id, **kw)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pipeline_judge, "run_verifiers", candidate_breaks)
+        result = run_worker(project, tmp_path, IsolatedWorker({"src/calc.py": FIX}))
+    assert result.status == "FAILED" and "UNCOMPARABLE" not in result.reason, result.reason
+    assert result.reason.startswith("INFRA_ERROR: VerifierAccountError")
+
+
+def test_a_not_isolated_worker_says_why_in_the_reason(project, tmp_path, stub):
+    stub({"rc": 5})
+
+    class NamedWorker(EditWorker):
+        isolated = False
+        not_isolated_because = "agy_run_as_user cw is uid 501: root or the owner"
+
+    result = run_worker(project, tmp_path, NamedWorker({"src/calc.py": FIX}))
+    assert result.reason.startswith("BASE_NO_TESTS: ")
+    assert result.reason.endswith(
+        "(worker not isolated: agy_run_as_user cw is uid 501: root or the owner)"
+    )
+
+
+def test_an_isolated_worker_wrapped_by_visible_tests_stays_failed(project, tmp_path, stub):
+    """The visible-tests probe runs candidate code before the base checks, so an account failure
+    after it may be the candidate's doing: never UNCOMPARABLE, however isolated the inner worker."""
+    from experimental.visible_tests import VisibleTestsWorker
+
+    calls = stub(TEETH)
+    inner = IsolatedWorker({"src/calc.py": FIX})
+    wrapped = VisibleTestsWorker(inner, retries=1, pass_fail_only=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pipeline_judge, "run_verifiers", _account_error)  # the base run
+        result = run_worker(project, tmp_path, wrapped)
+    assert result.status == "FAILED" and calls == []
+    assert result.reason.startswith("VERIFIER_ACCOUNT_UNUSABLE: "), result.reason
+    assert "probe runs candidate code before verification" in result.reason
+
+
+def test_verify_a_candidate_run_account_failure_is_internal(
+    project, state, stub, monkeypatch, capsys
+):
+    """The candidate's code ran as the account: never UNCOMPARABLE. cairnwork-verify says INTERNAL
+    and, as everywhere, whether the test commit is used up."""
+    stub(TEETH, {"rc": 1, "outcomes": {"tests/test_calc.py::test_add": "passed"}})
+    staged = pipeline_judge.run_verifiers
+
+    def candidate_breaks(repo, commit, specs, root, run_id, **kw):
+        if run_id.endswith("-v"):
+            _account_error()
+        return staged(repo, commit, specs, root, run_id, **kw)
+
+    monkeypatch.setattr(pipeline_judge, "run_verifiers", candidate_breaks)
+    base, test_commit = make_test_commit(project, {"tests/test_regression.py": REGRESSION})
+    cand = candidate(project, base, {"src/calc.py": FIX})
+    code = verify_cli.main([
+        "--state", str(state), "run", "--repo-path", str(project), "--base", base,
+        "--candidate", cand, "--allowed-file", "src/calc.py",
+        "--verifier", " ".join(CHECK[0][1]), "--test-commit", test_commit,
+    ])  # fmt: skip
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["error"] == "INTERNAL" and "VerifierAccountError" in out["detail"]
+    assert out["tests_consumed"] is True
