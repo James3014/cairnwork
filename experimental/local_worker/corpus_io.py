@@ -31,6 +31,7 @@ from experimental.local_worker.tools import INSTALLED_WRAPPER
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_WRAPPER = Path(__file__).with_name("local-worker-tool")
 CANARY_MAX_AGE = timedelta(days=7)
+# v1 includes wall_time_rule (PR #248); no manifest was recorded before it (see SCHEMA_VERSION).
 MANIFEST_SCHEMA = "cairnwork.local_worker.manifest/v1"
 UNFROZEN = ("canary", "created_at")  # may change between episodes of one manifest
 ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
@@ -108,6 +109,18 @@ def _wrapper_sha(path: Path) -> str | None:
     return sha256_bytes(path.read_bytes()) if path.is_file() else None
 
 
+def _finished_at(value: Any) -> datetime:
+    """The report's finish time: an ISO timestamp with a UTC offset, else refused (a naive one
+    cannot be compared with an aware now; Claude review of #239, NB10)."""
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None or when.utcoffset() is None:
+        raise InputRefused(f"canary report finished_at {value!r} is not a time with a UTC offset")
+    return when
+
+
 def verify_canary(
     report_path: Path,
     out_dir: Path,
@@ -150,7 +163,7 @@ def verify_canary(
             raise InputRefused(f"canary report {key}={report.get(key)!r}, expected {want!r}")
     if installed != _wrapper_sha(REPO_WRAPPER):
         raise InputRefused("installed wrapper differs from this repository's local-worker-tool")
-    finished = datetime.fromisoformat(str(report.get("finished_at")))
+    finished = _finished_at(report.get("finished_at"))
     age = (now or datetime.now(UTC)) - finished
     if not timedelta(minutes=-5) <= age <= CANARY_MAX_AGE:
         raise InputRefused(f"canary report is {age} old (limit {CANARY_MAX_AGE})")

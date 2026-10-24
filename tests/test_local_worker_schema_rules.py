@@ -57,6 +57,8 @@ CASES = [
     ("termination.interrupted", True, "interrupted"),
     ("spec_feedback.needs_spec", True, "needs_spec"),
     ("verification.patch_lines_removed", None, "null together"),
+    ("verification.binary_files_changed", None, "null together"),
+    ("verification.binary_files_changed", -1, "non-negative"),
     ("cut_900s.turns_completed", 1, "cut_900s"),
     ("cut_900s.tree_differs_at_limit", False, "cut_900s"),
     ("cut_900s.exit_reason", "TIMEOUT", "cut_900s.exit_reason"),
@@ -91,7 +93,9 @@ def test_exit_reason_and_termination_must_agree(line):
         validate_record(rec)
     rec = copy.deepcopy(line)
     rec["termination"]["cleanup"] = "ok"
-    rec["verification"].update(patch_lines_added=None, patch_lines_removed=None)
+    rec["verification"].update(
+        patch_lines_added=None, patch_lines_removed=None, binary_files_changed=None
+    )
     with pytest.raises(SchemaError, match="patch counts"):
         validate_record(rec)
 

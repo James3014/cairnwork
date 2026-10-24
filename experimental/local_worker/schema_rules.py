@@ -7,7 +7,7 @@ closed vocabularies, turn times in order, the termination block against the exit
 
 from __future__ import annotations
 
-from experimental.local_worker.episode import tree_at
+from experimental.local_worker.episode import tree_at_limit
 from experimental.local_worker.schema_base import SchemaError
 
 ACTION_TYPES = ("list_dir", "read_file", "write_file", "edit_file", "run_test", "finish")
@@ -67,16 +67,20 @@ def _termination(rec: dict) -> None:
     status = turns[-1]["tool_args"].get("status") if finished else None
     if rec["spec_feedback"]["needs_spec"] != (status == "NEEDS_SPEC"):
         raise SchemaError("spec_feedback.needs_spec must match finish(status=NEEDS_SPEC)")
-    if (added is None) != (rec["verification"]["patch_lines_removed"] is None):
-        raise SchemaError("patch_lines_added and patch_lines_removed are null together")
+    patch = [rec["verification"][k] for k in ("patch_lines_removed", "binary_files_changed")]
+    if any((v is None) != (added is None) for v in patch):
+        raise SchemaError("patch_lines_added, _removed and binary_files_changed are null together")
     if term["cleanup"] == "ok" and added is None:
         raise SchemaError("a cleanup that went ok has patch counts")
 
 
 def _cut_900s(rec: dict) -> None:
     cut, own = rec["cut_900s"], rec["own_wall_seconds"]
-    done = [t for t in rec["turns"] if t["t_end_seconds"] <= cut["limit_seconds"]]
-    if cut["turns_completed"] != len(done) or cut["tree_differs_at_limit"] != tree_at(done):
+    turns, limit = rec["turns"], cut["limit_seconds"]
+    done = sum(t["t_end_seconds"] <= limit for t in turns)
+    if cut["turns_completed"] != done or cut["tree_differs_at_limit"] != tree_at_limit(
+        turns, limit
+    ):
         raise SchemaError("cut_900s differs from the turns within its limit")
     if abs(own - cut["limit_seconds"]) > TOLERANCE and cut["within_limit"] != (
         own <= cut["limit_seconds"]

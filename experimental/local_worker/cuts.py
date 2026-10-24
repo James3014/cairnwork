@@ -15,7 +15,7 @@ import re
 from typing import TYPE_CHECKING
 
 from experimental.local_worker.gitstate import TreeState
-from experimental.local_worker.redact import public_path, public_paths
+from experimental.local_worker.redact import BasePaths, public_path, public_paths
 
 if TYPE_CHECKING:
     from experimental.local_worker.episode import TurnLog
@@ -26,11 +26,18 @@ CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
     " run_tests artifacts count. This deviates from EPISODE_CORPUS_SPEC_ZH §3/§8 (first edit of"
     " a source file) per Plan v2 point 4, so that resume from it is valid. first_source_edit"
     " carries the spec's cut: the first observed change to a path that is not a test, doc or"
-    " git-ignored file. cut_status UNOBSERVED (cut_occurred null): a turn whose tool ran was"
-    " never observed before any cut, so whether and where the tree changed is unknown."
+    " git-ignored file; a new or changed .gitignore is itself a source change even when it"
+    " ignores itself (so one planted to hide new source files sets the cut). cut_status"
+    " UNOBSERVED (cut_occurred null): a turn whose tool ran was never observed before any cut,"
+    " so whether and where the tree changed is unknown."
+    " Besides git's status, the observation lists the empty directories, FIFOs and sockets in"
+    " the checkout (git cannot see them), so creating one is a tree change for first_edit_cut;"
+    " they are never a source change. Not observed: anything outside the checkout (run_root/tmp,"
+    " the test process's HOME and TMPDIR), file modes git does not track, and the contents of"
+    " a FIFO."
 )
 CUT_STATES = ("CUT", "NO_CUT", "UNOBSERVED")
-READ_ACTIONS = ("read_file", "list_dir", "search")
+READ_ACTIONS = ("read_file", "list_dir")  # the read tools the loop offers (no search tool)
 EDIT_ACTIONS = ("write_file", "edit_file")
 DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
 CUT_FIELDS = (
@@ -127,6 +134,25 @@ def missing_usage(t: TurnLog) -> bool:
     return any(v is None for v in t.tokens)
 
 
+def is_ignore_file(path: str) -> bool:
+    """A .gitignore (any case: git opens it by name on a case-insensitive file system)."""
+    return path.rsplit("/", 1)[-1].lower() == ".gitignore"
+
+
+def _artifacts(tree: TreeState) -> set[str]:
+    """Paths of a tree that are never a source edit: git-ignored ones (status "!"), except an
+    ignore file, and what git cannot see (x: an empty directory, a FIFO or a socket).
+
+    Claude review of #239, NB3: a planted ``src/.gitignore`` containing ``*`` ignores itself
+    and every new file beside it, so ignored-means-artifact would hide new source files. Only
+    the base's ignore rules may make a path an artifact; the observation cannot evaluate those
+    rules alone, so a new or changed ignore file is instead always a source change: the cut then
+    falls at the turn that planted it (or earlier, at a source file it later hides), and no
+    rule a worker wrote can move first_source_edit later."""
+    ignored = {e[2:] for e in tree.entries if e.startswith("! ") and not is_ignore_file(e[2:])}
+    return ignored | {e[4:] for e in tree.entries if e.startswith("x ")}
+
+
 def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
     """(status, position, turn, changed paths): "CUT" at the first turn whose observed tree
     differs from base (in a source path, when ``source_only``); "UNOBSERVED" at the first turn
@@ -141,9 +167,8 @@ def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
             continue
         assert turn.tree is not None
         changed = [p for p in turn.tree.paths() if p not in base.paths()] or turn.tree.paths()
-        if source_only:  # git-ignored paths (status "!") are artifacts, never source
-            ignored = {e[2:] for e in turn.tree.entries if e.startswith("! ")}
-            changed = [p for p in changed if is_source_path(p) and p not in ignored]
+        if source_only:
+            changed = [p for p in changed if is_source_path(p) and p not in _artifacts(turn.tree)]
         if changed or not source_only:
             return "CUT", n, turn, changed
     return "NO_CUT", None, None, []
@@ -160,10 +185,11 @@ def _pre(before: list[TurnLog], turn: TurnLog) -> tuple[int, int | None, float, 
     return reads, tokens, round(turn.t_start, 3), sum(missing_usage(t) for t in before)
 
 
-def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
+def first_edit_cut(turns: list[TurnLog], base: TreeState, base_paths: BasePaths = None) -> dict:
     """The spec §3 object, cut where the tree first differs from base (any path: what resume
     needs), plus cut_cause, cut_ambiguous, changed_paths (at most MAX_CHANGED_PATHS, the full count
-    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path."""
+    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path:
+    readable only if they existed at base (``base_paths``), else a path digest."""
     status, n, turn, changed = _first_change(turns, base, source_only=False)
     if status != "CUT":
         return _no_cut(CUT_FIELDS, status)
@@ -174,24 +200,25 @@ def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
     return {
         "cut_occurred": True,
         "cut_turn_index": turn.index,
-        "target_file": public_path(target) if isinstance(target, str) else None,
+        "target_file": public_path(target, base_paths) if isinstance(target, str) else None,
         "is_test_file": is_test_path(target) if isinstance(target, str) else None,
         "pre_cut_read_actions": reads,
         "pre_cut_tokens_accum": tokens,
         "pre_cut_wall_seconds": wall,
         "cut_cause": cause,
         "cut_ambiguous": ambiguous,
-        "changed_paths": public_paths(changed),
+        "changed_paths": public_paths(changed, base_paths),
         "changed_paths_total": len(changed),
         "pre_cut_turns_missing_usage": missing,
         "cut_status": "CUT",
     }
 
 
-def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
+def first_source_edit(turns: list[TurnLog], base: TreeState, base_paths: BasePaths = None) -> dict:
     """The spec's original cut: the first turn whose observed changed paths include a source
-    file (is_source_path, and not git-ignored). It equals first_edit_cut unless a test, doc or
-    run_tests artifact changed the tree first; resume always uses first_edit_cut."""
+    file (is_source_path, and not git-ignored unless an ignore file: _artifacts). It equals
+    first_edit_cut unless a test, doc or run_tests artifact changed the tree first; resume always
+    uses first_edit_cut."""
     status, n, turn, changed = _first_change(turns, base, source_only=True)
     if status != "CUT":
         return _no_cut(SOURCE_FIELDS, status)
@@ -202,7 +229,8 @@ def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
     return dict(
         zip(
             SOURCE_FIELDS,
-            (True, turn.index, public_path(path), cause, reads, tokens, wall, missing, "CUT"),
+            (True, turn.index, public_path(path, base_paths), cause, reads, tokens, wall, missing)
+            + ("CUT",),
             strict=True,
         )
     )

@@ -77,10 +77,18 @@ def test_resume_refuses_a_resume_parent(harness):
 
 
 def test_cut_900s_budget_shrinks_by_the_parent_prefix():
-    turns = [{"t_end_seconds": 50.0, "tree_differs_from_base": True}]
+    turns = [
+        {
+            "t_start_seconds": 10.0,
+            "t_end_seconds": 50.0,
+            "tool_ran": True,
+            "tree_differs_from_base": True,
+        }
+    ]
     got = episode.cut_at(turns, "COMPLETED", 60.0, max(0.0, 900.0 - 870.0))
     assert got["limit_seconds"] == 30.0 and got["within_limit"] is False
     assert got["exit_reason"] == "TIMEOUT" and got["turns_completed"] == 0
+    assert got["tree_differs_at_limit"] is None  # the turn spans the 30 s limit
 
 
 # -- finding 5: no overrun of the deadline -----------------------------------------------------
@@ -270,7 +278,7 @@ def _record(tmp_path, replies, world=None):
 def test_a_long_path_is_kept_only_as_a_digest(tmp_path):
     long = "src/" + "d" * 600 + ".py"
     rec = _record(tmp_path, [reply("write_file", path=long, content="x")])
-    want = {"sha256": hashlib.sha256(long.encode()).hexdigest(), "bytes": len(long)}
+    want = {"sha256": hashlib.sha256(long.encode()).hexdigest(), "bytes": len(long), "ext": ".py"}
     cut, source = rec["first_edit_cut"], rec["first_source_edit"]
     assert rec["turns"][0]["tool_args"]["path"] == want
     assert cut["target_file"] == want and cut["changed_paths"] == [want]
@@ -289,7 +297,8 @@ def test_changed_paths_are_capped_with_the_full_count(tmp_path):
     rec = _record(tmp_path, [reply("run_tests")], world)
     cut = rec["first_edit_cut"]
     assert cut["changed_paths_total"] == 70
-    assert cut["changed_paths"] == [f"build/out{n:03}.txt" for n in range(redact.MAX_CHANGED_PATHS)]
+    want = [f"build/out{n:03}.txt" for n in range(redact.MAX_CHANGED_PATHS)]
+    assert cut["changed_paths"] == [redact.path_digest(p) for p in want]  # new paths: digests
     for bad in (
         {**cut, "changed_paths_total": 63},  # 64 entries cannot be the full list of 63
         {**cut, "changed_paths": cut["changed_paths"][:10]},

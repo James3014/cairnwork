@@ -20,6 +20,7 @@ from experimental.local_worker.redact import (
     PUBLIC_ARGS,
     TEXT_ARGS,
     is_digest,
+    is_path_digest,
     is_public_path,
 )
 from experimental.local_worker.schema_base import (
@@ -70,6 +71,7 @@ TOP_EXTRA: dict[str, tuple[Any, bool]] = {  # Plan v2 point 10 and the bindings
     "own_wall_seconds": (FLOAT, False),
     "first_source_edit": (DICT, False),
     "turns_missing_usage": (INT, False),
+    "base_paths_observed": (BOOL, False),  # False: no path of the line may be readable (NB4)
     "parent_pre_cut_read_actions": (INT, True),
     "parent_pre_cut_tokens_accum": (INT, True),
     "parent_pre_cut_wall_seconds": (FLOAT, True),
@@ -79,6 +81,7 @@ VERIFICATION: dict[str, tuple[Any, bool]] = {
     "exit_reason": (STR, False),
     "patch_lines_added": (INT, True),
     "patch_lines_removed": (INT, True),
+    "binary_files_changed": (INT, True),  # files git's numstat takes for binary (still counted)
     **{k: ((STR if k == "verdict_category" else BOOL), True) for k in VERIFICATION_POST_STEP},
 }
 SPEC_FEEDBACK: dict[str, tuple[Any, bool]] = {
@@ -129,8 +132,9 @@ TURN: dict[str, tuple[Any, bool]] = {
 USAGE_STATES = ("ok", "no_cache_field", "malformed", "missing")
 
 
-def _check_tool_args(turn: dict, where: str) -> None:
-    """Only the action's PUBLIC_ARGS keys; text as a digest; a readable path only after exit 0."""
+def _check_tool_args(turn: dict, where: str, plain_paths: bool) -> None:
+    """Only the action's PUBLIC_ARGS keys; text as a digest; a path as a path digest, or readable
+    only after exit 0 and only when the base's paths were observed (``plain_paths``)."""
     args, allowed = turn["tool_args"], PUBLIC_ARGS.get(turn["action_type"], ())
     for key, value in args.items():
         if key not in allowed:
@@ -139,8 +143,8 @@ def _check_tool_args(turn: dict, where: str) -> None:
             if not is_digest(value):
                 raise SchemaError(f"{where}.{key} must be {{sha256, bytes}}")
         elif key == "path":
-            plain_ok = turn["exit_code"] == 0 and is_public_path(value)
-            if not (is_digest(value) or plain_ok):
+            plain_ok = plain_paths and turn["exit_code"] == 0
+            if not (is_path_digest(value) or (plain_ok and is_public_path(value))):
                 raise SchemaError(f"{where}.path is readable only after a successful call")
         elif key == "status":
             if value not in ("DONE", "NEEDS_SPEC"):
@@ -149,10 +153,10 @@ def _check_tool_args(turn: dict, where: str) -> None:
             raise SchemaError(f"{where}.{key} must be a non-negative integer")
 
 
-def _check_turns(turns: list) -> None:
+def _check_turns(turns: list, plain_paths: bool) -> None:
     for n, turn in enumerate(turns):
         check(turn, TURN, f"turns[{n}]")
-        _check_tool_args(turn, f"turns[{n}].tool_args")
+        _check_tool_args(turn, f"turns[{n}].tool_args", plain_paths)
         if turn["usage_status"] not in USAGE_STATES:
             raise SchemaError(f"turns[{n}].usage_status {turn['usage_status']!r}")
         if turn["turn_index"] != turns[0]["turn_index"] + n:
@@ -200,7 +204,7 @@ def validate_record(rec: Any) -> None:
     check(rec["termination"], TERMINATION, "termination")
     check(rec["cut_900s"], CUT_900S, "cut_900s")
     check(rec["tokens_total"], TOKENS_TOTAL, "tokens_total")
-    _check_turns(rec["turns"])
+    _check_turns(rec["turns"], rec["base_paths_observed"])
     _check_counts(rec)
     check_cuts(rec)
     check_rules(rec)

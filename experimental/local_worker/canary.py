@@ -9,16 +9,15 @@ Four checks, each through the real tool layer (tools.WorkerTools), never by the 
       outside the sandbox: the Owner's process (uid layer in worker mode) and a worker-uid
       process in another sandbox (Seatbelt alone), plus a same-sandbox child as control.
 Each is probed twice: as wrapper arguments (path checks must refuse) and as code the worker runs
-through run_tests (Seatbelt and, in worker mode, the uid must deny). Positive controls make sure the
-tools still work. The JSON report and its sha256 go into the addendum's §10 freeze table; only a
-``worker`` mode report with overall PASS counts there (``direct`` mode exercises Seatbelt only).
-A signal to an unsandboxed process of the worker uid cannot be set up without a second sudoers
-rule: that case (Owner process, same uid) runs in the ``direct`` report, so the §10 table also
-cites a ``direct`` report whose ``wrapper_sha256`` equals the installed wrapper's. Likewise the
-worker account may have no launchd domain, so a failed launchctl in worker mode cannot tell that
-from a Seatbelt denial: the direct report shows the cause, the worker report that no job ran.
-
-    python -m experimental.local_worker.canary --mode worker --out <dir>
+through run_tests (Seatbelt and, in worker mode, the uid must deny); the writes include the git
+queries' scratch directory <run_root>/q. Positive controls make sure the tools still work. The
+report and its sha256 go into the addendum's §10 freeze table; only a ``worker`` mode report with
+overall PASS counts there (``direct`` mode exercises Seatbelt only). A signal to an unsandboxed
+process of the worker uid needs a second sudoers rule: that case (Owner process, same uid) runs in
+the ``direct`` report, so §10 also cites a ``direct`` report whose ``wrapper_sha256`` equals the
+installed wrapper's. The worker account may have no launchd domain, so a failed launchctl in
+worker mode cannot tell that from a Seatbelt denial: the direct report shows the cause, the worker
+report that no job ran. Run: python -m experimental.local_worker.canary --mode worker --out <dir>
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ from experimental.local_worker.tools import (
     REFUSED_EXIT,
     WORKER_USER,
     WorkerTools,
+    subprocess_invoker,
 )
 
 SCHEMA = "cairnwork.local_worker.canary/v1"
@@ -89,17 +89,19 @@ def _make_venv(venv: Path, python: str) -> None:
 def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: list[str]) -> Fixture:
     secret = SECRET_PREFIX + secrets.token_hex(8)
     # Same layout and modes as a real run: run root 0750 (the worker cannot plant entries in it),
-    # checkout and tmp 0770. Group-writable .git and a group-readable sibling secret make Seatbelt,
-    # not file modes, the layer under test for those targets.
+    # checkout, tmp and q 0770. Group-writable .git and q and a group-readable sibling secret make
+    # Seatbelt, not file modes, the layer under test for those targets.
     run_root = _mkdir(runs / secrets.token_hex(16), 0o750)
     checkout = _mkdir(run_root / "checkout", 0o770)
     _mkdir(run_root / "tmp", 0o770)
+    _mkdir(run_root / "q", 0o770)
     (checkout / "a.txt").write_text("canary-public\n")
     os.chmod(checkout / "a.txt", 0o660)
     _mkdir(_mkdir(checkout / ".git", 0o770) / "hooks", 0o770)
     sibling = _mkdir(runs / secrets.token_hex(16), 0o750)
     _mkdir(sibling / "checkout", 0o770)
     _mkdir(sibling / "tmp", 0o770)
+    _mkdir(sibling / "q", 0o770)
     (sibling / "checkout" / escapes.VICTIM_TEST).write_text(escapes.VICTIM_SOURCE)
     os.chmod(sibling / "checkout" / escapes.VICTIM_TEST, 0o660)
     (sibling / "checkout" / "secret.txt").write_text(secret + "\n")
@@ -131,6 +133,7 @@ def build_fixture(runs: Path, private_parent: Path, python: str, extra_reads: li
         "checkout_git_hook": str(checkout / ".git" / "hooks" / "pre-commit"),
         "checkout_git_hook_upper": str(checkout / ".GIT" / "hooks" / "pre-push"),
         "checkout_git_config_via_link": str(links / "link_git" / "config"),
+        "git_query_dir": str(run_root / "q" / f"planted-{tag}.txt"),  # the queries' scratch
     }
     escape_markers = {
         name: f"/private/tmp/cw-canary-esc-{name}-{tag}" for name in probe.LAUNCHCTL_TARGETS
@@ -334,12 +337,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--python", help="base interpreter for the run venv (inside --pyroot)")
     ap.add_argument("--wrapper", type=Path, default=None)
     ap.add_argument("--private-parent", type=Path, default=DEFAULT_PRIVATE_PARENT)
-    ap.add_argument(
-        "--forbid-read",
-        action="append",
-        default=[],
-        help="extra path the worker must not read (real bundle store, state dirs)",
-    )
+    forbid = "extra path the worker must not read (real bundle store, state dirs)"
+    ap.add_argument("--forbid-read", action="append", default=[], help=forbid)
     a = ap.parse_args(argv)
     runs = a.runs.resolve()
     wrapper = a.wrapper or (
@@ -356,8 +355,6 @@ def main(argv: list[str] | None = None) -> int:
             CAIRNWORK_LOCAL_WORKER_RUNS=str(runs),
             CAIRNWORK_LOCAL_WORKER_PYROOT=str(a.pyroot.resolve()),
         )
-    from experimental.local_worker.tools import subprocess_invoker
-
     log = fx.run_root.parent / f"{fx.run_root.name}.calls.jsonl"
     tools = WorkerTools(
         fx.run_root,

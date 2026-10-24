@@ -22,6 +22,9 @@ from experimental.local_worker.tools import WorkerTools
 BASE_SHA = "a" * 40
 WRAPPER = Path(tools.__file__).with_name("local-worker-tool")
 TAG = "0123456789abcdef0123456789abcdef"
+# A test commit may start git's auto maintenance in the background; its lock files race the
+# queries and .git snapshots (PR #246). Every git call that commits in a test passes these.
+NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
 TASK = Task("TASK_01", "repo_x", "SECRET-PROMPT-7f3 fix the bug", ("tests/test_app.py",))
 META: dict[str, Any] = {
     "episode_id": "ep_test",
@@ -94,6 +97,9 @@ class World:
             return self.status_rc, self.status()
         if action == "numstat":
             return 0, self.numstat()
+        if action == "tracked":  # the base's files and their directories
+            dirs = {p.rsplit("/", i)[0] for p in self.base for i in range(1, p.count("/") + 1)}
+            return 0, "".join(f"{p}\0" for p in sorted(set(self.base) | dirs)).encode()
         return 64, b"refusing\n"
 
     def changed(self) -> list[str]:
@@ -112,15 +118,15 @@ class World:
         return ("\0".join(recs) + "\0").encode()
 
     def numstat(self) -> bytes:
-        out = []
+        add = rem = binary = 0
         for p in self.changed():  # like the wrapper: staged with --force, ignored files count
             old = self.base.get(p, "").splitlines()
             new = self.files.get(p, "").splitlines()
             diff = list(difflib.ndiff(old, new))
-            add = sum(d.startswith("+ ") for d in diff)
-            rem = sum(d.startswith("- ") for d in diff)
-            out.append(f"{add}\t{rem}\t{p}")
-        return ("\0".join(out) + ("\0" if out else "")).encode()
+            add += sum(d.startswith("+ ") for d in diff)
+            rem += sum(d.startswith("- ") for d in diff)
+            binary += "\0" in self.files.get(p, "") + self.base.get(p, "")
+        return f"PATCH {add} {rem} {binary}\n".encode()
 
 
 def reply(
@@ -245,10 +251,11 @@ def canary_checks(user: str = "_cairnwork_worker") -> dict:
 
 
 def make_runs(tmp_path: Any) -> Path:
-    """A runs directory with one run root (TAG: checkout, tmp, an empty .git) and a sibling."""
+    """A runs directory with one run root (TAG: checkout, tmp, q, an empty .git) and a sibling."""
     runs = (tmp_path / "runs").resolve()
     (runs / TAG / "checkout" / "sub").mkdir(parents=True)
     (runs / TAG / "tmp").mkdir()
+    (runs / TAG / "q").mkdir()
     (runs / TAG / "checkout" / ".git").mkdir()
     (runs / TAG / "checkout" / "a.txt").write_text("hello\n")
     (runs / ("f" * 32)).mkdir()

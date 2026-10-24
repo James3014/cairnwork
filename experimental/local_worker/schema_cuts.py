@@ -86,19 +86,20 @@ def _one(cut: dict, fields: tuple[str, ...], spec: tuple, turns: list, where: st
         raise SchemaError(f"{where}: pre-cut values differ from the turns before the cut")
 
 
-def _paths(edit: dict, source: dict) -> None:
-    """Review finding 9: every path is short or a digest; changed_paths keeps at most
+def _paths(edit: dict, source: dict, plain_ok: bool) -> None:
+    """Review finding 9 and NB4: every path is a path digest or, only when the base's paths were
+    observed (``plain_ok``), a short readable path; changed_paths keeps at most
     MAX_CHANGED_PATHS entries and changed_paths_total counts them all."""
     for value in (edit["target_file"], source["path"]):
-        if value is not None and not is_public_path(value):
-            raise SchemaError("a cut path must be a short path or {sha256, bytes}")
+        if value is not None and not is_public_path(value, plain_ok):
+            raise SchemaError("a cut path must be a readable base path or {sha256, bytes, ext}")
     paths, total = edit["changed_paths"], edit["changed_paths_total"]
     if paths is None:
         return
     if total is None or len(paths) != min(total, MAX_CHANGED_PATHS):
         raise SchemaError("changed_paths must hold min(changed_paths_total, MAX_CHANGED_PATHS)")
-    if not all(is_public_path(v) for v in paths):
-        raise SchemaError("changed_paths entries must be short paths or {sha256, bytes}")
+    if not all(is_public_path(v, plain_ok) for v in paths):
+        raise SchemaError("changed_paths entries must be base paths or {sha256, bytes, ext}")
 
 
 def _expected_edit(turns: list) -> tuple[str, int | None]:
@@ -139,7 +140,7 @@ def check_cuts(rec: dict) -> None:
     _one(edit, CUT_FIELDS, ("cut_turn_index", CUT_PRE, EDIT_REQUIRED), turns, "first_edit_cut")
     spec = ("turn_index", SOURCE_PRE, SOURCE_REQUIRED)
     _one(source, SOURCE_FIELDS, spec, turns, "first_source_edit")
-    _paths(edit, source)
+    _paths(edit, source, rec["base_paths_observed"])
     if (edit["cut_status"], edit["cut_turn_index"]) != _expected_edit(turns):
         raise SchemaError("first_edit_cut is not the first observed (or unobserved) tree change")
     _source_against_turns(turns, edit, source)

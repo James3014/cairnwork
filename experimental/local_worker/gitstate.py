@@ -1,9 +1,12 @@
 """Parsing the worker's two fixed git queries for the local worker loop (#88, Plan v2 point 4).
 
 ``status`` is ``git status --porcelain=v2 --branch -z -uall --renames --ignored=matching`` (ignored
-files are listed too, so a write to an ignored path still changes the observed tree); ``numstat``
-is ``git diff --numstat -z`` against HEAD with untracked files included. Output that does not parse
-is never guessed into a tree: it is reported as not observed.
+files are listed too, so a write to an ignored path still changes the observed tree), followed by
+what git cannot see: ``x d <path>`` for an empty directory and ``x o <path>`` for a FIFO or socket
+(Claude review of #239, NB10), so creating one changes the observed tree too; ``numstat``
+is one line, ``PATCH <added> <removed> <binary_files_changed>``, counted from the ``--text -U0``
+patch against HEAD with untracked and ignored files included. Output that does not parse is never
+guessed into a tree or a count: it is reported as not observed.
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ def _entry_paths(entry: str) -> list[str]:
         return [head.split(" ", 9)[-1], orig]
     if kind == "u":
         return [entry.split(" ", 10)[-1]]
+    if kind == "x":
+        return [entry[4:]]
     return []
 
 
@@ -54,21 +59,40 @@ def parse_status(raw: bytes) -> TreeState:
         elif f.startswith("2 ") and i + 1 < len(fields):
             entries.append(f + "\0" + fields[i + 1])
             i += 1
+        elif f[:6] in ("x d ./", "x o ./") or f in ("x d .", "x o ."):
+            entries.append(f[:4] + (f[6:] or "."))  # find's "./path" as the checkout path
         elif f and not f.startswith("# "):
             return TreeState(observed=False)  # not git porcelain: never guess a tree
         i += 1
     return TreeState(observed=True, head=head, entries=tuple(sorted(entries)))
 
 
-def parse_numstat(raw: bytes) -> tuple[int, int] | None:
-    """Sum ``git diff --numstat -z`` (binary files count 0); None if a record does not parse."""
-    added = removed = 0
-    for rec in raw.decode("utf-8", errors="surrogateescape").split("\0"):
-        if not rec:
-            continue
-        m = re.match(r"(\d+|-)\t(\d+|-)\t", rec)
-        if not m:
-            return None
-        added += int(m.group(1)) if m.group(1) != "-" else 0
-        removed += int(m.group(2)) if m.group(2) != "-" else 0
-    return added, removed
+_PATCH = re.compile(rb"PATCH (\d{1,18}) (\d{1,18}) (\d{1,18})\n")
+
+
+def parse_numstat(raw: bytes) -> tuple[int, int, int] | None:
+    """(lines added, lines removed, binary_files_changed) from the wrapper's numstat line.
+
+    Claude review of #239, NB2: ``git diff --numstat`` shows a file it takes for binary (one NUL
+    byte is enough) as ``-`` lines, and ``--text`` does not change that, so summing numstat let
+    one NUL byte hide a whole file's patch. The wrapper therefore counts added and removed lines
+    from the hunk headers of ``git diff --cached --text -U0`` (every file's lines, binary or not)
+    and also reports how many files numstat would have shown as binary, so a reader can see
+    which counts would have been hidden. Anything but exactly that one line is None."""
+    m = _PATCH.fullmatch(raw)
+    if m is None:
+        return None
+    added, removed, binary = (int(g) for g in m.groups())
+    return added, removed, binary
+
+
+def parse_tracked(raw: bytes) -> frozenset[str] | None:
+    """The base's paths from the worker's ``tracked`` query (``git ls-tree -r -t -z --name-only
+    HEAD``: every file and directory of HEAD), plus "." for the checkout root; None unless every
+    record is non-empty and NUL-terminated."""
+    if raw and not raw.endswith(b"\0"):
+        return None
+    names = raw.decode("utf-8", errors="surrogateescape").split("\0")[:-1] if raw else []
+    if not all(names):
+        return None
+    return frozenset([".", *names])

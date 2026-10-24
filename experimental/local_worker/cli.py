@@ -56,6 +56,7 @@ from experimental.local_worker.episode import (
     PARENT_FIELDS,
     SCHEMA_VERSION,
     TOKENS_ACCUM_FORMULA,
+    WALL_TIME_RULE,
     LoopOutcome,
     build_record,
     parent_prefix,
@@ -86,6 +87,7 @@ def build_manifest(a: argparse.Namespace, limits: Limits, endpoint: str) -> dict
         "tool_schemas_sha256": _sha(json.dumps(TOOL_SCHEMAS, sort_keys=True)),
         "null_rule": NULL_RULE,
         "tokens_accum_formula": TOKENS_ACCUM_FORMULA,
+        "wall_time_rule": WALL_TIME_RULE,
         "cut_definition": CUT_DEFINITION,
         "canary": a.canary_binding,
         "created_at": datetime.now(UTC).isoformat(),
@@ -129,6 +131,9 @@ def transcript(eid: str, task: Task, messages: list, out: LoopOutcome, loop: Age
         "messages": messages,
         "turns": turns,
         "abort_detail": loop.abort_detail,
+        # SIGTERM/SIGINTs only counted (NB8): after the first, or once the loop had stopped. The
+        # count is as of this write; the line itself never carries it (no schema field).
+        "late_signals": loop.late_signals,
     }
 
 
@@ -184,10 +189,6 @@ def _same_binding(parent: dict, task: Task, manifest_sha: str) -> None:
         raise corpus_io.InputRefused("the parent ran under another manifest (model or limits)")
 
 
-def _on_sigterm(signum: int, frame: Any) -> None:
-    raise KeyboardInterrupt  # recorded as interrupted; cleanup and the line still happen
-
-
 def run_episode(a: argparse.Namespace, resume: bool) -> int:
     p = _prepare(a)
     task: Task = p["task"]
@@ -215,10 +216,6 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
     tools = WorkerTools(p["run_root"], priv / "calls.jsonl", mode="worker")
     settings = Settings(a.model, p["limits"], a.seed, a.temperature)
     loop = AgentLoop(tools, p["endpoint"], task, settings)
-    signal.signal(signal.SIGTERM, _on_sigterm)
-    out = loop.run(
-        messages, first_turn=first_turn, elapsed_offset=offset, expected_base=expected_base
-    )
     meta = {
         "episode_id": eid,
         "task_id": task.task_id,
@@ -233,17 +230,29 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
         "plan_sha256": plan_sha,
         **prefix,
         "endpoint": p["endpoint"].url,
-        "server_model_id": next((t.server_model for t in out.turns if t.server_model), None),
         "manifest_sha256": p["manifest_sha"],
         "canary_report_sha256": a.canary_binding["report_sha256"],
     }
-    record = build_record(meta, out, p["limits"].cut_seconds)
-    private = transcript(eid, task, messages, out, loop)
-    private["record"] = record
-    corpus_io.write_private_json(priv, "transcript.json", private)
-    path = corpus_io.episodes_path(p["out_dir"], a.dataset, a.model, a.split)
-    line_sha = corpus_io.append_episode(path, record, p["out_dir"])
-    print(f"LOCAL_WORKER_EPISODE {out.exit_reason} {eid} {path} line_sha256={line_sha}")
+    # The first SIGTERM/SIGINT interrupts the loop (recorded as interrupted); later ones, and any
+    # during the cleanup and the line write, are only counted (review of #239, NB8).
+    previous = {s: signal.signal(s, loop.interrupt) for s in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        out = loop.run(
+            messages, first_turn=first_turn, elapsed_offset=offset, expected_base=expected_base
+        )
+        meta["server_model_id"] = next((t.server_model for t in out.turns if t.server_model), None)
+        record = build_record(meta, out, p["limits"].cut_seconds)
+        private = transcript(eid, task, messages, out, loop)
+        private["record"] = record
+        corpus_io.write_private_json(priv, "transcript.json", private)
+        path = corpus_io.episodes_path(p["out_dir"], a.dataset, a.model, a.split)
+        line_sha = corpus_io.append_episode(path, record, p["out_dir"])
+        print(f"LOCAL_WORKER_EPISODE {out.exit_reason} {eid} {path} line_sha256={line_sha}")
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if loop.deferred is not None:  # e.g. SystemExit during the run: raised once the line exists
+        raise loop.deferred
     return 0
 
 

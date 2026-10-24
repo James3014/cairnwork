@@ -20,9 +20,13 @@ and nothing runs past start + max_wall_seconds.
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
 
-Once the base is verified, ``run`` never raises: a reply that breaks the tool-call protocol
-(agent_protocol.ProtocolError, e.g. an argument the tool does not take) and any unexpected error
-end the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs.
+Once the loop starts, ``run`` never raises: a reply that breaks the tool-call structure
+(agent_protocol.ProtocolError) and any unexpected error end the episode as a recorded ERROR_ABORT,
+and the cleanup (sweep, numstat) always runs, in a ``finally``. The first SIGTERM/SIGINT (cli.py
+installs ``interrupt``) stops the loop as "interrupted"; later ones are only counted
+(``late_signals``, in the private transcript); a SystemExit is handed to the caller to re-raise
+after the line is written (review of #239, NB8). A call the model can repair
+(agent_protocol.BadCall: an unknown tool, a missing or extra argument) is an invalid_tool_call.
 """
 
 from __future__ import annotations
@@ -30,7 +34,6 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
@@ -48,13 +51,15 @@ from experimental.local_worker.endpoint import (
     Endpoint,
     EndpointError,
     EndpointTimeout,
+    first_message,
     parse_usage,
 )
 from experimental.local_worker.episode import LoopOutcome, TurnLog
-from experimental.local_worker.gitstate import TreeState, parse_numstat
+from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
+from experimental.local_worker.loop_config import Limits as Limits  # re-exported
+from experimental.local_worker.loop_config import Settings, Task
 from experimental.local_worker.tools import (
-    KILL_GRACE_SECONDS,
     ToolCall,
     ToolDeadline,
     WorkerIsolationError,
@@ -64,49 +69,20 @@ from experimental.local_worker.tools import (
 UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
 
 
-@dataclass(frozen=True)
-class Limits:
-    context_cap: int
-    max_steps: int = 40
-    max_wall_seconds: float = 1800.0
-    cut_seconds: float = 900.0
-    tool_cap_seconds: float = 300.0
-    cleanup_reserve_seconds: float = 60.0
-    max_completion_tokens: int = 4096
-
-    def __post_init__(self) -> None:
-        if self.step_seconds < 1.0:
-            raise ValueError(f"cleanup_reserve_seconds must be >= {3 * (KILL_GRACE_SECONDS + 1)}")
-
-    @property
-    def step_seconds(self) -> float:
-        """Timeout of each bookkeeping step (status, sweep, numstat): a third of the reserve,
-        less the kill grace a timed-out step may still use."""
-        return self.cleanup_reserve_seconds / 3 - KILL_GRACE_SECONDS
-
-
-@dataclass(frozen=True)
-class Task:
-    task_id: str
-    repo: str
-    prompt: str
-    public_tests: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class Settings:
-    model: str
-    limits: Limits
-    seed: int | None = None
-    temperature: float = 0.0
-
-
 class RefusedStart(RuntimeError):
-    """The checkout is not clean at the expected base: no episode is run."""
+    """The checkout is not its clean base (see the package docstring): no episode is run."""
 
 
 class _StatusUnavailable(RuntimeError):
     pass
+
+
+_ABORT_CAUSES = (  # checked in order; any other Exception is an internal_error
+    (EndpointError, "endpoint_error"),
+    (WorkerIsolationError, "worker_isolation"),
+    (_StatusUnavailable, "status_unavailable"),
+    (ProtocolError, "protocol_error"),
+)
 
 
 def initial_messages(task: Task) -> list[dict]:
@@ -130,6 +106,10 @@ class AgentLoop:
         self.clock, self.now = clock, now
         tools.clock = clock  # every wrapper call is held to deadlines on this clock
         self.abort_detail: str | None = None
+        self.interruptible = True  # NB8 (review of #239): see interrupt and _stopped
+        self.late_signals = 0
+        self.deferred: BaseException | None = None
+        self._open: TurnLog | None = None  # the turn in progress (in out.turns, no t_end yet)
         self._start = 0.0
         self._offset = 0.0
         self._final = float("inf")  # start + max_wall_seconds: nothing runs past it
@@ -151,9 +131,21 @@ class AgentLoop:
         self.tools.deadline = min(self._final, self.clock() + step)
 
     def observe(self) -> TreeState:
+        """The worker's git status now; not observed unless it exited 0 with its whole output
+        captured (a capped capture is never parsed as complete: Claude review of #239, NB5)."""
         self._step_deadline()
         call = self.tools.status()
-        return _parse_status(call.raw) if call.exit_code == 0 else TreeState(observed=False)
+        if call.exit_code != 0 or not call.capture_complete:
+            return TreeState(observed=False)
+        return _parse_status(call.raw)
+
+    def _base_paths(self) -> frozenset[str] | None:
+        """The base commit's paths (which path names the line may publish: redact.py); None
+        when the query failed or its output was capped, and then every path is a digest."""
+        self._step_deadline()
+        call = self.tools.tracked()
+        complete = call.exit_code == 0 and call.capture_complete
+        return parse_tracked(call.raw) if complete else None
 
     def run(
         self,
@@ -163,8 +155,10 @@ class AgentLoop:
         elapsed_offset: float = 0.0,
         expected_base: str | None = None,
     ) -> LoopOutcome:
-        """Run from ``messages`` (a fresh start or a resume prefix) until a stop; never raises
-        once the base is verified: every stop is recorded in the returned outcome."""
+        """Run from ``messages`` (a fresh start or a resume prefix) until a stop, recorded in the
+        outcome. A SIGTERM/SIGINT before the loop starts (base observe, tracked query) escapes as
+        KeyboardInterrupt and no line is written: no turn has run. Once a stop is recorded (or
+        _stopped is recording one), a signal is only counted and that stop stands."""
         lim = self.limits
         self._start = self.clock() - elapsed_offset
         self._offset = elapsed_offset
@@ -175,27 +169,53 @@ class AgentLoop:
             raise RefusedStart("checkout is not a clean git tree at its base")
         if expected_base is not None and base.head != expected_base:
             raise RefusedStart(f"checkout HEAD {base.head} is not the pinned base {expected_base}")
-        out = LoopOutcome(base=base, started_at=self.now().astimezone(UTC8).isoformat())
+        started = self.now().astimezone(UTC8).isoformat()
+        out = LoopOutcome(base=base, base_paths=self._base_paths(), started_at=started)
+        pending: BaseException | None = None  # what stopped the loop, until _stopped records it
         try:
-            self._loop(messages, out, first_turn, deadline)
-        except (EndpointTimeout, TimeoutError):
-            out.exit_reason, out.timed_out, out.limit_hit = "TIMEOUT", True, "max_wall_seconds"
-        except KeyboardInterrupt:
-            out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
-        except EndpointError as exc:
-            self._abort(out, "endpoint_error", exc)
-        except WorkerIsolationError as exc:
-            self._abort(out, "worker_isolation", exc)
-        except _StatusUnavailable as exc:
-            self._abort(out, "status_unavailable", exc)
-        except ProtocolError as exc:
-            self._abort(out, "protocol_error", exc)
-        except Exception as exc:  # noqa: BLE001 - recorded, never lost: the line is still written
-            self._abort(out, "internal_error", exc)
-        self._cleanup(out)
-        out.ended_at = self.now().astimezone(UTC8).isoformat()
-        out.wall_seconds = self._own()
+            try:
+                self._loop(messages, out, first_turn, deadline)  # clears interruptible on a stop
+            except BaseException as exc:  # noqa: BLE001 - every stop is recorded (_stopped)
+                pending = exc
+                self._stopped(out, exc)
+        except KeyboardInterrupt as exc:  # the one interrupt, landing as _stopped was entered
+            self.late_signals += pending is not None  # then it only interrupted the recording
+            self._stopped(out, pending or exc)
+        finally:  # interruptible is False here: nothing below can be interrupted
+            if self._open is not None:  # the turn an interrupt or error stopped ends now
+                self._open.t_end = self._own()
+            out.turns = [t for t in out.turns if t.assistant_msg_index >= 0]  # the model replied
+            self._cleanup(out)
+            out.ended_at = self.now().astimezone(UTC8).isoformat()
+            out.wall_seconds = self._own()
         return out
+
+    def interrupt(self, signum: int, frame: Any) -> None:
+        """SIGTERM/SIGINT handler (cli.py installs it): KeyboardInterrupt the first time while
+        the loop runs (recorded as interrupted), else only counted (late_signals)."""
+        if not self.interruptible:
+            self.late_signals += 1
+            return
+        self.interruptible = False
+        raise KeyboardInterrupt
+
+    def _stopped(self, out: LoopOutcome, exc: BaseException) -> None:
+        """Record why the loop stopped. A SystemExit (also one an interrupt replaced) is deferred to
+        the caller; any other non-Exception BaseException is recorded "interrupted", not raised."""
+        self.interruptible = False  # the loop has stopped: from here on a signal is counted
+        if isinstance(exc, (EndpointTimeout, TimeoutError)):
+            out.exit_reason, out.timed_out, out.limit_hit = "TIMEOUT", True, "max_wall_seconds"
+            return
+        if isinstance(exc, Exception):
+            cause = next((c for kind, c in _ABORT_CAUSES if isinstance(exc, kind)), None)
+            self._abort(out, cause or "internal_error", exc)
+            return
+        out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
+        # W2 (review of PR #248): an interrupt raised while a SystemExit unwound replaced it;
+        # only that SystemExit is deferred, never an Exception or a GeneratorExit context (W4)
+        held = exc.__context__ if isinstance(exc, KeyboardInterrupt) else exc
+        if isinstance(held, SystemExit):
+            self.deferred = self.deferred or held
 
     def _abort(self, out: LoopOutcome, cause: str, exc: Exception) -> None:
         out.exit_reason, out.abort_cause = "ERROR_ABORT", cause
@@ -205,17 +225,16 @@ class AgentLoop:
         while True:
             stop = self._limit(turn, messages, out.turns[-1] if out.turns else None, deadline)
             if stop:
+                self.interruptible = False  # a stop is recorded: a signal is only counted now
                 out.exit_reason, out.limit_hit = stop
                 out.timed_out = stop[0] == "TIMEOUT"
                 return
             log = TurnLog(index=turn, t_start=self._own())
-            try:
-                finished = self._step(log, messages, deadline)
-            finally:  # a turn counts once the model replied, also when its tool call then failed
-                log.t_end = self._own()
-                if log.assistant_msg_index >= 0:
-                    out.turns.append(log)
-            if finished is not None:
+            self._open = log  # recorded before it runs: an interrupt anywhere (also after its
+            out.turns.append(log)  # tool ran) leaves it in out.turns (Codex review of PR #248)
+            finished = self._step(log, messages, deadline)
+            log.t_end, self._open = self._own(), None
+            if finished is not None:  # _step already cleared interruptible
                 out.exit_reason, out.needs_spec = "COMPLETED", finished == "NEEDS_SPEC"
                 return
             turn += 1
@@ -257,8 +276,9 @@ class AgentLoop:
         resp = self.endpoint.chat(self._payload(messages), deadline)
         *tokens, log.usage_status = parse_usage(resp)
         log.tokens = (tokens[0], tokens[1], tokens[2])
-        log.usage_raw, log.server_model = resp.get("usage"), _str_or_none(resp.get("model"))
-        msg = _message(resp)
+        log.usage_raw, model = resp.get("usage"), resp.get("model")
+        log.server_model = model if isinstance(model, str) else None
+        msg = first_message(resp)
         calls = msg.get("tool_calls") or []
         assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
         messages.append(assistant)
@@ -277,17 +297,24 @@ class AgentLoop:
             log.action_type, log.error_category = "invalid_tool_call", "PROTOCOL_ERROR"
             raise
         except BadCall as exc:
-            log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
-            cid = calls[0].get("id") or f"call_{log.index}"
-            messages.append({"role": "tool", "tool_call_id": cid, "content": str(exc)})
-            return None
+            name, args, bad = "", {}, exc
+        else:
+            bad = None
+        # One id for the assistant's call and the tool reply, also for a BadCall (review of
+        # #239, NB7); decode_call already refused an id that is not a string.
         call = dict(calls[0], id=calls[0].get("id") or f"call_{log.index}")
         assistant["tool_calls"] = [call]
-        log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
-        log.tool_args = args
-        if name == "finish":
+        if bad is not None:
+            log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(bad)})
+            return None
+        if name == "finish":  # no interrupt once a turn is a finish: it can only be COMPLETED
+            self.interruptible = False  # (review of PR #248, W1); a signal is only counted now
+            log.action_type, log.tool_args = name, args
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": "finished"})
             return args["status"]
+        log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
+        log.tool_args = args
         text = self._execute(log, name, args, deadline)
         messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
         return None
@@ -307,26 +334,23 @@ class AgentLoop:
         return t.run_tests([*RUN_TESTS_ARGS, *targets])
 
     def _execute(self, log: TurnLog, name: str, args: dict, deadline: float) -> str:
-        # Every wrapper call of the tool (both of edit_file's, the sweep after a pytest run or a
-        # timeout, and their kill graces) ends by the loop deadline: tools.WorkerTools._timeout.
+        # Each wrapper call of the tool (and its sweep, kill graces) ends by the loop deadline.
         self.tools.timeout_seconds = self.limits.tool_cap_seconds
         self.tools.deadline = deadline
         self.tools.turn_index = log.index
         started = self.tools.calls_started
+        log.tool_ran = True  # pessimistic first (Codex review of PR #248): it may run from here
         try:
             call = self._dispatch(name, args)
         except ToolDeadline:
             log.error_category = "TIMEOUT"
             raise
-        finally:  # a started wrapper process may have changed the tree, also when it then failed
+        finally:  # False only if no wrapper process started; an interrupt before this keeps True
             log.tool_ran = self.tools.calls_started > started
         log.exit_code, log.error_category = call.exit_code, call.error_category
         log.stdout_bytes, log.stdout_truncated = call.stdout_bytes, call.stdout_truncated
-        log.duration_ms, log.exec_identity, log.isolation = (
-            call.duration_ms,
-            call.exec_identity,
-            call.isolation,
-        )
+        log.duration_ms, log.exec_identity = call.duration_ms, call.exec_identity
+        log.isolation = call.isolation
         log.action_type = call.action_type  # run_tests is recorded as the spec's "run_test"
         # The status query is one of the reserve's three steps (sweep and numstat the others),
         # so a turn ending at the deadline still observes its tree within max_wall_seconds.
@@ -336,6 +360,17 @@ class AgentLoop:
         return render(call)
 
     def _cleanup(self, out: LoopOutcome) -> None:
+        """Sweep, numstat and the last tree, as far as they get: whatever stops them (even
+        SystemExit) leaves cleanup "failed" and the line still gets written."""
+        try:
+            self._cleanup_steps(out)
+        except BaseException as exc:  # noqa: BLE001 - the caller re-raises it after the line
+            out.cleanup = "failed"
+            self.abort_detail = self.abort_detail or f"cleanup: {type(exc).__name__}: {exc}"
+            if not isinstance(exc, Exception):
+                self.deferred = self.deferred or exc
+
+    def _cleanup_steps(self, out: LoopOutcome) -> None:
         try:
             self._step_deadline()
             sweep = self.tools.sweep()
@@ -345,13 +380,15 @@ class AgentLoop:
             out.cleanup = "failed"
             self.abort_detail = self.abort_detail or f"cleanup: {exc}"
             return
-        out.patch = parse_numstat(stat.raw) if stat.exit_code == 0 else None
+        whole = stat.exit_code == 0 and stat.capture_complete  # a capped count is no count
+        out.patch = parse_numstat(stat.raw) if whole else None
         out.cleanup = "ok" if sweep.exit_code == 0 and out.patch is not None else "failed"
         self._observe_last(out)
 
     def _observe_last(self, out: LoopOutcome) -> None:
-        """The run stopped after a tool started but before its tree was observed: observe it now,
-        after the sweep (nothing else ran since), so its cut is known; else it stays unobserved."""
+        """The run stopped after a tool started, before its tree was observed: observe it now, after
+        the sweep (nothing else ran since); else it stays unobserved. The turn ends when this try
+        ends: its processes ran until the sweep, so a limit before that is null (Codex, PR #248)."""
         last = out.turns[-1] if out.turns else None
         if last is None or not last.tool_ran or (last.tree is not None and last.tree.observed):
             return
@@ -359,16 +396,5 @@ class AgentLoop:
             last.tree = self.observe()
         except (WorkerIsolationError, ToolDeadline):
             pass
-
-
-def _message(resp: dict) -> dict:
-    choices = resp.get("choices")
-    first = choices[0] if isinstance(choices, list) and choices else None
-    msg = first.get("message") if isinstance(first, dict) else None
-    if not isinstance(msg, dict):
-        raise EndpointError("response has no choices[0].message object")
-    return msg
-
-
-def _str_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
+        finally:
+            last.t_end = self._own()

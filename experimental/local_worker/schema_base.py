@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 STR, INT, FLOAT, BOOL, DICT, LIST = str, int, (int, float), bool, dict, list
-PATH = (str, dict)  # a path, or {sha256, bytes} when longer than redact.MAX_PATH_CHARS
+PATH = (str, dict)  # a base path, or {sha256, bytes, ext} (redact.public_path)
 SIGNED = ("exit_code", "seed")  # a signal exit is negative; a seed is any integer
 
 

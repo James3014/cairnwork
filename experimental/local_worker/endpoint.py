@@ -182,6 +182,16 @@ def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def first_message(resp: dict) -> dict:
+    """``choices[0].message`` of a chat response; EndpointError when it is not an object."""
+    choices = resp.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else None
+    msg = first.get("message") if isinstance(first, dict) else None
+    if not isinstance(msg, dict):
+        raise EndpointError("response has no choices[0].message object")
+    return msg
+
+
 def parse_usage(resp: dict) -> tuple[int | None, int | None, int | None, str]:
     """(prompt, completion, cached, usage_status) from a response; never invents a count.
 

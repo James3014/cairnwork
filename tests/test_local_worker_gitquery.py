@@ -33,6 +33,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
 
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
+    (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
     git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
@@ -52,14 +53,16 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     assert tree.paths() == ["a.txt", "new dir/b.py", "x.log"]
     stat = run(runs, "numstat", root)
     # staged with --force: the ignored x.log counts too (every file the run changed)
-    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0), stat.stdout
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0, 0), stat.stdout
     assert _git_snapshot(co) == before  # .git never written: same paths, modes and bytes
-    assert list((runs / TAG / "tmp").iterdir()) == []  # the throwaway index is removed
+    assert list((runs / TAG / "tmp").iterdir()) == []  # the queries never write tmp
+    assert list((runs / TAG / "q").iterdir()) == []  # and remove their throwaway index from q
 
 
 def _git_checkout(runs):
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
+    (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
     git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
@@ -79,7 +82,7 @@ def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
     assert run(runs, "write", root, "a.txt", stdin=b"hello\nworld\n").returncode == 0
     assert run(runs, "write", root, "new/b.py", stdin=b"x\ny\nz\n").returncode == 0
     base = parse_numstat(run(runs, "numstat", root).stdout)
-    assert base == (4, 0)
+    assert base == (4, 0, 0)
     home = runs / TAG / "tmp"  # the sandboxed HOME of every other action
     (home / ".config" / "git").mkdir(parents=True)
     (home / ".config" / "git" / "attributes").write_text("* -diff\n")
@@ -87,9 +90,9 @@ def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
     (home / ".gitconfig").write_text("[core]\n\tattributesFile = ~/.config/git/attributes\n")
     assert parse_numstat(run(runs, "numstat", root).stdout) == base
     assert run(runs, "write", root, ".gitattributes", stdin=b"* -diff\n").returncode == 0
-    assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0)  # +1: the file itself
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0, 0)  # +1: the file itself
     assert run(runs, "write", root, "sub/.gitignore", stdin=b"*\n").returncode == 0
-    assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0)  # nothing hidden
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0, 0)  # nothing hidden
 
 
 def test_git_query_temp_dir_is_made_by_mktemp():
@@ -116,7 +119,7 @@ def test_git_queries_fail_on_an_unreadable_directory(runs):
             assert b"hidden" in proc.stdout  # git's message instead of a result
     finally:
         hidden.chmod(0o700)
-    assert list((runs / TAG / "tmp").iterdir()) == []  # temp dir removed on failure too
+    assert list((runs / TAG / "q").iterdir()) == []  # temp dir removed on failure too
 
 
 def _git_snapshot(co):
@@ -141,9 +144,9 @@ def test_git_queries_run_no_configured_filter_and_leave_git_unchanged(runs):
     (co / "t.py").write_text("base1\n")  # tracked; the change keeps its size: status must hash it
     subprocess.run([*git, "add", "t.py"], check=True)
     subprocess.run([*git, "commit", "-qm", "t"], check=True)
-    tmp = runs / TAG / "tmp"  # worker-writable: a filter that ran could write its marker here
+    tmp = runs / TAG / "q"  # the one place a query may write: a filter that ran would mark here
     hook = "/usr/bin/touch {m}; /bin/cat"
-    included = tmp / "included.cfg"  # an include target the worker could have written
+    included = co / "included.cfg"  # an include target the worker could have written
     included.write_text(f'[filter "evil2"]\n\tclean = {hook.format(m=tmp / "m2")}\n')
     with (co / ".git" / "config").open("a") as fh:
         fh.write(f'[filter "evil"]\n\tclean = {hook.format(m=tmp / "m1")}\n')
@@ -162,11 +165,12 @@ def test_git_queries_run_no_configured_filter_and_leave_git_unchanged(runs):
     assert run(runs, "write", root, "t.py", stdin=b"base2\n").returncode == 0
     assert run(runs, "write", root, "x.tmp", stdin=b"t\n").returncode == 0
     tree = parse_status(run(runs, "status", root).stdout)
-    assert tree.observed and tree.paths() == [".gitattributes", "a.py", "b.txt", "t.py", "x.tmp"]
+    want = [".gitattributes", "a.py", "b.txt", "included.cfg", "t.py", "x.tmp"]
+    assert tree.observed and tree.paths() == want
     assert "! x.tmp" in tree.entries  # the real info/exclude still applies
     stat = run(runs, "numstat", root)
-    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (6, 1), stat.stdout
-    assert sorted(p.name for p in tmp.iterdir()) == ["included.cfg"]  # no marker, no temp dir
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (8, 1, 0), stat.stdout
+    assert list(tmp.iterdir()) == []  # no marker, no temp dir
     assert _git_snapshot(co) == before
 
 
