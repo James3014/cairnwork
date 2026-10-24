@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import socket
 import threading
 import time
 
 import pytest
-from local_worker_fakes import TASK, World, cli_harness, lines, make_loop, reply
+from local_worker_fakes import META, TASK, World, cli_harness, lines, make_loop, reply
 
-from experimental.local_worker import endpoint, episode, tools
+from experimental.local_worker import endpoint, episode, redact, tools
 from experimental.local_worker.agent import Limits, RefusedStart, initial_messages
+from experimental.local_worker.episode_schema import SchemaError, validate_record
 
 EDIT_SRC = reply("edit_file", path="src/app.py", target="x = 1", replacement="x = 2")
 
@@ -252,3 +255,42 @@ def test_resume_refuses_the_parent_run_root_even_without_its_line(harness):
         run([reply("finish", status="DONE")], "resume", "--parent-transcript", tr, root="d" * 32)
         == 2
     )
+
+
+# -- finding 9: bounded paths -------------------------------------------------------------------
+def _record(tmp_path, replies, world=None):
+    loop, world, _, _ = make_loop(tmp_path, replies, world)
+    rec = episode.build_record(META, loop.run(initial_messages(TASK)))
+    validate_record(rec)
+    return rec
+
+
+def test_a_long_path_is_kept_only_as_a_digest(tmp_path):
+    long = "src/" + "d" * 600 + ".py"
+    rec = _record(tmp_path, [reply("write_file", path=long, content="x")])
+    want = {"sha256": hashlib.sha256(long.encode()).hexdigest(), "bytes": len(long)}
+    cut, source = rec["first_edit_cut"], rec["first_source_edit"]
+    assert rec["turns"][0]["tool_args"]["path"] == want
+    assert cut["target_file"] == want and cut["changed_paths"] == [want]
+    assert source["path"] == want and long not in json.dumps(rec)
+    for bad in ({**cut, "target_file": long}, {**cut, "changed_paths": [long]}):
+        with pytest.raises(SchemaError):
+            validate_record({**rec, "first_edit_cut": bad})
+    turn = {**rec["turns"][0], "tool_args": {"path": long}}
+    with pytest.raises(SchemaError):
+        validate_record({**rec, "turns": [turn, *rec["turns"][1:]]})
+
+
+def test_changed_paths_are_capped_with_the_full_count(tmp_path):
+    world = World()
+    world.pytest_writes = {f"build/out{n:03}.txt": "x" for n in range(70)}
+    rec = _record(tmp_path, [reply("run_tests")], world)
+    cut = rec["first_edit_cut"]
+    assert cut["changed_paths_total"] == 70
+    assert cut["changed_paths"] == [f"build/out{n:03}.txt" for n in range(redact.MAX_CHANGED_PATHS)]
+    for bad in (
+        {**cut, "changed_paths_total": 63},  # 64 entries cannot be the full list of 63
+        {**cut, "changed_paths": cut["changed_paths"][:10]},
+    ):
+        with pytest.raises(SchemaError):
+            validate_record({**rec, "first_edit_cut": bad})

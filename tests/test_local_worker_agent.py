@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
-from local_worker_fakes import BASE_SHA, TASK, World, make_loop, reply
+from local_worker_fakes import BASE_SHA, META, TASK, World, make_loop, reply
 
 from experimental.local_worker import agent_protocol, episode, tools
 from experimental.local_worker.agent import RefusedStart, initial_messages
@@ -13,24 +11,6 @@ from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
 from experimental.local_worker.episode import build_record, first_edit_cut
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 
-META: dict[str, Any] = {
-    "episode_id": "ep_test",
-    "task_id": "TASK_01",
-    "repo": "repo_x",
-    "model_name": "served-model",
-    "harness_version": "0" * 40,
-    "checkout_id": "0" * 32,
-    "arm": "L0",
-    "seed": 7,
-    "resume_parent_episode_id": None,
-    "resume_cut_turn_index": None,
-    "plan_sha256": None,
-    **dict.fromkeys(episode.PARENT_FIELDS),
-    "endpoint": "http://127.0.0.1:8000/v1",
-    "server_model_id": "served-model",
-    "manifest_sha256": "1" * 64,
-    "canary_report_sha256": "2" * 64,
-}
 EDIT_SRC = reply("edit_file", path="src/app.py", target="x = 1", replacement="x = 2")
 
 

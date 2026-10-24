@@ -15,12 +15,13 @@ from experimental.local_worker.episode import (
     PARENT_FIELDS,
     SCHEMA_VERSION,
     SOURCE_FIELDS,
-    TEXT_ARGS,
     VERIFICATION_POST_STEP,
     token_totals,
 )
+from experimental.local_worker.redact import MAX_CHANGED_PATHS, TEXT_ARGS, is_digest, is_public_path
 
 STR, INT, FLOAT, BOOL, DICT, LIST = str, int, (int, float), bool, dict, list
+PATH = (str, dict)  # a path, or {sha256, bytes} when longer than redact.MAX_PATH_CHARS
 
 TOP_SPEC: dict[str, tuple[Any, bool]] = {  # spec §2: (type, nullable)
     "episode_id": (STR, False),
@@ -68,7 +69,7 @@ CUT: dict[str, tuple[Any, bool]] = dict(
         [
             (BOOL, False),
             (INT, True),
-            (STR, True),
+            (PATH, True),
             (BOOL, True),
             (INT, True),
             (INT, True),
@@ -77,6 +78,7 @@ CUT: dict[str, tuple[Any, bool]] = dict(
             (BOOL, True),
             (LIST, True),
             (INT, True),
+            (INT, True),
         ],
         strict=True,
     )
@@ -84,7 +86,7 @@ CUT: dict[str, tuple[Any, bool]] = dict(
 SOURCE: dict[str, tuple[Any, bool]] = dict(
     zip(
         SOURCE_FIELDS,
-        [(BOOL, False), (INT, True), (STR, True), (STR, True), (INT, True), (INT, True)]
+        [(BOOL, False), (INT, True), (PATH, True), (STR, True), (INT, True), (INT, True)]
         + [(FLOAT, True), (INT, True)],
         strict=True,
     )
@@ -165,10 +167,13 @@ def _check(obj: Any, schema: dict[str, tuple[Any, bool]], where: str) -> None:
 
 def _check_tool_args(args: dict, where: str) -> None:
     for key, value in args.items():
-        if key in TEXT_ARGS or (key == "path" and isinstance(value, dict)):
-            if not (isinstance(value, dict) and set(value) == {"sha256", "bytes"}):
+        if key in TEXT_ARGS:
+            if not is_digest(value):
                 raise SchemaError(f"{where}.{key} must be {{sha256, bytes}}")
-        elif key == "path" or key == "status":
+        elif key == "path":
+            if not is_public_path(value):
+                raise SchemaError(f"{where}.path must be a short path or {{sha256, bytes}}")
+        elif key == "status":
             if not isinstance(value, str):
                 raise SchemaError(f"{where}.{key} must be a string")
         elif key == "target_index":
@@ -208,13 +213,32 @@ def _check_cuts(rec: dict) -> None:
     _check(edit, CUT, "first_edit_cut")
     _check(source, SOURCE, "first_source_edit")
     required = ("cut_turn_index", "pre_cut_wall_seconds", "cut_cause", "changed_paths")
+    required += ("changed_paths_total",)
     _check_cut(edit, CUT_FIELDS, (*required, "pre_cut_turns_missing_usage"), "first_edit_cut")
     required = ("turn_index", "path", "cause", "pre_wall_seconds", "pre_cut_turns_missing_usage")
     _check_cut(source, SOURCE_FIELDS, required, "first_source_edit")
+    _check_paths(edit, source)
     if source["occurred"] and not (
         edit["cut_occurred"] and edit["cut_turn_index"] <= source["turn_index"]
     ):
         raise SchemaError("first_source_edit precedes the first tree change")
+
+
+def _check_paths(edit: dict, source: dict) -> None:
+    """Review finding 9: every path is short or a digest; changed_paths keeps at most
+    MAX_CHANGED_PATHS entries and changed_paths_total counts them all."""
+    for value in (edit["target_file"], source["path"]):
+        if value is not None and not is_public_path(value):
+            raise SchemaError("a cut path must be a short path or {sha256, bytes}")
+    paths, total = edit["changed_paths"], edit["changed_paths_total"]
+    if paths is None:
+        if total is not None:
+            raise SchemaError("changed_paths_total without changed_paths")
+        return
+    if total is None or len(paths) != min(total, MAX_CHANGED_PATHS):
+        raise SchemaError("changed_paths must hold min(changed_paths_total, MAX_CHANGED_PATHS)")
+    if not all(is_public_path(v) for v in paths):
+        raise SchemaError("changed_paths entries must be short paths or {sha256, bytes}")
 
 
 def _check_counts(rec: dict) -> None:

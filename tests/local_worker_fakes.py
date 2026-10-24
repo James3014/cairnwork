@@ -13,10 +13,29 @@ from typing import Any
 from experimental.local_worker import cli, corpus_io, tools
 from experimental.local_worker.agent import AgentLoop, Limits, Settings, Task
 from experimental.local_worker.endpoint import EndpointTimeout
+from experimental.local_worker.episode import PARENT_FIELDS
 from experimental.local_worker.tools import WorkerTools
 
 BASE_SHA = "a" * 40
 TASK = Task("TASK_01", "repo_x", "SECRET-PROMPT-7f3 fix the bug", ("tests/test_app.py",))
+META: dict[str, Any] = {
+    "episode_id": "ep_test",
+    "task_id": "TASK_01",
+    "repo": "repo_x",
+    "model_name": "served-model",
+    "harness_version": "0" * 40,
+    "checkout_id": "0" * 32,
+    "arm": "L0",
+    "seed": 7,
+    "resume_parent_episode_id": None,
+    "resume_cut_turn_index": None,
+    "plan_sha256": None,
+    **dict.fromkeys(PARENT_FIELDS),
+    "endpoint": "http://127.0.0.1:8000/v1",
+    "server_model_id": "served-model",
+    "manifest_sha256": "1" * 64,
+    "canary_report_sha256": "2" * 64,
+}
 
 
 class Clock:

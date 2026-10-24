@@ -1,11 +1,11 @@
 """Episode corpus record for the local worker loop (#88; EPISODE_CORPUS_SPEC_ZH §1-§6 + Plan v2).
 
 Pure functions, no file I/O (corpus_io.py writes). One JSON line per episode, built from an
-allowlist: tool arguments keep paths and the test-target index; written text (content, target,
-replacement) becomes ``{"sha256", "bytes"}``; tool outputs keep only sizes, the truncation flag,
-the exit code and the error category. The task text, the messages and every raw output stay in the
-private run directory. ``validate_record`` checks a line against this frozen schema before it is
-appended.
+allowlist (redact.py): tool arguments keep paths (a path over 512 characters becomes a digest) and
+the test-target index; written text (content, target, replacement) becomes ``{"sha256", "bytes"}``;
+tool outputs keep only sizes, the truncation flag, the exit code and the error category. The task
+text, the messages and every raw output stay in the private run directory. ``validate_record``
+checks a line against this frozen schema before it is appended.
 
 Null versus zero (NULL_RULE): ``null`` means not observed, not applicable or not yet known (missing
 ``usage``, no cut, oracle fields before the post-step); ``0`` means observed and zero. A total is
@@ -19,12 +19,12 @@ turn before it left the tree at base.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from experimental.local_worker.gitstate import TreeState
+from experimental.local_worker.redact import public_args, public_path, public_paths
 
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
@@ -32,8 +32,6 @@ TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed
 EXIT_REASONS = ("COMPLETED", "TURN_LIMIT", "TIMEOUT", "ERROR_ABORT")
 READ_ACTIONS = ("read_file", "list_dir", "search")
 EDIT_ACTIONS = ("write_file", "edit_file")
-TEXT_ARGS = ("content", "target", "replacement")
-MAX_PATH_CHARS = 512
 DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
 CUT_FIELDS = (
     "cut_occurred",
@@ -46,6 +44,7 @@ CUT_FIELDS = (
     "cut_cause",
     "cut_ambiguous",
     "changed_paths",
+    "changed_paths_total",
     "pre_cut_turns_missing_usage",
 )
 SOURCE_FIELDS = (
@@ -163,7 +162,8 @@ def _pre(before: list[TurnLog], turn: TurnLog) -> tuple[int, int | None, float, 
 
 def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
     """The spec §3 object, cut where the tree first differs from base (any path: what resume
-    needs), plus cut_cause, cut_ambiguous, changed_paths and pre_cut_turns_missing_usage."""
+    needs), plus cut_cause, cut_ambiguous, changed_paths (at most MAX_CHANGED_PATHS, the full count
+    in changed_paths_total) and pre_cut_turns_missing_usage. Paths go through redact.public_path."""
     found = _first_change(turns, base, source_only=False)
     if found is None:
         return {"cut_occurred": False, **dict.fromkeys(CUT_FIELDS[1:])}
@@ -174,14 +174,15 @@ def first_edit_cut(turns: list[TurnLog], base: TreeState) -> dict:
     return {
         "cut_occurred": True,
         "cut_turn_index": turn.index,
-        "target_file": target,
+        "target_file": public_path(target) if isinstance(target, str) else None,
         "is_test_file": is_test_path(target) if isinstance(target, str) else None,
         "pre_cut_read_actions": reads,
         "pre_cut_tokens_accum": tokens,
         "pre_cut_wall_seconds": wall,
         "cut_cause": cause,
         "cut_ambiguous": ambiguous,
-        "changed_paths": changed,
+        "changed_paths": public_paths(changed),
+        "changed_paths_total": len(changed),
         "pre_cut_turns_missing_usage": missing,
     }
 
@@ -195,37 +196,15 @@ def first_source_edit(turns: list[TurnLog], base: TreeState) -> dict:
         return {"occurred": False, **dict.fromkeys(SOURCE_FIELDS[1:])}
     n, turn, changed = found
     cause, _ = _cut_cause(turn, changed)
-    path = turn.tool_args.get("path") if cause in EDIT_ACTIONS else changed[0]
+    path = str(turn.tool_args["path"]) if cause in EDIT_ACTIONS else changed[0]  # in changed
     reads, tokens, wall, missing = _pre(turns[:n], turn)
     return dict(
         zip(
             SOURCE_FIELDS,
-            (True, turn.index, path, cause, reads, tokens, wall, missing),
+            (True, turn.index, public_path(path), cause, reads, tokens, wall, missing),
             strict=True,
         )
     )
-
-
-def _digest(text: Any) -> dict:
-    data = str(text).encode("utf-8", errors="surrogatepass")
-    return {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
-
-
-def public_args(args: dict) -> dict:
-    """Allowlisted tool arguments: path, target_index; written text only as sha256 and size."""
-    out: dict[str, Any] = {}
-    path = args.get("path")
-    if isinstance(path, str):
-        out["path"] = path if len(path) <= MAX_PATH_CHARS else _digest(path)
-    index = args.get("target_index")
-    if isinstance(index, int) and not isinstance(index, bool):
-        out["target_index"] = index
-    for key in TEXT_ARGS:
-        if key in args:
-            out[key] = _digest(args[key])
-    if "status" in args and args["status"] in ("DONE", "NEEDS_SPEC"):
-        out["status"] = args["status"]
-    return out
 
 
 def public_turn(t: TurnLog, base: TreeState) -> dict:
