@@ -35,6 +35,7 @@ from experimental.local_worker.schema_base import (
 )
 from experimental.local_worker.schema_cuts import check_cuts
 from experimental.local_worker.schema_rules import check_rules
+from experimental.local_worker.write_scope import canonical_entry
 
 TOP_SPEC: dict[str, tuple[Any, bool]] = {  # spec §2: (type, nullable)
     "episode_id": (STR, False),
@@ -77,6 +78,7 @@ TOP_EXTRA: dict[str, tuple[Any, bool]] = {  # Plan v2 point 10 and the bindings
     "parent_pre_cut_wall_seconds": (FLOAT, True),
     "parent_pre_cut_turns_missing_usage": (INT, True),
 }
+OPTIONAL_TOP = "write_scope"  # absent (or null) without a write scope: lines before it are valid
 VERIFICATION: dict[str, tuple[Any, bool]] = {
     "exit_reason": (STR, False),
     "patch_lines_added": (INT, True),
@@ -192,9 +194,35 @@ def _check_parent(rec: dict) -> None:
         raise SchemaError("wall_clock_seconds must be parent pre-cut seconds + own seconds")
 
 
+def _check_write_scope(scope: Any, plain_paths: bool) -> None:
+    """The optional ``write_scope`` (write_scope.py): absent or null without a scope, else its
+    entries, each a canonical readable path (only when the base's paths were observed) or a
+    path digest."""
+    if scope is None:
+        return
+    if not isinstance(scope, list) or not scope:
+        raise SchemaError("write_scope must be a non-empty list or absent")
+    for n, entry in enumerate(scope):
+        if isinstance(entry, str) and plain_paths and is_public_path(entry):
+            try:
+                ok = canonical_entry(entry) == entry
+            except ValueError:
+                ok = False
+        else:
+            ok = is_path_digest(entry)
+        if not ok:
+            raise SchemaError(f"write_scope[{n}] is neither a canonical base path nor a digest")
+
+
 def validate_record(rec: Any) -> None:
-    """Raise SchemaError unless ``rec`` is a complete, consistent corpus line."""
-    check(rec, {**TOP_SPEC, **TOP_EXTRA}, "record")
+    """Raise SchemaError unless ``rec`` is a complete, consistent corpus line. ``write_scope``
+    is the one optional key (OPTIONAL_TOP): a line without a write scope has none."""
+    core = rec
+    if isinstance(rec, dict) and OPTIONAL_TOP in rec:
+        core = {k: v for k, v in rec.items() if k != OPTIONAL_TOP}
+    check(core, {**TOP_SPEC, **TOP_EXTRA}, "record")
+    if core is not rec:
+        _check_write_scope(rec[OPTIONAL_TOP], rec["base_paths_observed"])
     if rec["schema_version"] != SCHEMA_VERSION:
         raise SchemaError(f"schema_version {rec['schema_version']!r}")
     check(rec["verification"], VERIFICATION, "verification")

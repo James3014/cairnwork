@@ -104,7 +104,7 @@ class AgentLoop:
         self.tools, self.endpoint, self.task, self.settings = tools, endpoint, task, settings
         self.limits = settings.limits
         self.clock, self.now = clock, now
-        tools.clock = clock  # every wrapper call is held to deadlines on this clock
+        tools.clock, tools.write_scope = clock, settings.write_scope  # deadlines on this clock
         self.abort_detail: str | None = None
         self.interruptible = True  # NB8 (review of #239): see interrupt and _stopped
         self.late_signals = 0
