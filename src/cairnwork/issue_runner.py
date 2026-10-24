@@ -218,6 +218,7 @@ def settle(intake: Intake, github: GitHub, clone: Path) -> list[dict[str, Any]]:
         except (
             OwnershipUnknown,
             ChangeSetError,
+            IntakeRefused,
             RuntimeError,
             OSError,
             ValueError,

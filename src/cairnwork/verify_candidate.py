@@ -223,10 +223,15 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
 
 def tests_consumed(intake: Intake, test_commit: str) -> bool:
     """Is ``test_commit`` now marked used, so a retry needs a new one (#234)? Unknown: True."""
-    try:
-        return bool(OID.fullmatch(test_commit)) and _used(intake, test_commit).exists()
+    if not OID.fullmatch(test_commit):
+        return False
+    try:  # only a marker known to be missing means not consumed
+        _used(intake, test_commit).lstat()
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
+    return True
 
 
 def _used(intake: Intake, test_commit: str) -> Path:

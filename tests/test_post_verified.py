@@ -357,3 +357,14 @@ def test_default_config_is_the_same_object_everywhere():
 def test_core_does_not_import_the_attest_package():
     for module in (post_verified, intake_config):
         assert "cairnwork_attest" not in inspect.getsource(module)
+
+
+def test_a_config_broken_after_startup_is_recorded_per_issue(rig, monkeypatch):
+    github = FakeGitHub([issue()])
+    taken = runner.take(rig["intake"], github, rig["clone"])[0]
+    commit = commit_change(rig["clone"], {"src/calc.py": "x = 2\n"})
+    monkeypatch.setattr(Intake, "status", _completed(rig, taken, commit))
+    monkeypatch.setattr(runner, "_git", _git_without_credentials)
+    (rig["intake"].state / "config.json").write_text("{")  # truncated mid-run
+    out = runner.settle(rig["intake"], github, rig["clone"])
+    assert out[0]["error"].startswith("IntakeRefused: BAD_CONFIG") and github.prs == []

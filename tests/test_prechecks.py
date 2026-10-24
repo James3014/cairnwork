@@ -1,6 +1,7 @@
 """#234 PR-C: the account hint and precheck, worker isolation by uid, and the Issue runner's
 mirror invariant. The verify and worker paths are covered in test_uncomparable_paths.py."""
 
+import errno
 import grp
 import json
 import os
@@ -22,7 +23,7 @@ import cairnwork.issue_runner as runner
 from cairnwork import account_check
 from cairnwork.deferred_tests import BaseUncomparable
 from cairnwork.intake import Intake
-from cairnwork.verifier_account import VerifierAccountError
+from cairnwork.verifier_account import AccountBusy, VerifierAccountError
 from cairnwork.workers import agy
 from cairnwork.workers.agy import AgyWorker
 from cairnwork.workers.agy_dispatch import Dispatch
@@ -131,7 +132,7 @@ class FakeAccount:
     @contextmanager
     def exclusive(self, timeout=None):
         if self.busy:
-            raise VerifierAccountError(f"RESOURCE_LEASE_TIMEOUT: busy for {timeout}s")
+            raise AccountBusy(f"RESOURCE_LEASE_TIMEOUT: busy for {timeout}s")
         yield
 
     def available(self, python=None):
@@ -321,3 +322,69 @@ def test_a_bad_config_is_exit_3_at_startup(mirror, tmp_path, monkeypatch, capsys
 
 def test_without_a_mirror_there_is_nothing_to_compare(mirror, tmp_path):
     assert Intake(_state(tmp_path, None)).clone_problem(Path(mirror)) == ""
+
+
+# Follow-ups from the review of eee7a0a.
+
+
+def test_only_a_missing_marker_means_the_tests_were_not_consumed(tmp_path):
+    from cairnwork.verify_candidate import tests_consumed
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    oid = "a" * 40
+    used = intake.state / "verify-used-tests"
+    used.mkdir(exist_ok=True)
+    assert tests_consumed(intake, oid) is False and tests_consumed(intake, "not-an-oid") is False
+    (used / oid).write_text("")
+    assert tests_consumed(intake, oid) is True
+    (used / oid).unlink()
+    used.chmod(0o000)  # unknown: the marker cannot be looked up
+    try:
+        assert tests_consumed(intake, oid) is True
+    finally:
+        used.chmod(0o700)
+
+
+@pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.ELOOP, errno.ENOTDIR])
+def test_any_lookup_error_but_a_missing_marker_means_consumed(tmp_path, monkeypatch, err):
+    from cairnwork.verify_candidate import tests_consumed
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+
+    def fail(self, *a, **kw):
+        if self.name == "a" * 40:
+            raise OSError(err, os.strerror(err), str(self))
+        return real(self, *a, **kw)
+
+    real = Path.lstat
+    monkeypatch.setattr(Path, "lstat", fail)
+    monkeypatch.setattr(Path, "stat", fail)  # whichever the lookup uses, below exists()
+    assert tests_consumed(intake, "a" * 40) is True
+
+
+def test_a_state_owned_by_another_uid_is_bad_state(tmp_path, monkeypatch):
+    import cairnwork.intake as intake_module
+    from cairnwork.intake import IntakeRefused
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    intake.check_state()
+    monkeypatch.setattr(intake_module.os, "getuid", lambda: os.stat(intake.state).st_uid + 1)
+    with pytest.raises(IntakeRefused, match="BAD_STATE: .* not a directory owned by us"):
+        intake.check_state()
+
+
+def test_only_the_typed_busy_error_defers(open_root, stranger):
+    _, python = _python_under(open_root, 0o755)
+
+    class Lock(FakeAccount):
+        @contextmanager
+        def exclusive(self, timeout=None):
+            raise VerifierAccountError("RESOURCE_LEASE_TIMEOUT in some other text")
+            yield
+
+    account: Any = Lock(str(python))
+    with pytest.raises(BaseUncomparable, match="VERIFIER_ACCOUNT_UNUSABLE|lock: "):
+        account_check.precheck(account, None)  # the words alone no longer mean busy

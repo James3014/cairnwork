@@ -11,7 +11,7 @@ import pytest
 from conftest import git
 
 from cairnwork.intake import Intake
-from cairnwork.verifier_account import VerifierAccountError
+from cairnwork.verifier_account import AccountBusy
 from scripts import preflight
 
 
@@ -111,7 +111,7 @@ class Unusable:
     @contextmanager
     def exclusive(self, timeout=None):
         if self.busy:
-            raise VerifierAccountError(f"RESOURCE_LEASE_TIMEOUT: busy for {timeout:g}s")
+            raise AccountBusy(f"RESOURCE_LEASE_TIMEOUT: busy for {timeout:g}s")
         yield
 
     def available(self, python=None):

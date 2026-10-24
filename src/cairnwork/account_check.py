@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from cairnwork.deferred_tests import BaseUncomparable, Comparison
-from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
+from cairnwork.verifier_account import AccountBusy, VerifierAccount, VerifierAccountError
 
 UNUSABLE = "VERIFIER_ACCOUNT_UNUSABLE"
 
@@ -103,9 +103,9 @@ def precheck(
         with account.exclusive(timeout):
             if account.available(py):
                 return None
+    except AccountBusy as exc:  # busy: deferred
+        return str(exc)
     except VerifierAccountError as exc:
-        if "RESOURCE_LEASE_TIMEOUT" in str(exc):  # busy: deferred
-            return str(exc)
         raise unusable(f"account {account.user} lock: {exc}") from exc  # e.g. an unsafe queue
     except OSError as exc:  # e.g. no account root to hold the lock file
         raise unusable(f"account {account.user} lock: {exc}") from exc
