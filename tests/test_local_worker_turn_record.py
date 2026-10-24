@@ -89,3 +89,21 @@ def test_a_signal_at_any_point_of_a_turn_never_hides_a_change(tmp_path, monkeypa
             assert rec["first_edit_cut"]["cut_status"] != "NO_CUT", where
             ran = [t for t in rec["turns"] if t["tool_ran"]]
             assert ran and ran[-1]["tree_differs_from_base"] is not False, where
+
+
+def test_a_finished_turn_keeps_its_own_end_time(tmp_path, monkeypatch):
+    """Only the turn an interrupt or error stopped is ended by run(); a completed turn's t_end is
+    set once, when it ended (run() must not overwrite it with the cleanup's start)."""
+    sets: dict[int, int] = {}
+
+    class Counting(TurnLog):
+        def __setattr__(self, name, value):
+            super().__setattr__(name, value)
+            if name == "t_end" and value != 0.0:
+                sets[self.index] = sets.get(self.index, 0) + 1
+
+    monkeypatch.setattr(agent, "TurnLog", Counting)
+    loop, _, _, _ = make_loop(tmp_path, [REPLIES["write_file"]])
+    out = loop.run(initial_messages(TASK))
+    assert out.exit_reason == "COMPLETED" and len(out.turns) == 2
+    assert sets == {0: 1, 1: 1} and loop._open is None
