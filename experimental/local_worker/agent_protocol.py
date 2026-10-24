@@ -64,28 +64,63 @@ _REQUIRED = {
 }
 
 
+ALLOWED_ARGS = {
+    t["function"]["name"]: set(t["function"]["parameters"]["properties"]) for t in TOOL_SCHEMAS
+}
+
+
 class BadCall(ValueError):
-    """A tool call the loop cannot run; the model is told why and nothing executes."""
+    """A tool call whose argument values the loop cannot run (unknown tool name, arguments that
+    are not a JSON object, a missing or ill-typed argument): the model is told why, the turn is
+    recorded as ``invalid_tool_call`` and nothing executes."""
+
+
+class ProtocolError(ValueError):
+    """A reply that breaks the tool-call protocol itself (a call or function that is not an
+    object, a tool name or id that is not a string, arguments that are neither a JSON string nor
+    an object, or an argument the tool does not take): the episode stops with a recorded
+    ERROR_ABORT (abort_cause protocol_error); nothing executes and no argument is published."""
+
+
+def _arguments(fn: dict) -> Any:
+    raw = fn.get("arguments")
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        raise ProtocolError("arguments are neither a JSON string nor an object")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise BadCall("arguments are not valid JSON") from None
 
 
 def decode_call(call: Any, n_targets: int) -> tuple[str, dict]:
-    fn = call.get("function") if isinstance(call, dict) else None
-    name = fn.get("name") if isinstance(fn, dict) else None
+    """(tool name, arguments) of one call; raises ProtocolError or BadCall (see above)."""
+    if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
+        raise ProtocolError("a tool call must be an object with a function object")
+    if call.get("id") is not None and not isinstance(call["id"], str):
+        raise ProtocolError("a tool call id must be a string")
+    fn = call["function"]
+    name = fn.get("name")
+    if not isinstance(name, str):
+        raise ProtocolError("a tool name must be a string")
     if name not in _REQUIRED:
-        raise BadCall(f"unknown tool {name!r}")
-    assert isinstance(fn, dict)
-    raw = fn.get("arguments") or "{}"
-    try:
-        args = json.loads(raw) if isinstance(raw, str) else raw
-    except ValueError:
-        raise BadCall("arguments are not valid JSON") from None
+        raise BadCall("unknown tool")
+    args = _arguments(fn)
     if not isinstance(args, dict):
         raise BadCall("arguments must be a JSON object")
+    extra = set(args) - ALLOWED_ARGS[name]
+    if extra:  # their names and values are model text: neither is kept in the public line
+        raise ProtocolError(f"{name} got {len(extra)} argument(s) it does not take")
     for key in _REQUIRED[name]:
         if not isinstance(args.get(key), str):
             raise BadCall(f"{name} needs a string {key!r}")
     if name == "finish" and args["status"] not in ("DONE", "NEEDS_SPEC"):
         raise BadCall("finish status must be DONE or NEEDS_SPEC")
+    if name == "finish" and not isinstance(args.get("summary", ""), str):
+        raise BadCall("finish summary must be a string")
     index = args.get("target_index")
     if name == "run_tests" and index is not None:
         if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < n_targets:

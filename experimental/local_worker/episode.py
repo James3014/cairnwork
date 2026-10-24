@@ -221,7 +221,7 @@ def public_turn(t: TurnLog, base: TreeState) -> dict:
         "turn_index": t.index,
         "role": "assistant",
         "action_type": t.action_type,
-        "tool_args": public_args(t.tool_args),
+        "tool_args": public_args(t.action_type, t.tool_args, t.exit_code),
         "exit_code": t.exit_code,
         "stdout_bytes": t.stdout_bytes,
         "stdout_truncated": t.stdout_truncated,

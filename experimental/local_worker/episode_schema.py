@@ -19,7 +19,13 @@ from experimental.local_worker.episode import (
     VERIFICATION_POST_STEP,
     token_totals,
 )
-from experimental.local_worker.redact import MAX_CHANGED_PATHS, TEXT_ARGS, is_digest, is_public_path
+from experimental.local_worker.redact import (
+    MAX_CHANGED_PATHS,
+    PUBLIC_ARGS,
+    TEXT_ARGS,
+    is_digest,
+    is_public_path,
+)
 
 STR, INT, FLOAT, BOOL, DICT, LIST = str, int, (int, float), bool, dict, list
 PATH = (str, dict)  # a path, or {sha256, bytes} when longer than redact.MAX_PATH_CHARS
@@ -166,28 +172,30 @@ def _check(obj: Any, schema: dict[str, tuple[Any, bool]], where: str) -> None:
             raise SchemaError(f"{where}.{key} has type {type(value).__name__}")
 
 
-def _check_tool_args(args: dict, where: str) -> None:
+def _check_tool_args(turn: dict, where: str) -> None:
+    """Only the action's PUBLIC_ARGS keys; text as a digest; a readable path only after exit 0."""
+    args, allowed = turn["tool_args"], PUBLIC_ARGS.get(turn["action_type"], ())
     for key, value in args.items():
+        if key not in allowed:
+            raise SchemaError(f"{where}: {key!r} is not a public argument of this action")
         if key in TEXT_ARGS:
             if not is_digest(value):
                 raise SchemaError(f"{where}.{key} must be {{sha256, bytes}}")
         elif key == "path":
-            if not is_public_path(value):
-                raise SchemaError(f"{where}.path must be a short path or {{sha256, bytes}}")
+            plain_ok = turn["exit_code"] == 0 and is_public_path(value)
+            if not (is_digest(value) or plain_ok):
+                raise SchemaError(f"{where}.path is readable only after a successful call")
         elif key == "status":
-            if not isinstance(value, str):
-                raise SchemaError(f"{where}.{key} must be a string")
-        elif key == "target_index":
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise SchemaError(f"{where}.{key} must be an integer")
-        else:
-            raise SchemaError(f"{where}: tool argument {key!r} is not allowlisted")
+            if value not in ("DONE", "NEEDS_SPEC"):
+                raise SchemaError(f"{where}.status {value!r}")
+        elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise SchemaError(f"{where}.{key} must be a non-negative integer")
 
 
 def _check_turns(turns: list) -> None:
     for n, turn in enumerate(turns):
         _check(turn, TURN, f"turns[{n}]")
-        _check_tool_args(turn["tool_args"], f"turns[{n}].tool_args")
+        _check_tool_args(turn, f"turns[{n}].tool_args")
         if turn["usage_status"] not in USAGE_STATES:
             raise SchemaError(f"turns[{n}].usage_status {turn['usage_status']!r}")
         if turn["turn_index"] != turns[0]["turn_index"] + n:

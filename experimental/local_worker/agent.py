@@ -17,6 +17,10 @@ sweep, numstat), each with room for its own grace: the episode ends within max_w
 
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
+
+Once the base is verified, ``run`` never raises: a reply that breaks the tool-call protocol
+(agent_protocol.ProtocolError, e.g. an argument the tool does not take) and any unexpected error
+end the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from experimental.local_worker.agent_protocol import (
     SYSTEM_PROMPT,
     TOOL_SCHEMAS,
     BadCall,
+    ProtocolError,
     decode_call,
     render,
 )
@@ -170,6 +175,10 @@ class AgentLoop:
             self._abort(out, "worker_isolation", exc)
         except _StatusUnavailable as exc:
             self._abort(out, "status_unavailable", exc)
+        except ProtocolError as exc:
+            self._abort(out, "protocol_error", exc)
+        except Exception as exc:  # noqa: BLE001 - recorded, never lost: the line is still written
+            self._abort(out, "internal_error", exc)
         self._cleanup(out)
         out.ended_at = self.now().astimezone(UTC8).isoformat()
         out.wall_seconds = self._own()
@@ -238,24 +247,31 @@ class AgentLoop:
         log.usage_raw, log.server_model = resp.get("usage"), _str_or_none(resp.get("model"))
         msg = _message(resp)
         calls = msg.get("tool_calls") or []
-        if not isinstance(calls, list) or not all(isinstance(c, dict) for c in calls):
-            raise EndpointError("tool_calls is not a list of objects")
         assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
         messages.append(assistant)
         log.assistant_msg_index = len(messages) - 1
         if not calls:
             messages.append({"role": "user", "content": NUDGE})
             return None
-        call = dict(calls[0], id=calls[0].get("id") or f"call_{log.index}")
-        assistant["tool_calls"] = [call]  # extra calls in one reply are dropped, never run
+        if not isinstance(calls, list) or not all(isinstance(c, dict) for c in calls):
+            log.action_type, log.error_category = "invalid_tool_call", "PROTOCOL_ERROR"
+            raise ProtocolError("tool_calls is not a list of objects")
+        assistant["tool_calls"] = calls[:1]  # extra calls in one reply are dropped, never run
         log.extra_tool_calls_ignored = len(calls) - 1
         try:
-            name, args = decode_call(call, len(self.task.public_tests))
+            name, args = decode_call(calls[0], len(self.task.public_tests))
+        except ProtocolError:
+            log.action_type, log.error_category = "invalid_tool_call", "PROTOCOL_ERROR"
+            raise
         except BadCall as exc:
             log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(exc)})
+            cid = calls[0].get("id") or f"call_{log.index}"
+            messages.append({"role": "tool", "tool_call_id": cid, "content": str(exc)})
             return None
-        log.action_type, log.tool_args = name, args
+        call = dict(calls[0], id=calls[0].get("id") or f"call_{log.index}")
+        assistant["tool_calls"] = [call]
+        log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
+        log.tool_args = args
         if name == "finish":
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": "finished"})
             return args["status"]
