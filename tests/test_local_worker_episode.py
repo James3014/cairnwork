@@ -181,12 +181,16 @@ def test_canary_binding_accepts_a_fresh_worker_pass(canary):
         {"mode": "direct"},
         {"wrapper_sha256": "0" * 64},
         {"host": "other"},
-        {"finished_at": (datetime.now(UTC) - timedelta(days=8)).isoformat()},
-        {"finished_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat()},  # future-dated
+        {"finished_at": timedelta(days=-8)},
+        {"finished_at": timedelta(minutes=10)},  # future-dated
     ],
 )
 def test_canary_binding_refuses(canary, changes):
     write, wrapper, out = canary
+    changes = {  # an age is turned into a time only now, not at collection (CI runs take minutes)
+        k: (datetime.now(UTC) + v).isoformat() if isinstance(v, timedelta) else v
+        for k, v in changes.items()
+    }
     with pytest.raises(corpus_io.InputRefused):
         corpus_io.verify_canary(write(**changes), out, wrapper=wrapper, host="mini")
 
