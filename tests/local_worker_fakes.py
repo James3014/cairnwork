@@ -153,6 +153,9 @@ class FakeEndpoint:
         if self.clock is not None:
             if self.clock() >= deadline:  # like LoopbackEndpoint._remaining
                 raise EndpointTimeout("deadline passed")
+            if self.clock() + self.seconds > deadline:  # like its watchdog: no reply past it
+                self.clock.t = deadline
+                raise EndpointTimeout("endpoint passed the deadline")
             self.clock.t += self.seconds
         r = self.replies.pop(0) if self.replies else reply("finish", status="DONE")
         if isinstance(r, BaseException):

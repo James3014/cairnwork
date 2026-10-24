@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+import time
 from typing import Any
 
 import pytest
-from local_worker_fakes import META, TASK, cli_harness, lines, make_loop, reply
+from local_worker_fakes import META, TASK, Clock, World, cli_harness, lines, make_loop, reply
 
-from experimental.local_worker import agent, episode
+from experimental.local_worker import agent, endpoint, episode, tools
 from experimental.local_worker.agent import initial_messages
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 
@@ -104,3 +107,115 @@ def test_an_unexpected_error_is_recorded_and_cleaned_up(tmp_path, monkeypatch):
     assert rec["verification"]["exit_reason"] == "ERROR_ABORT"
     assert rec["termination"]["abort_cause"] == "internal_error"
     assert [c[0] for c in world.calls][-2:] == ["sweep", "numstat"]
+
+
+# -- B4: one absolute deadline for every wrapper call, its kill grace and the sweep after it ---
+class SlowWorld(World):
+    """Every wrapper call answers as World does, but only after its whole timeout plus the whole
+    kill grace (the worst case of tools.subprocess_invoker)."""
+
+    def __call__(self, argv: list[str], stdin: bytes | None, timeout: float) -> Any:
+        result = super().__call__(argv, stdin, timeout)
+        assert self.clock is not None
+        self.clock.t += timeout + tools.KILL_GRACE_SECONDS
+        return result
+
+
+def test_no_tool_or_sweep_runs_past_the_deadline(tmp_path):
+    clock = Clock()
+    world = SlowWorld(clock=clock)
+    wt = tools.WorkerTools(tmp_path / ("0" * 32), tmp_path / "c.jsonl", invoker=world)
+    wt.clock, wt.deadline = clock, clock() + 60
+    with pytest.raises(tools.ToolDeadline):  # read took 40 s: no room for the write and its sweep
+        wt.edit_file("src/app.py", "x = 1", "x = 2")
+    assert world.files["src/app.py"] == "x = 1\n" and clock() <= wt.deadline
+    wt.deadline = clock() + 60
+    wt.run_tests(["-q"])  # pytest gets 30 s (+10 grace), its sweep 10 s (+10 grace)
+    assert [c[0] for c in world.calls][-2:] == ["pytest", "sweep"] and clock() <= wt.deadline
+    assert [c[2] for c in world.calls][-2:] == [30.0, tools.SWEEP_TIMEOUT_SECONDS]
+    with pytest.raises(tools.ToolDeadline):
+        wt.read_file("src/app.py")
+    assert clock() <= wt.deadline
+    quick = World(clock=clock)
+    wt = tools.WorkerTools(tmp_path / ("1" * 32), tmp_path / "d.jsonl", invoker=quick)
+    wt.clock, wt.deadline = clock, clock() + 200
+    wt.run_tests(["-q"])  # a quick run: its sweep still gets only its own short timeout
+    assert [c[2] for c in quick.calls] == [170.0, tools.SWEEP_TIMEOUT_SECONDS]
+
+
+def test_an_episode_of_worst_case_calls_ends_within_max_wall_seconds(tmp_path):
+    replies = [EDIT_SRC, reply("run_tests"), reply("read_file", path="src/app.py")] * 5
+    loop, world, _, clock = make_loop(
+        tmp_path,
+        replies,
+        SlowWorld(),
+        max_wall_seconds=400,
+        cleanup_reserve_seconds=60,
+        tool_cap_seconds=30,
+    )
+    start = clock()
+    out = loop.run(initial_messages(TASK))
+    assert out.exit_reason == "TIMEOUT" and out.cleanup == "ok"
+    assert len(out.turns) >= 3 and clock() - start <= 400
+    assert clock() - start > 340  # it did use the time: the bound is not vacuous
+
+
+# -- B3: the endpoint's deadline holds through headers and body ----------------------------------
+def _trickle_server(head: bytes, trickle: bytes, size: int = 8, every: float = 0.08) -> int:
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve() -> None:
+        conn, _ = srv.accept()
+        conn.recv(65536)
+        try:
+            conn.sendall(head)
+            for i in range(0, len(trickle), size):
+                conn.sendall(trickle[i : i + size])
+                time.sleep(every)
+        except OSError:
+            pass
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1]
+
+
+@pytest.mark.parametrize(
+    ("head", "trickle"),
+    [
+        (b"HTTP/1.1 200 OK\r\n", b"X-Slow: " + b"a" * 200 + b"\r\n\r\n{}"),  # headers trickle
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n", b"{" * 200),  # body trickles
+    ],
+)
+def test_the_codex_trickle_repro_stops_at_the_deadline(head, trickle):
+    """8 bytes every 80 ms against a 150 ms budget (the review's repro ran 686 ms)."""
+    port = _trickle_server(head, trickle)
+    started = time.monotonic()
+    with pytest.raises(endpoint.EndpointTimeout):
+        endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(started + 0.15)
+    assert time.monotonic() - started < 0.4
+
+
+def test_a_reply_read_after_the_deadline_is_a_timeout(monkeypatch):
+    """The clock is read once more after the body: a reply complete only past the deadline is
+    never parsed. The fake clock jumps past the deadline as soon as the body has been read."""
+    body = b'{"data": [{"id": "m"}]}'
+    head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+    read = endpoint._read_bounded
+    done = threading.Event()
+
+    def read_then_late(*args: Any) -> bytes:
+        data = read(*args)
+        done.set()
+        return data
+
+    monkeypatch.setattr(endpoint, "_read_bounded", read_then_late)
+    port = _trickle_server(head, b"")
+    late = endpoint.LoopbackEndpoint(
+        f"http://127.0.0.1:{port}/v1",
+        clock=lambda: time.monotonic() + (100 if done.is_set() else 0),
+    )
+    with pytest.raises(endpoint.EndpointTimeout):
+        late.models(time.monotonic() + 5)

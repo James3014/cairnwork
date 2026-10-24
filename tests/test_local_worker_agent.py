@@ -131,20 +131,31 @@ def test_step_limit(tmp_path):
 def test_wall_clock_limit_uses_one_deadline(tmp_path):
     replies = [reply("read_file", path="src/app.py")] * 10
     out, rec, world, endpoint = run(
-        tmp_path, replies, max_wall_seconds=1000, cleanup_reserve_seconds=60, model_seconds=400
+        tmp_path, replies, max_wall_seconds=1000, cleanup_reserve_seconds=60, model_seconds=320
     )
     assert out.exit_reason == "TIMEOUT" and out.timed_out and out.limit_hit == "max_wall_seconds"
-    assert rec["total_turns"] == 3  # starts at 0, 400, 800 (< 940); 1200 is past the deadline
+    assert rec["total_turns"] == 2  # replies at 1320, 1640; the third would pass 1940
     assert len(set(endpoint.deadlines)) == 1  # the same deadline for every request
     deadline = endpoint.deadlines[0]
     assert deadline == pytest.approx(1000.0 + 1000 - 60)
     tool_timeouts = [c[2] for c in world.calls if c[0] == "read"]
-    grace = 2 * tools.KILL_GRACE_SECONDS  # a timed-out call (edit_file: two) may outlive it
-    assert tool_timeouts == [300.0, deadline - 1800.0 - grace]  # min(tool cap, time left)
-    assert rec["turns"][2]["error_category"] == "TIMEOUT"  # replied, but its tool never ran
-    assert rec["turns"][2]["exit_code"] is None
+    # min(tool cap, time left less the kill grace and the sweep after the call with its grace)
+    keep = tools.KILL_GRACE_SECONDS + tools.SWEEP_TIMEOUT_SECONDS + tools.KILL_GRACE_SECONDS
+    assert tool_timeouts == [300.0, deadline - 1640.0 - keep]
     assert rec["termination"]["cleanup"] == "ok"
     assert rec["cut_900s"]["exit_reason"] == "TIMEOUT"
+    out, rec, world, _ = run(
+        tmp_path / "late",
+        replies,
+        max_wall_seconds=1000,
+        cleanup_reserve_seconds=60,
+        model_seconds=470,
+    )
+    assert rec["total_turns"] == 2 and out.exit_reason == "TIMEOUT"
+    assert rec["turns"][1]["error_category"] == "TIMEOUT"  # replied at 1940: its tool never ran
+    assert rec["turns"][1]["exit_code"] is None
+    assert [c[0] for c in world.calls].count("read") == 1
+    assert rec["termination"]["cleanup"] == "ok"
 
 
 def test_no_request_is_sent_after_the_deadline(tmp_path):

@@ -9,11 +9,13 @@ fixed ``status`` query; the observed tree decides the cut (episode.first_edit_cu
 Limits (frozen in the manifest): ``max_steps`` turns (one model reply plus at most one tool call;
 extra tool calls in a reply are dropped and counted), one deadline for the whole episode
 (``max_wall_seconds`` minus a cleanup reserve), and a context cap on the last reply's prompt +
-completion tokens. Every endpoint request gets the deadline itself. A wrapper call that times out
-can outlive its timeout by up to tools.KILL_GRACE_SECONDS (SIGTERM, then SIGKILL), so a tool call
-(edit_file makes two wrapper calls under one timeout) gets min(tool cap, time left minus twice that
-grace), and the cleanup reserve is split into three equal steps (the status query after a turn,
-sweep, numstat), each with room for its own grace: the episode ends within max_wall_seconds.
+completion tokens. Every endpoint request gets the deadline itself (endpoint.py: a watchdog, single
+receives and a check after the read). Every wrapper call gets an absolute deadline too
+(tools.WorkerTools.deadline): its timeout leaves room for the kill grace a timed-out call may still
+use (tools.KILL_GRACE_SECONDS, SIGTERM then SIGKILL) and, for a tool action, for the sweep after it
+with its own grace; both wrapper calls of edit_file share one timeout. A tool call ends by the loop
+deadline; the status query after it, the sweep and numstat each get a third of the cleanup reserve,
+and nothing runs past start + max_wall_seconds.
 
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
@@ -54,6 +56,7 @@ from experimental.local_worker.gitstate import parse_status as _parse_status
 from experimental.local_worker.tools import (
     KILL_GRACE_SECONDS,
     ToolCall,
+    ToolDeadline,
     WorkerIsolationError,
     WorkerTools,
 )
@@ -125,9 +128,11 @@ class AgentLoop:
         self.tools, self.endpoint, self.task, self.settings = tools, endpoint, task, settings
         self.limits = settings.limits
         self.clock, self.now = clock, now
+        tools.clock = clock  # every wrapper call is held to deadlines on this clock
         self.abort_detail: str | None = None
         self._start = 0.0
         self._offset = 0.0
+        self._final = float("inf")  # start + max_wall_seconds: nothing runs past it
 
     def _elapsed(self) -> float:
         """Seconds on the logical episode clock (a resume starts at the parent's pre-cut time):
@@ -138,8 +143,15 @@ class AgentLoop:
         """Seconds this run itself has spent: what every recorded time uses (TurnLog t_*)."""
         return self._elapsed() - self._offset
 
-    def observe(self, timeout: float) -> TreeState:
-        self.tools.timeout_seconds = timeout
+    def _step_deadline(self) -> None:
+        """One bookkeeping step (status, sweep or numstat): a third of the cleanup reserve, its
+        kill grace included, and never past start + max_wall_seconds."""
+        self.tools.timeout_seconds = self.limits.step_seconds
+        step = self.limits.cleanup_reserve_seconds / 3
+        self.tools.deadline = min(self._final, self.clock() + step)
+
+    def observe(self) -> TreeState:
+        self._step_deadline()
         call = self.tools.status()
         return _parse_status(call.raw) if call.exit_code == 0 else TreeState(observed=False)
 
@@ -156,8 +168,9 @@ class AgentLoop:
         lim = self.limits
         self._start = self.clock() - elapsed_offset
         self._offset = elapsed_offset
-        deadline = self._start + lim.max_wall_seconds - lim.cleanup_reserve_seconds
-        base = self.observe(lim.step_seconds)
+        self._final = self._start + lim.max_wall_seconds
+        deadline = self._final - lim.cleanup_reserve_seconds
+        base = self.observe()
         if not base.observed or base.entries or base.head is None:
             raise RefusedStart("checkout is not a clean git tree at its base")
         if expected_base is not None and base.head != expected_base:
@@ -294,13 +307,16 @@ class AgentLoop:
         return t.run_tests([*RUN_TESTS_ARGS, *targets])
 
     def _execute(self, log: TurnLog, name: str, args: dict, deadline: float) -> str:
-        left = deadline - self.clock() - 2 * KILL_GRACE_SECONDS
-        if left <= 0:
-            log.error_category = "TIMEOUT"
-            raise TimeoutError("deadline passed before the tool call")
-        self.tools.timeout_seconds = min(self.limits.tool_cap_seconds, left)
+        # Every wrapper call of the tool (both of edit_file's, the sweep after a pytest run or a
+        # timeout, and their kill graces) ends by the loop deadline: tools.WorkerTools._timeout.
+        self.tools.timeout_seconds = self.limits.tool_cap_seconds
+        self.tools.deadline = deadline
         self.tools.turn_index = log.index
-        call = self._dispatch(name, args)
+        try:
+            call = self._dispatch(name, args)
+        except ToolDeadline:
+            log.error_category = "TIMEOUT"
+            raise
         log.exit_code, log.error_category = call.exit_code, call.error_category
         log.stdout_bytes, log.stdout_truncated = call.stdout_bytes, call.stdout_truncated
         log.duration_ms, log.exec_identity, log.isolation = (
@@ -311,17 +327,18 @@ class AgentLoop:
         log.action_type = call.action_type  # run_tests is recorded as the spec's "run_test"
         # The status query is one of the reserve's three steps (sweep and numstat the others),
         # so a turn ending at the deadline still observes its tree within max_wall_seconds.
-        log.tree = self.observe(self.limits.step_seconds)
+        log.tree = self.observe()
         if not log.tree.observed:
             raise _StatusUnavailable(f"git status failed after turn {log.index}")
         return render(call)
 
     def _cleanup(self, out: LoopOutcome) -> None:
-        self.tools.timeout_seconds = self.limits.step_seconds
         try:
+            self._step_deadline()
             sweep = self.tools.sweep()
+            self._step_deadline()
             stat = self.tools.numstat()
-        except WorkerIsolationError as exc:
+        except (WorkerIsolationError, ToolDeadline) as exc:
             out.cleanup = "failed"
             self.abort_detail = self.abort_detail or f"cleanup: {exc}"
             return

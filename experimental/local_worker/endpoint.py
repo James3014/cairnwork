@@ -130,7 +130,7 @@ class LoopbackEndpoint:
             resp = conn.getresponse()
             data = _read_bounded(resp, sock, lambda: self._remaining(deadline))
             status = resp.status
-            if fired.is_set():  # a shut-down socket reads as end of body: never parse that
+            if fired.is_set() or self.clock() >= deadline:  # never a reply from past it
                 raise EndpointTimeout("endpoint passed the deadline")
         except TimeoutError as exc:
             raise EndpointTimeout(f"endpoint timed out: {exc}") from None
