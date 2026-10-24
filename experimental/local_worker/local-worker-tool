@@ -14,7 +14,7 @@
 #   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
 #   local-worker-tool sweep  <run_root>                  kill this run's worker processes
 #   local-worker-tool status <run_root>                  git status of the checkout (porcelain v2)
-#   local-worker-tool numstat <run_root>                 git diff --numstat of the checkout vs HEAD
+#   local-worker-tool numstat <run_root>                 lines added/removed vs HEAD (one PATCH line)
 #
 # <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
 # created by the Owner (0750: the worker may not rename or plant entries in it) together with
@@ -175,21 +175,22 @@ sandboxed() {
 
 # The two fixed git queries (status, numstat): read-only on the checkout and .git, as the worker
 # under the query profile, with TMPDIR=<run_root>/q (Claude review of #239, NB1: under the tool
-# profile, test code left running by a pytest call could rewrite the query's output files). Git runs on a throwaway git dir in a fresh mktemp directory (Codex review of #239, B2
-# and the filter item): its HEAD is the real HEAD commit, the real objects are only an alternate,
-# its config is two lines written here (so no repository config applies: no filter, include,
-# driver or hook from .git/config), its info/attributes switches every filter and conversion off,
-# and it copies the real info/exclude. No system or global config either; HOME and
-# XDG_CONFIG_HOME are /var/empty (root-owned; never <run_root>/tmp, which the worker can write);
-# core.attributesFile and core.excludesFile are /dev/null; no fsmonitor, untracked cache, hooks,
-# optional index locks, external diff or textconv. The worker CAN write the worktree's
-# .gitattributes and .gitignore: attributes come from the empty tree (--attr-source) and the
-# overlay, so no .gitattributes can filter, convert or binarise anything, and numstat stages with
-# --force (ignored files count) into a fresh index read from HEAD and diffs with --text; those
-# two files are still part of the change they make. status reads the real index; nothing in .git
-# (nor anywhere in the checkout: the profile allows writes only in q) is ever written. Every file
-# the query writes is new (mkdir without -p, noclobber), inside the mktemp directory. The real git binary is used, not the /usr/bin/git shim (its xcrun cache write
-# outside the profile fails).
+# profile, test code left running by a pytest call could rewrite the query's output files). Git
+# runs on a throwaway git dir in a fresh mktemp directory (Codex review of #239, B2 and the filter
+# item): its HEAD is the real HEAD commit, the real objects are only an alternate, its config is
+# two lines written here (so no repository config applies: no filter, include, driver or hook
+# from .git/config), its info/attributes switches every filter and conversion off, and it copies
+# the real info/exclude. No system or global config either; HOME and XDG_CONFIG_HOME are
+# /var/empty (root-owned); core.attributesFile and core.excludesFile are /dev/null; no fsmonitor,
+# untracked cache, hooks, optional index locks, external diff or textconv. The worker CAN write
+# the worktree's .gitattributes and .gitignore: attributes come from the empty tree
+# (--attr-source) and the overlay, so no .gitattributes can filter, convert or binarise anything,
+# and numstat stages with --force (ignored files count) into a fresh index read from HEAD and
+# counts the lines of the --text patch (PATCH_COUNT); those two files are still part of the
+# change they make. status reads the real index; nothing in .git (nor anywhere in the checkout:
+# the profile allows writes only in q) is ever written. Every file the query writes is new (mkdir
+# without -p, noclobber), inside the mktemp directory. The real git binary is used, not the
+# /usr/bin/git shim (its xcrun cache write outside the profile fails).
 # shellcheck disable=SC2016  # expanded by the inner shell
 GIT_QUERY='set -euf
 c=$1
@@ -235,8 +236,31 @@ fi
 export GIT_INDEX_FILE="$q/index"
 step $G read-tree HEAD
 step $G add -A --force
-step $G diff --cached --text --no-ext-diff --no-textconv --no-renames --numstat -z HEAD
+D="--cached --no-ext-diff --no-textconv --no-renames"
+step $G diff $D --text -U0 HEAD
+/bin/mv "$q/out" "$q/patch"
+step $G diff $D --numstat HEAD
+/bin/mv "$q/out" "$q/numstat"
+step /usr/bin/env LC_ALL=C /usr/bin/awk "$4" "$q/patch" "$q/numstat"
 /bin/cat "$q/out"'
+
+# numstat's one line, "PATCH <added> <removed> <binary_files_changed>" (Claude review of #239,
+# NB2: --text does not reach --numstat, which counts a file git takes for binary, e.g. one with a
+# NUL byte, as "-" lines, so one NUL byte could hide a whole file's lines). Added and removed are
+# the sums of the -U0 hunk headers of the --text patch, so every file's lines count, binary or
+# not; binary_files_changed is how many files numstat itself would have shown as "-". Only the
+# patch's hunk headers start with "@@" (content lines start with "+", "-", " " or "\"; the file
+# header lines with fixed words), and a header without ",<count>" means one line.
+# shellcheck disable=SC2016  # awk's own variables
+PATCH_COUNT='FILENAME == ARGV[1] {
+  if ($0 ~ /^@@ -/) {
+    n = split($2, a, ","); r += (n > 1) ? a[2] : 1
+    n = split($3, b, ","); d += (n > 1) ? b[2] : 1
+  }
+  next
+}
+/^-\t-\t/ { bin++ }
+END { printf "PATCH %.0f %.0f %.0f\n", d, r, bin }'
 
 real_git() {
   for g in /Library/Developer/CommandLineTools/usr/bin/git \
@@ -336,7 +360,7 @@ case "$ACTION" in
   status | numstat)
     GIT_BIN=$(real_git) || exit 64
     sandboxed "$(query_profile)" "$RUN_ROOT/q" /bin/sh -c "$GIT_QUERY" sh "$CHECKOUT" "$ACTION" \
-      "$GIT_BIN"
+      "$GIT_BIN" "$PATCH_COUNT"
     ;;
   sweep)
     ME=$$

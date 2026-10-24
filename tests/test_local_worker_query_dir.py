@@ -128,7 +128,7 @@ def test_sandboxed_writer_loop_cannot_falsify_status_or_numstat(runs):
             assert status.returncode == 0 and tree.observed and tree.head == head
             assert "? new.py" in tree.entries, status.stdout
             numstat = run(runs, "numstat", root)
-            assert numstat.returncode == 0 and parse_numstat(numstat.stdout) == (2, 0)
+            assert numstat.returncode == 0 and parse_numstat(numstat.stdout) == (2, 0, 0)
         (tmp / "stop").write_text("")
         assert _wait_for(tmp / "writes") == "0"  # no gitq.* directory was ever in its reach
     finally:

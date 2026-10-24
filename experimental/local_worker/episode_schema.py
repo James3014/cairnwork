@@ -79,6 +79,7 @@ VERIFICATION: dict[str, tuple[Any, bool]] = {
     "exit_reason": (STR, False),
     "patch_lines_added": (INT, True),
     "patch_lines_removed": (INT, True),
+    "binary_files_changed": (INT, True),  # files git's numstat takes for binary (still counted)
     **{k: ((STR if k == "verdict_category" else BOOL), True) for k in VERIFICATION_POST_STEP},
 }
 SPEC_FEEDBACK: dict[str, tuple[Any, bool]] = {

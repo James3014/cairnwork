@@ -48,7 +48,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     assert tree.paths() == ["a.txt", "new dir/b.py", "x.log"]
     stat = run(runs, "numstat", root)
     # staged with --force: the ignored x.log counts too (every file the run changed)
-    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0), stat.stdout
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0, 0), stat.stdout
     assert _git_snapshot(co) == before  # .git never written: same paths, modes and bytes
     assert list((runs / TAG / "tmp").iterdir()) == []  # the queries never write tmp
     assert list((runs / TAG / "q").iterdir()) == []  # and remove their throwaway index from q
@@ -76,7 +76,7 @@ def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
     assert run(runs, "write", root, "a.txt", stdin=b"hello\nworld\n").returncode == 0
     assert run(runs, "write", root, "new/b.py", stdin=b"x\ny\nz\n").returncode == 0
     base = parse_numstat(run(runs, "numstat", root).stdout)
-    assert base == (4, 0)
+    assert base == (4, 0, 0)
     home = runs / TAG / "tmp"  # the sandboxed HOME of every other action
     (home / ".config" / "git").mkdir(parents=True)
     (home / ".config" / "git" / "attributes").write_text("* -diff\n")
@@ -84,9 +84,9 @@ def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
     (home / ".gitconfig").write_text("[core]\n\tattributesFile = ~/.config/git/attributes\n")
     assert parse_numstat(run(runs, "numstat", root).stdout) == base
     assert run(runs, "write", root, ".gitattributes", stdin=b"* -diff\n").returncode == 0
-    assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0)  # +1: the file itself
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0, 0)  # +1: the file itself
     assert run(runs, "write", root, "sub/.gitignore", stdin=b"*\n").returncode == 0
-    assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0)  # nothing hidden
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0, 0)  # nothing hidden
 
 
 def test_git_query_temp_dir_is_made_by_mktemp():
@@ -163,7 +163,7 @@ def test_git_queries_run_no_configured_filter_and_leave_git_unchanged(runs):
     assert tree.observed and tree.paths() == want
     assert "! x.tmp" in tree.entries  # the real info/exclude still applies
     stat = run(runs, "numstat", root)
-    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (8, 1), stat.stdout
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (8, 1, 0), stat.stdout
     assert list(tmp.iterdir()) == []  # no marker, no temp dir
     assert _git_snapshot(co) == before
 

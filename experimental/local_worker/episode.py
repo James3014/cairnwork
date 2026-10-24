@@ -162,7 +162,7 @@ class LoopOutcome:
     abort_cause: str | None = None
     cleanup: str = "skipped"
     needs_spec: bool = False
-    patch: tuple[int, int] | None = None
+    patch: tuple[int, int, int] | None = None  # added, removed, binary_files_changed
     started_at: str = ""
     ended_at: str = ""
     wall_seconds: float = 0.0  # this run's own seconds
@@ -186,7 +186,7 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
     real timestamps."""
     parent_wall = meta.get("parent_pre_cut_wall_seconds") or 0.0
     turns = [public_turn(t, out.base) for t in out.turns]
-    added, removed = out.patch if out.patch is not None else (None, None)
+    added, removed, binary = out.patch if out.patch is not None else (None, None, None)
     record = {
         "schema_version": SCHEMA_VERSION,
         **meta,
@@ -206,6 +206,7 @@ def build_record(meta: dict, out: LoopOutcome, cut_seconds: float = 900.0) -> di
             "exit_reason": out.exit_reason,
             "patch_lines_added": added,
             "patch_lines_removed": removed,
+            "binary_files_changed": binary,
             **dict.fromkeys(VERIFICATION_POST_STEP),
         },
         "spec_feedback": {

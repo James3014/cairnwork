@@ -67,8 +67,9 @@ def _termination(rec: dict) -> None:
     status = turns[-1]["tool_args"].get("status") if finished else None
     if rec["spec_feedback"]["needs_spec"] != (status == "NEEDS_SPEC"):
         raise SchemaError("spec_feedback.needs_spec must match finish(status=NEEDS_SPEC)")
-    if (added is None) != (rec["verification"]["patch_lines_removed"] is None):
-        raise SchemaError("patch_lines_added and patch_lines_removed are null together")
+    patch = [rec["verification"][k] for k in ("patch_lines_removed", "binary_files_changed")]
+    if any((v is None) != (added is None) for v in patch):
+        raise SchemaError("patch_lines_added, _removed and binary_files_changed are null together")
     if term["cleanup"] == "ok" and added is None:
         raise SchemaError("a cleanup that went ok has patch counts")
 

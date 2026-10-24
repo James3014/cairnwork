@@ -112,15 +112,15 @@ class World:
         return ("\0".join(recs) + "\0").encode()
 
     def numstat(self) -> bytes:
-        out = []
+        add = rem = binary = 0
         for p in self.changed():  # like the wrapper: staged with --force, ignored files count
             old = self.base.get(p, "").splitlines()
             new = self.files.get(p, "").splitlines()
             diff = list(difflib.ndiff(old, new))
-            add = sum(d.startswith("+ ") for d in diff)
-            rem = sum(d.startswith("- ") for d in diff)
-            out.append(f"{add}\t{rem}\t{p}")
-        return ("\0".join(out) + ("\0" if out else "")).encode()
+            add += sum(d.startswith("+ ") for d in diff)
+            rem += sum(d.startswith("- ") for d in diff)
+            binary += "\0" in self.files.get(p, "") + self.base.get(p, "")
+        return f"PATCH {add} {rem} {binary}\n".encode()
 
 
 def reply(

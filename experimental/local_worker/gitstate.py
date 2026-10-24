@@ -2,8 +2,9 @@
 
 ``status`` is ``git status --porcelain=v2 --branch -z -uall --renames --ignored=matching`` (ignored
 files are listed too, so a write to an ignored path still changes the observed tree); ``numstat``
-is ``git diff --numstat -z`` against HEAD with untracked files included. Output that does not parse
-is never guessed into a tree: it is reported as not observed.
+is one line, ``PATCH <added> <removed> <binary_files_changed>``, counted from the ``--text -U0``
+patch against HEAD with untracked and ignored files included. Output that does not parse is never
+guessed into a tree or a count: it is reported as not observed.
 """
 
 from __future__ import annotations
@@ -60,15 +61,20 @@ def parse_status(raw: bytes) -> TreeState:
     return TreeState(observed=True, head=head, entries=tuple(sorted(entries)))
 
 
-def parse_numstat(raw: bytes) -> tuple[int, int] | None:
-    """Sum ``git diff --numstat -z`` (binary files count 0); None if a record does not parse."""
-    added = removed = 0
-    for rec in raw.decode("utf-8", errors="surrogateescape").split("\0"):
-        if not rec:
-            continue
-        m = re.match(r"(\d+|-)\t(\d+|-)\t", rec)
-        if not m:
-            return None
-        added += int(m.group(1)) if m.group(1) != "-" else 0
-        removed += int(m.group(2)) if m.group(2) != "-" else 0
-    return added, removed
+_PATCH = re.compile(rb"PATCH (\d{1,18}) (\d{1,18}) (\d{1,18})\n")
+
+
+def parse_numstat(raw: bytes) -> tuple[int, int, int] | None:
+    """(lines added, lines removed, binary_files_changed) from the wrapper's numstat line.
+
+    Claude review of #239, NB2: ``git diff --numstat`` shows a file it takes for binary (one NUL
+    byte is enough) as ``-`` lines, and ``--text`` does not change that, so summing numstat let
+    one NUL byte hide a whole file's patch. The wrapper therefore counts added and removed lines
+    from the hunk headers of ``git diff --cached --text -U0`` (every file's lines, binary or not)
+    and also reports how many files numstat would have shown as binary, so a reader can see
+    which counts would have been hidden. Anything but exactly that one line is None."""
+    m = _PATCH.fullmatch(raw)
+    if m is None:
+        return None
+    added, removed, binary = (int(g) for g in m.groups())
+    return added, removed, binary
