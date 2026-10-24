@@ -91,7 +91,7 @@ def _run_scenarios(repo, run_root, account):
     python = None if account is not None else sys.executable
     runs = run_verifiers(repo, head, specs, run_root, run_id, python=python, account=account)
     for run in runs:
-        assert run.ran, run.log_path.read_text()  # the test really ran; no setup failure
+        assert run.ran, run.log_path.read_text()  # the guard saw the test run and pass
     assert not list(run_root.glob(f"{run_id}-v*.work")), "a work directory was left behind"
     return {run.spec.verifier_id: run for run in runs}
 

@@ -241,8 +241,10 @@ def _remove_checkout(work: Path, clone_id: str, account) -> None:
     without ever walking a tree the account wrote with chmod. remove_attempt_clone is the owner
     path only: its chmod 0o700 pass would shut the account out of its own leftovers."""
     if account is not None:
-        account.remove(work)
-        shutil.rmtree(work, ignore_errors=True)
+        try:
+            account.remove(work)
+        finally:  # whatever the account's removal did, the owner removes what it can
+            shutil.rmtree(work, ignore_errors=True)
         return
     try:
         remove_attempt_clone(work, clone_id)
