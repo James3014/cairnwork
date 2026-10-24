@@ -118,6 +118,44 @@ def test_a_probe_that_raises_still_leaves_the_turns_that_ran(tmp_path, monkeypat
     assert _record(workdir)["extra_turns"] == 1
 
 
+class Raising:
+    """An inner worker that raises on the given turn (1 = the first, unprobed turn)."""
+
+    def __init__(self, on_turn):
+        self.on_turn, self.turns = on_turn, 0
+
+    def run(self, workdir, task) -> None:
+        self.turns += 1
+        if self.turns == self.on_turn:
+            raise RuntimeError("worker failed")
+
+
+@pytest.mark.parametrize(("on_turn", "extra"), [(1, 0), (2, 1), (3, 2)])
+def test_an_inner_worker_that_raises_still_leaves_the_turns_started(
+    tmp_path, monkeypatch, on_turn, extra
+):
+    _fake_probe(monkeypatch, ["x", "x", "x"])
+    workdir = tmp_path / "attempt-1"
+    workdir.mkdir()
+    worker = VisibleTestsWorker(Raising(on_turn), retries=3, pass_fail_only=True)
+    with pytest.raises(RuntimeError, match="worker failed"):
+        worker.run(workdir, Task())
+    assert _record(workdir)["extra_turns"] == extra
+
+
+def test_the_record_never_follows_a_planted_symlink(tmp_path, monkeypatch):
+    _fake_probe(monkeypatch, [None])
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    workdir = tmp_path / "attempt-1"
+    workdir.mkdir()
+    (tmp_path / "attempt-1.visible-tests.json.tmp").symlink_to(victim)
+    VisibleTestsWorker(Quiet(), retries=1, pass_fail_only=True).run(workdir, Task())
+    assert victim.read_text() == "untouched"
+    assert _record(workdir)["extra_turns"] == 0
+    assert not (tmp_path / "attempt-1.visible-tests.json").is_symlink()
+
+
 @pytest.mark.sandbox
 @pytest.mark.parametrize("with_account", [False, True])
 def test_a_real_run_records_counts_and_no_test_names(

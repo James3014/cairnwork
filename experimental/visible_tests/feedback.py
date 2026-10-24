@@ -18,7 +18,7 @@ candidate-controlled text (no test, verifier or file names):
 * ``schema``: 1
 * ``feedback_source``: ``"visible-tests:pass-fail-only"`` or ``"visible-tests:account-detail"``
 * ``retries``: the extra turns allowed
-* ``extra_turns``: extra turns that actually ran (0..retries)
+* ``extra_turns``: extra turns started (0..retries); a turn whose inner run raises still counts
 
 What the probe reuses and what the worker can see:
 
@@ -55,9 +55,9 @@ What the probe reuses and what the worker can see:
   next turn starts.
 
 A probe failure (sandbox, account, git) propagates, so the pipeline records the attempt as
-WORKER_FAILED rather than silently judging an unprobed edit. Not wired into any runner: a run that
-wants it builds ``VisibleTestsWorker(AgyWorker(...), account=...)`` itself; core never imports
-this package.
+WORKER_FAILED rather than silently judging an unprobed edit. Not wired into any runner: a run
+that wants it builds ``VisibleTestsWorker(AgyWorker(...), retries=1, account=...)`` itself; core
+never imports this package.
 """
 
 from __future__ import annotations
@@ -177,7 +177,11 @@ class VisibleTestsWorker:
         }
         path = workdir.parent / f"{workdir.name}{RECORD_SUFFIX}"
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
+        if os.path.lexists(tmp):
+            os.unlink(tmp)  # a leftover from a failed write; never followed if it is a symlink
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(json.dumps(record, sort_keys=True) + "\n")
         os.replace(tmp, path)
 
     def probe(self, workdir: Path, task, specs: tuple[VerifierSpec, ...], turn: int) -> str | None:
