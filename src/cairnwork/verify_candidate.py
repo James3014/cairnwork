@@ -215,8 +215,11 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
     try:
         if record:
             os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
-        elif marker.exists():
+        else:
+            marker.lstat()  # any other lookup error propagates: unknown is never "unused"
             raise FileExistsError
+    except FileNotFoundError:
+        return  # record=False: not used yet
     except FileExistsError:
         raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
 

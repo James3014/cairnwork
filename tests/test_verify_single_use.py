@@ -80,3 +80,32 @@ def test_a_test_commit_is_single_use_through_a_mirror_too(project, state, tmp_pa
     good = candidate(project, base, {"src/calc.py": FIX})
     code, out = verify(state, project, base, good, "--test-commit", test_commit, tests=(verifier,))
     assert code == 2 and out["reason"].startswith("TEST_COMMIT_ALREADY_EXPOSED")
+
+
+@pytest.mark.parametrize("make", ["file", "dangling-link", "unreadable"])
+def test_the_pre_check_never_reads_an_unknown_marker_as_unused(tmp_path, make):
+    import os
+
+    from cairnwork.deferred_tests import TestCommitRejected
+    from cairnwork.intake import Intake
+    from cairnwork.verify_candidate import _burn
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+    oid = "b" * 40
+    used = intake.state / "verify-used-tests"
+    _burn(intake, oid, record=False)  # not used yet: passes
+    marker = used / oid
+    if make == "file":
+        marker.write_text("")
+    elif make == "dangling-link":
+        marker.symlink_to(used / "gone")
+    elif os.geteuid() == 0:
+        pytest.skip("root can look inside a mode-000 directory")
+    else:
+        used.chmod(0o000)
+    try:
+        with pytest.raises((TestCommitRejected, PermissionError)):
+            _burn(intake, oid, record=False)
+    finally:
+        used.chmod(0o700)
