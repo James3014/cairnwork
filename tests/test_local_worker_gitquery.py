@@ -7,6 +7,10 @@ import pytest
 from local_worker_fakes import TAG, WRAPPER, make_runs
 from local_worker_fakes import run_wrapper as run
 
+# A commit may start git's auto maintenance in the background; its lock files would race the
+# byte-for-byte .git snapshot (seen on CI: FileNotFoundError on .git/objects/maintenance.lock).
+NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+
 
 @pytest.fixture
 def runs(tmp_path):
@@ -30,7 +34,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
     (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
     subprocess.run([*git, "add", "-A"], check=True)
@@ -59,7 +63,7 @@ def _git_checkout(runs):
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
     (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
     subprocess.run([*git, "add", "-A"], check=True)
@@ -136,7 +140,7 @@ def test_git_queries_run_no_configured_filter_and_leave_git_unchanged(runs):
     from experimental.local_worker.gitstate import parse_numstat, parse_status
 
     co, root = _git_checkout(runs)
-    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t", *NO_AUTO_MAINTENANCE]
     (co / "t.py").write_text("base1\n")  # tracked; the change keeps its size: status must hash it
     subprocess.run([*git, "add", "t.py"], check=True)
     subprocess.run([*git, "commit", "-qm", "t"], check=True)
