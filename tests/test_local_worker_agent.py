@@ -8,7 +8,7 @@ from local_worker_fakes import BASE_SHA, META, TASK, World, make_loop, reply
 from experimental.local_worker import agent_protocol, cuts, episode, tools
 from experimental.local_worker.agent import RefusedStart, initial_messages
 from experimental.local_worker.cuts import first_edit_cut
-from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
+from experimental.local_worker.endpoint import EndpointError, EndpointTimeout, first_message
 from experimental.local_worker.episode import build_record
 from experimental.local_worker.episode_schema import SchemaError, validate_record
 from experimental.local_worker.redact import path_digest
@@ -376,3 +376,25 @@ def test_validator_checks_the_new_fields(tmp_path, corrupt):
     corrupt(rec)
     with pytest.raises(SchemaError):
         validate_record(rec)
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        {"choices": [{"message": "a string"}]},
+        {"choices": [{"message": ["a", "list"]}]},
+        {"choices": [{"message": None}]},
+        {"choices": ["not an object"]},
+        {"choices": []},
+        {"choices": "x"},
+        {},
+    ],
+)
+def test_first_message_refuses_anything_but_an_object(resp):
+    with pytest.raises(EndpointError, match="no choices\\[0\\].message object"):
+        first_message(resp)
+
+
+def test_first_message_returns_the_message_object():
+    msg = {"role": "assistant", "content": "hi"}
+    assert first_message({"choices": [{"message": msg}, {"message": {}}]}) is msg
