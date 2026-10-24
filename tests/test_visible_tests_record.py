@@ -4,6 +4,7 @@ actually ran and a fixed feedback source, next to the attempt, with no candidate
 import json
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from test_visible_tests import (
@@ -91,7 +92,7 @@ def test_no_visible_specs_still_records_zero_extra_turns(tmp_path, monkeypatch):
 
 def test_the_source_follows_the_mode(tmp_path, monkeypatch):
     _fake_probe(monkeypatch, [None])
-    account = SimpleNamespace(run_root=tmp_path / "acct")
+    account: Any = SimpleNamespace(run_root=tmp_path / "acct")  # a stand-in VerifierAccount
     rec = _go(tmp_path, VisibleTestsWorker(Quiet(), retries=1, account=account))
     assert rec["feedback_source"] == "visible-tests:account-detail"
     rec = _go(tmp_path, VisibleTestsWorker(Quiet(), retries=1, pass_fail_only=True))
@@ -165,7 +166,7 @@ def test_a_real_run_records_counts_and_no_test_names(
     with_account,  # noqa: F811
 ):
     inner = TurnWorker([CALC_WRONG, CALC_WRONG, CALC_FIX])
-    account: FakeAccount | None = None
+    account: Any = None  # a FakeAccount stand-in for VerifierAccount, or None
     if with_account:
         account = FakeAccount((tmp_path / "account-runs").resolve())
         _with_account(monkeypatch, account)  # routes run_verifiers into the account's root
