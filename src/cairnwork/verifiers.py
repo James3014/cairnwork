@@ -12,7 +12,8 @@ final comparison (treecompare.py) of paths, bytes, symlink targets and the owner
 does not cover the top-level .git (the verifier's scratch: never used by the owner afterwards),
 files next to the checkout, times, ownership, link counts or other mode bits, and a change made
 and undone during the run is not seen. Under a verifier account the checkout is the account's
-own copy, so a test may write, utime and chmod it as in owner mode (account_checkout.py, #240).
+own copy: a test may write, utime and chmod it, and it is compared, as in owner mode (#240,
+account_checkout.py).
 The pytest run must also leave a JUnit report showing at least one test run and none failed,
 errored, skipped or xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with
 rootdir and confcutdir at the checkout, so no ini in the candidate or a parent directory
@@ -53,6 +54,7 @@ import hashlib
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -60,17 +62,16 @@ from pathlib import Path
 
 import cairnwork_sandbox
 from cairnwork import pytest_config, report_channel, report_guard
-from cairnwork.account_checkout import make_account_checkout
+from cairnwork.account_checkout import checkout_differences, make_account_checkout
+from cairnwork.account_checkout import remove_checkout as _remove_checkout
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
-from cairnwork.treecompare import tree_differences
 from cairnwork.verifier_account import VerifierAccount, VerifierAccountError, lock_wait_seconds
 from cairnwork.verifier_exec import (  # low-level run primitives, split out for the 400-line cap
     _execute,
     _file_sha256,
     _record_digest,
-    _same_directory,
     _write_new,
 )
 from cairnwork.verifier_spec import (  # re-exported for existing importers
@@ -79,7 +80,7 @@ from cairnwork.verifier_spec import (  # re-exported for existing importers
     parse_verifier,
     protected_verifier_inputs,
 )
-from cairnwork.workspace import WorkspaceError, create_attempt_clone, remove_attempt_clone
+from cairnwork.workspace import create_attempt_clone
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
@@ -206,7 +207,8 @@ def _run_all(
         clone_id = f"{run_id}-v{index}"
         # The checkout sits alone in its own work directory, which the tests may write:
         # some create files next to their repository (Nexus-new: nexus-runtime-targets),
-        # and that must stay inside this run. Sticky: the account cannot move the checkout.
+        # and that must stay inside this run. Under the account the checkout is its own copy, which
+        # it may rename (sticky only protects the owner's names): _same_directory catches that.
         work = Path(run_root) / f"{clone_id}.work"
         work.parent.mkdir(parents=True, exist_ok=True)
         work.mkdir(mode=0o700)
@@ -237,32 +239,15 @@ def _run_all(
     return tuple(runs)
 
 
-def _remove_checkout(work: Path, clone_id: str, account) -> None:
-    """Remove a verifier's work dir and checkout; a leftover is only disk space, never a verdict,
-    but it is reported (ALERT on stderr), never silent.
-
-    Under the account the checkout is the account's own copy (#240, account_checkout.py): only
-    the account can remove it (``account.remove``), and that is what guarantees it goes; the owner
-    then removes the rest of ``work`` (it owns ``work`` and any staging clone a failure left)
-    without chmodding or walking the account's tree. remove_attempt_clone is the owner path only:
-    its chmod 0o700 pass cannot touch the account's directories."""
-    try:
-        if account is not None:
-            account.remove(work)
-        else:
-            remove_attempt_clone(work, clone_id)
-    except WorkspaceError:
-        pass  # the run's verdict stands; what is left is reported below
-    finally:  # whatever the first removal did, the owner removes what it can
-        shutil.rmtree(work, ignore_errors=True)
-        if os.path.lexists(work):
-            print(f"ALERT verifier cleanup: {work} was not removed", file=sys.stderr, flush=True)
-
-
 def _remove_scratch(dirs, account) -> None:
+    """HOME and TMPDIR of a finished run: as with the checkout (remove_checkout), a failing removal
+    never costs the verdict, which is decided by now."""
     for scratch in dirs:
         if account is not None:
-            account.remove(scratch)
+            try:
+                account.remove(scratch)
+            except (VerifierAccountError, OSError, subprocess.SubprocessError):
+                pass  # the owner's rmtree below removes what it can; the rest is disk space
         shutil.rmtree(scratch, ignore_errors=True)
 
 
@@ -352,10 +337,7 @@ def _run_one_in(
     else:
         _write_new(log_path, b"no sandbox backend available: verifier not executed\n")
         returncode, timed_out, survivors = None, False, 0
-    if _same_directory(checkout, before):  # not renamed away, no symlink put in place
-        mutated = tuple(tree_differences(repo, candidate_commit, checkout))
-    else:
-        mutated = ("checkout replaced",)
+    mutated = checkout_differences(repo, candidate_commit, checkout, before, account, python)
     verdict = channel.read() if channel else report_guard.read_verdict(verdict_path, verdict_nonce)
     ran = profile is not None and verdict.ran
     clean = not timed_out and not mutated and survivors == 0

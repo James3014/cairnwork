@@ -9,6 +9,7 @@ removed whatever happens. The real account path is in test_checkout_write_parity
 
 import os
 import pwd
+import shutil
 import stat
 import subprocess
 import sys
@@ -17,14 +18,14 @@ from pathlib import Path
 import pytest
 from conftest import git
 
-from cairnwork.account_checkout import COPY_HELPER, STAGE, make_account_checkout
+from cairnwork.account_checkout import COPY_HELPER, SHARE_HELPER, STAGE, make_account_checkout
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.workspace import WorkspaceError
 
 
-def _copy(source, target, timeout=20):
+def _copy(source, target, timeout=20, prefix=""):
     return subprocess.run(  # noqa: S603 - the helper under test
-        [sys.executable, "-I", "-c", COPY_HELPER, str(source), str(target)],
+        [sys.executable, "-I", "-S", "-c", prefix + COPY_HELPER, str(source), str(target)],
         capture_output=True, text=True, timeout=timeout, check=False,
     )  # fmt: skip
 
@@ -53,6 +54,85 @@ def test_copy_keeps_bytes_modes_times_and_symlinks(tmp_path):
     assert not (dst / "secret").exists()  # the symlinked directory was not copied into dst
 
 
+def test_copy_writes_every_byte_when_writes_are_short(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "f.bin").write_bytes(bytes(range(256)) * 41)
+    short = "import os\n_write = os.write\nos.write = lambda fd, b: _write(fd, bytes(b[:2]))\n"
+    done = _copy(source, tmp_path / "dst", prefix=short)
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "dst" / "f.bin").read_bytes() == (source / "f.bin").read_bytes()
+
+
+def _deep(root, depth):
+    path = root
+    for _ in range(depth):
+        path = path / "d"
+    path.mkdir(parents=True)
+    (path / "leaf.txt").write_text("leaf")
+    return path.relative_to(root)
+
+
+@pytest.mark.parametrize("helper", ["copy", "share"])
+def test_the_helpers_walk_any_depth(tmp_path, helper):
+    """Iterative, not recursive: a tree deeper than the recursion limit is no error."""
+    source = tmp_path / "src"
+    leaf = _deep(source, 120)
+    low = "import sys\nsys.setrecursionlimit(60)\n"
+    if helper == "copy":
+        done = _copy(source, tmp_path / "dst", prefix=low)
+        assert done.returncode == 0, done.stderr[-300:]
+        assert (tmp_path / "dst" / leaf / "leaf.txt").read_text() == "leaf"
+    else:
+        os.chmod(source / leaf / "leaf.txt", 0o600)
+        done = _share(source, prefix=low)
+        assert done.returncode == 0, done.stderr[-300:]
+        assert stat.S_IMODE(os.lstat(source / leaf / "leaf.txt").st_mode) == 0o644
+
+
+def _share(checkout, prefix=""):
+    return subprocess.run(  # noqa: S603 - the helper under test
+        [sys.executable, "-I", "-S", "-c", prefix + SHARE_HELPER, str(checkout)],
+        capture_output=True, text=True, timeout=20, check=False,
+    )  # fmt: skip
+
+
+def test_share_gives_group_and_other_what_the_owner_may_read(tmp_path):
+    """User r and x are copied to group and other; nothing else changes. A 0600 file and a 0700
+    directory become readable, a path closed to its owner stays closed, links are not followed,
+    and the top-level .git is left alone."""
+    root, outside = tmp_path / "co", tmp_path / "outside"
+    (root / "d700").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / "sub" / ".git").mkdir(parents=True)
+    outside.write_text("o")
+    os.chmod(outside, 0o600)
+    modes = {"f600": 0o600, "f700": 0o700, "f000": 0, "f200": 0o200, "d700/f640": 0o640}
+    for name, mode in modes.items():
+        (root / name).write_text("x")
+        os.chmod(root / name, mode)
+    (root / "link").symlink_to(outside)
+    (root / ".git" / "config").write_text("c")
+    os.chmod(root / ".git" / "config", 0o600)
+    (root / "sub" / ".git" / "f").write_text("s")
+    os.chmod(root / "sub" / ".git" / "f", 0o600)
+    os.chmod(root / "d700", 0o700)
+    (root / "d000").mkdir(mode=0)
+    done = _share(root)
+    assert done.returncode == 0, done.stderr
+    expected = {
+        "f600": 0o644, "f700": 0o755, "f000": 0, "f200": 0o200, "d700/f640": 0o644,
+        "d700": 0o755, "d000": 0, ".git/config": 0o600, "sub/.git/f": 0o644,
+    }  # fmt: skip
+    assert {n: stat.S_IMODE(os.lstat(root / n).st_mode) for n in expected} == expected
+    assert stat.S_IMODE(os.lstat(outside).st_mode) == 0o600  # the link's target is untouched
+    os.chmod(root / "d000", 0o700)
+
+
+def test_the_owner_rmtree_never_follows_a_symlink_out():
+    assert shutil.rmtree.avoids_symlink_attacks  # what remove_checkout's fallback relies on
+
+
 def test_copy_refuses_a_fifo_without_opening_it(tmp_path):
     source = tmp_path / "src"
     source.mkdir()
@@ -74,11 +154,15 @@ class _LocalAccount:
     grant_read = staticmethod(VerifierAccount.grant_read)
 
     def __init__(self, user, root, tamper=""):
-        self.user, self.root, self.tamper = user, root, tamper
+        self.user, self.root, self.tamper, self.killed = user, root, tamper, 0
 
     def wrap(self, argv, profile, env=None):
-        assert profile is None
-        return [*argv[:3], argv[3] + self.tamper, *argv[4:]]
+        assert profile is None and argv[1:4] == ["-I", "-S", "-c"]
+        return [*argv[:4], argv[4] + self.tamper, *argv[5:]]
+
+    def kill_all(self):
+        self.killed += 1
+        return 0
 
 
 def _make(repo, tmp_path, account):
@@ -121,3 +205,23 @@ def test_a_failed_copy_is_an_error_and_the_staging_clone_goes(repo, tmp_path):
         make()
     assert not (work / STAGE).exists()
     assert Path(work).is_dir()  # the work dir itself is the caller's to remove
+
+
+def test_a_copy_target_swapped_for_a_symlink_is_refused(repo, tmp_path):
+    """lstat, not stat: a symlink to a directory the account owns is not the copy."""
+    tamper = "\nos.rename(target, target + '.real')\nos.symlink(target + '.real', target)\n"
+    work, make = _make(repo, tmp_path, _LocalAccount(ME, tmp_path, tamper))
+    with pytest.raises(WorkspaceError, match="not a directory owned by"):
+        make()
+
+
+def test_a_copy_that_times_out_ends_the_helper(repo, tmp_path, monkeypatch):
+    import cairnwork.account_checkout as module
+
+    monkeypatch.setattr(module, "COPY_TIMEOUT_SECONDS", 1)
+    account = _LocalAccount(ME, tmp_path, "\nimport time\ntime.sleep(30)\n")
+    work, make = _make(repo, tmp_path, account)
+    with pytest.raises(WorkspaceError, match="account copy failed"):
+        make()
+    assert account.killed == 1  # kill_all: subprocess.run ended only the outer process
+    assert not (work / STAGE).exists()

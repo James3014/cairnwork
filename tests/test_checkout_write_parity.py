@@ -2,18 +2,24 @@
 
 The same candidate tests run in both modes against one ``EXPECTED`` table. Writing and cleaning up,
 setting explicit times (a template cache keyed by mtime), chmod and restore, an atomic replace with
-the same bytes, and deleting the top-level ``.git`` (the verifier's scratch, never judged) pass. A
-leftover file (ignored by .gitignore or not), a retained modification, ``.git`` moved to a path
-inside the checkout, a symlink swapped in, or a directory left without permissions is "checkout
-changed". The checkout is owned by the uid the test runs as (in account mode: the account's own
-copy), and every work dir, that copy included, is removed afterwards without a cleanup ALERT. The
-account side is one ``run_verifiers`` call (one lock hold). A link witness checks that links the
-test makes to files outside its checkout leave those files' contents, modes and link counts as they
-were, and a crash leftover (the account's copy with a mode-0 directory, plus the owner's staging
-clone) is removed by recovery."""
+the same bytes (also from a mode-0600 temporary file, left at 0600), a tracked directory left at
+0700, and deleting the top-level ``.git`` (the verifier's scratch, never judged) pass. A leftover
+file (ignored by .gitignore or not), a retained modification, ``.git`` moved to a path inside the
+checkout, a symlink swapped in, a new directory left without permissions, or a tracked file or
+directory closed to its own owner (0000: unreadable to the owner in owner mode, so in both) is
+"checkout changed". The checkout is owned by the uid the test runs as (in account mode: the
+account's own copy), and every work dir, that copy included, is removed afterwards without a
+cleanup ALERT. The account side is one ``run_verifiers`` call (one lock hold). A link witness
+checks that links the test makes to files outside its checkout and to the run's own ini, log and
+guard leave those files' contents, modes, owners and link counts as they were, and a crash leftover
+(the account's copy with a mode-0 directory, plus the owner's staging clone) is removed by
+recovery.
+"""
 
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,7 +32,7 @@ from test_recovery import project as project  # noqa: F401 - fixture
 import cairnwork.verifiers as verifiers
 from cairnwork.account_checkout import STAGE
 from cairnwork.recovery import recover
-from cairnwork.verifier_account import VerifierAccount
+from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
 from cairnwork.verifiers import parse_verifier, run_verifiers
 
 ACCOUNT = VerifierAccount()
@@ -67,6 +73,18 @@ SCENARIOS = {
         "    os.chmod(tmp, data.stat().st_mode & 0o7777)\n"
         "    os.replace(tmp, data)\n"
     ),
+    "replace0600": (  # identical bytes from a mode-0600 temporary file, left at 0600
+        "def test_replace0600():\n"
+        f"    data = {DATA}\n"
+        "    tmp = data.with_name('data.tmp')\n"
+        "    tmp.write_bytes(data.read_bytes())\n"
+        "    os.chmod(tmp, 0o600)\n"
+        "    os.replace(tmp, data)\n"
+    ),
+    "dir0700": "def test_dir0700():\n    os.chmod(ROOT / 'pkg' / 'sub', 0o700)\n",
+    # closed to its own owner: unreadable to the comparing owner in owner mode, so in both
+    "file0000": f"def test_file0000():\n    os.chmod({DATA}, 0)\n",
+    "dir0000": "def test_dir0000():\n    os.chmod(ROOT / 'pkg' / 'sub', 0)\n",
     "gitdelete": "def test_gitdelete():\n    shutil.rmtree(ROOT / '.git')\n",
     "owns": (  # the checkout is the running uid's own (account mode: the account's copy)
         f"def test_owns():\n    assert ROOT.stat().st_uid == {DATA}.stat().st_uid == os.getuid()\n"
@@ -98,6 +116,10 @@ EXPECTED = {
     "chmod": (True, set()),
     "replace": (True, set()),
     "owns": (True, set()),  # under the account: its own copy (account_checkout.py)
+    "replace0600": (True, set()),  # mode bits other than the owner's x are not judged
+    "dir0700": (True, set()),
+    "file0000": (False, {"unreadable pkg/data.txt"}),
+    "dir0000": (False, {"unreadable pkg/sub"}),
     "gitdelete": (True, set()),  # policy: the top-level .git is not judged (verifiers.py)
     "leave": (False, {"extra pkg/left.txt"}),
     "ignored": (False, {"extra pkg/run.log"}),  # ignore rules do not apply to the comparison
@@ -112,9 +134,8 @@ FILES[".gitignore"] = "*.log\n"
 
 def _normal(entry: str) -> str:
     """'unreadable <absolute path>' names a path inside the run's checkout: keep the tail."""
-    if entry.startswith("unreadable ") and "/tests/" in entry:
-        return "unreadable tests/" + entry.split("/tests/", 1)[1]
-    return entry
+    found = re.fullmatch(r"unreadable /.*?\.work/[^/]+/(.+)", entry)
+    return f"unreadable {found.group(1)}" if found else entry
 
 
 def _run(repo, run_root, account, run_id, scenarios):
@@ -186,34 +207,54 @@ def test_checkout_writes_match_between_modes(repo, tmp_path, own_names, capsys, 
 
 
 _LINKS = (
-    "def test_links():\n"
-    "    run_root = ROOT.parent.parent\n"
-    "    private = [p for p in run_root.glob(ROOT.name + '.*') if p.suffix != '.work']\n"
+    "import errno, hashlib, json\n"
+    "def _seen(path):\n"
+    "    try:\n"
+    "        info = os.lstat(path)\n"
+    "    except OSError as exc:\n"
+    "        return {'lstat': errno.errorcode[exc.errno]}\n"
+    "    try:\n"
+    "        digest = hashlib.sha256(open(path, 'rb').read()).hexdigest()\n"
+    "    except OSError as exc:\n"
+    "        digest = errno.errorcode[exc.errno]\n"
+    "    keys = ('mode', 'nlink', 'uid')\n"
+    "    return {'sha256': digest, **{k: getattr(info, 'st_' + k) for k in keys}}\n"
+    "def test_links(request, capsys):\n"
+    "    # explicit paths: the run's private dir is the ini's (the sandbox may not list run_root)\n"
+    "    ini = Path(str(request.config.inipath))\n"
+    "    guard = ini.parent / 'guard' / '_cairnwork_report_guard.py'\n"
     "    targets = os.environ['CW_TARGETS'].split(os.pathsep)\n"
-    "    for p in private:\n"
-    "        targets += [str(p / 'pytest.ini'), str(p / 'verifier.log')]\n"
-    "        targets += [str(g) for g in (p / 'guard').glob('*.py')]\n"
+    "    targets += [str(ini), str(ini.parent / 'verifier.log'), str(guard)]\n"
+    "    seen = [_seen(t) for t in targets]\n"
+    "    made = []\n"
     "    for i, target in enumerate(targets):\n"
     "        for make, kind in ((os.link, 'hl'), (os.symlink, 'sl')):\n"
     "            try:\n"
     "                make(target, ROOT / f'{kind}{i}')\n"
-    "            except OSError:\n"
-    "                pass\n"
+    "                made.append([i, kind, 'ok'])\n"
+    "            except OSError as exc:\n"
+    "                made.append([i, kind, errno.errorcode[exc.errno]])\n"
+    "    report = json.dumps({'targets': targets, 'seen': seen, 'made': made})\n"
+    "    with capsys.disabled():  # straight into the verifier log\n"
+    "        print('CW-LINKS ' + report, flush=True)\n"
 )
 
 
 def _fingerprint(path):
     info = os.lstat(path)
-    return hashlib.sha256(open(path, "rb").read()).hexdigest(), info.st_mode, info.st_nlink
+    digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    return digest, info.st_mode, info.st_nlink, info.st_uid, info.st_gid
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_links_out_of_the_checkout_change_nothing_outside_it(
     repo, tmp_path, own_names, monkeypatch, mode, request
 ):
-    """Links (hard or symbolic) the test makes from its checkout to the source repo, an unrelated
-    run's file and an owner-only state file: after the run and cleanup their contents, modes and
-    link counts are as before. The ini, guard and log of the run itself keep one link each."""
+    """Links (hard and symbolic) the test makes from its checkout to the source repo, an unrelated
+    run's file, an owner-only state file, and the run's own ini, log and guard (explicit paths,
+    each attempt recorded in the log): after the run and cleanup the outside files' contents,
+    modes, owners and link counts are as before, and the run's own files are as the test first saw
+    them (the log, which grows, keeps its mode and owner) with one link each."""
     run_root, account = _mode_run_root(mode, tmp_path)
     run_id = "w" + os.urandom(6).hex()
     own_names.append(f"{run_id}-")
@@ -230,32 +271,70 @@ def test_links_out_of_the_checkout_change_nothing_outside_it(
     journal.parent.mkdir()
     journal.write_text("journal\n")
     os.chmod(journal, 0o600)
-    targets = [repo / "src" / "a.py", unrelated, journal]
-    before = {t: _fingerprint(t) for t in targets}
-    monkeypatch.setenv("CW_TARGETS", os.pathsep.join(map(str, targets)))
+    outside = [repo / "src" / "a.py", unrelated, journal]
+    before = {t: _fingerprint(t) for t in outside}
+    monkeypatch.setenv("CW_TARGETS", os.pathsep.join(map(str, outside)))
     monkeypatch.setattr(verifiers, "_ENV_KEEP", (*verifiers._ENV_KEEP, "CW_TARGETS"))
-    runs = _run(repo, run_root, account, run_id, {"links": _LINKS})
-    assert not runs["links"].observation.passed  # the links themselves are extra paths
-    assert {t: _fingerprint(t) for t in targets} == before
-    private = runs["links"].log_path.parent
-    for path in [private / "pytest.ini", private / "verifier.log", *private.glob("guard/*.py")]:
-        assert os.lstat(path).st_nlink == 1, path
-    assert os.lstat(private / "verifier.log").st_mode & 0o077 == 0  # still owner-only
-    assert os.lstat(private / "verifier.log").st_uid == os.getuid()
+    run = _run(repo, run_root, account, run_id, {"links": _LINKS})["links"]
+    assert not run.observation.passed  # the links themselves are extra paths
+    assert {t: _fingerprint(t) for t in outside} == before
+    private = run.log_path.parent
+    own = [private / "pytest.ini", run.log_path, private / "guard" / "_cairnwork_report_guard.py"]
+    lines = [x for x in run.log_path.read_text().splitlines() if x.startswith("CW-LINKS ")]
+    assert len(lines) == 1, run.log_path.read_text()
+    report = json.loads(lines[0].removeprefix("CW-LINKS "))
+    expected = [*outside, *own]
+    assert [os.path.realpath(t) for t in report["targets"]] == [
+        os.path.realpath(t) for t in expected
+    ]
+    attempts = {(i, kind): result for i, kind, result in report["made"]}
+    assert set(attempts) == {(i, kind) for i in range(len(expected)) for kind in ("hl", "sl")}
+    assert all(attempts[i, "sl"] == "ok" for i in range(len(expected))), attempts
+    for i, path in enumerate(own):
+        seen, info = report["seen"][len(outside) + i], os.lstat(path)
+        assert (
+            (seen["mode"], seen["uid"])
+            == (info.st_mode, info.st_uid)
+            == (seen["mode"], os.getuid())
+        )
+        assert seen["nlink"] == info.st_nlink == 1, (path, attempts)
+        if path != run.log_path:  # the log grows during the run; it stays owner-only
+            assert seen["sha256"] == _fingerprint(path)[0], path
+    assert os.lstat(run.log_path).st_mode & 0o077 == 0
 
 
-def test_a_failing_account_removal_still_lets_the_owner_remove_its_part(tmp_path):
+@pytest.mark.parametrize(
+    "error", [VerifierAccountError("outside"), subprocess.TimeoutExpired("rm", 60), OSError("sudo")]
+)
+def test_a_failing_account_removal_keeps_the_verdict_and_the_owner_removes_its_part(
+    tmp_path, capsys, error
+):
+    """The verdict is decided before cleanup: a failing account removal is not raised out of
+    run_verifiers; the owner removes what it can, and what is left would be an ALERT."""
     work = tmp_path / "x.work"
     (work / STAGE / "x").mkdir(parents=True)
     (work / STAGE / "x" / "f").write_text("owner")
 
     class Failing:
         def remove(self, path):
-            raise RuntimeError("sudo failed")
+            raise error
 
-    with pytest.raises(RuntimeError):
-        verifiers._remove_checkout(work, "x", Failing())
-    assert not work.exists()
+    verifiers._remove_checkout(work, "x", Failing())
+    assert not work.exists() and "ALERT" not in capsys.readouterr().err
+
+
+def test_a_failing_account_removal_of_scratch_keeps_the_verdict(tmp_path):
+    home, tmp = tmp_path / "home", tmp_path / "tmp"
+    for directory in (home, tmp):
+        directory.mkdir()
+        (directory / "f").write_text("x")
+
+    class Failing:
+        def remove(self, path):
+            raise subprocess.TimeoutExpired("rm", 60)
+
+    verifiers._remove_scratch((home, tmp), Failing())
+    assert not home.exists() and not tmp.exists()
 
 
 def test_a_leftover_after_cleanup_is_reported_not_silent(tmp_path, capsys):
