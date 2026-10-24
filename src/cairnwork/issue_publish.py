@@ -6,6 +6,7 @@ or Issue text. Those stay in the local JSON output."""
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -17,6 +18,7 @@ BOT_GH = "nexus-agent-gh"
 PROBE = "/installation/repositories"
 PROBE_TIMEOUT = 60
 REFUSAL_CODE = re.compile(r"[A-Z0-9_]{1,64}")
+UNCOMPARABLE = re.compile(r"UNCOMPARABLE: ([A-Z0-9_]{1,64}):")  # pipeline worker_reason (#234)
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")  # plain text: no markdown, @, #, spaces
 PR_URL = r"https://github\.com/{repo}/pull/[0-9]+"
 
@@ -32,11 +34,31 @@ def done_text(url: str, repo: str) -> str:
     return f"Cairnwork 修好並通過 Core 驗證，{tail}"
 
 
-def failure_text(status: dict) -> str:
+def failure_text(status: dict, uncomparable: str = "") -> str:
+    if status["status"] == "FAILED" and REFUSAL_CODE.fullmatch(uncomparable):
+        return (
+            f"Cairnwork 沒有證據（`UNCOMPARABLE: {uncomparable}`）：base 本身無法比較，"
+            "這不是通過，也不是擋下。細節在 Cairnwork 本機輸出，不貼在這裡。"
+        )
     word = status["status"] if status["status"] in STATUSES else "UNKNOWN"
     phase = status.get("phase")
     where = f"（最後階段 `{phase}`）" if phase in PHASES else ""
     return f"Cairnwork 沒有完成：`{word}`{where}。細節在 Cairnwork 本機輸出，不貼在這裡。"
+
+
+def uncomparable_code(intake, task_id: str) -> str:
+    """The code of a FAILED ``UNCOMPARABLE: <code>`` attempt (#234) from the runner's own output
+    (its last line, ``<run_root>/<task_id>.runner.log``), else "". Only with agy_run_as_user: only
+    then may the pipeline say it, and only then can the worker not write that owner-only log."""
+    if not intake.config().get("agy_run_as_user") or not TASK_ID.fullmatch(task_id):
+        return ""
+    try:
+        tail = (intake.run_root / f"{task_id}.runner.log").read_bytes()[-65536:]
+        out = json.loads(tail.decode(errors="replace").splitlines()[-1])
+        found = UNCOMPARABLE.match(out["reason"]) if out["status"] == "FAILED" else None
+    except (OSError, ValueError, IndexError, KeyError, TypeError):
+        return ""
+    return found.group(1) if found and out.get("task_id") == task_id else ""
 
 
 def refusal_code(exc: Exception) -> str:

@@ -22,6 +22,7 @@ from typing import Protocol
 from cairnwork import runlock
 from cairnwork.deferred_store import DeferredStore
 from cairnwork.deferred_tests import (
+    BaseUncomparable,
     TestCommitRejected,
     check_roots_on_base,
     lay_tests_over,
@@ -100,7 +101,7 @@ class Worker(Protocol):
     CAIRNWORK_ATTEMPT=<workdir.name> (confined.ATTEMPT_ENV), so restart recovery can find and
     stop them if Cairnwork dies mid-run (AgyWorker does)."""
 
-    def run(self, workdir: Path, task: TaskSpec) -> None: ...
+    def run(self, workdir: Path, task: TaskSpec) -> None: ...  # optional ``isolated``: AgyWorker
 
 
 @dataclass
@@ -300,6 +301,10 @@ def _attempt(task, specs, digest, notary, worker, run_root, result, steps, verif
                 plan = p2p_for(task, specs, test_files, run_root, result, verifying)
             except TestCommitRejected as exc:
                 result.reason = str(exc)
+                return
+            except BaseUncomparable as exc:  # FAILED either way; only the reason says which
+                isolated = getattr(worker, "isolated", False)  # another uid (agy_run_as_user)
+                result.reason = exc.comparison.worker_reason(isolated=isolated)
                 return
         result.candidate_commit = judged
         steps.reach("CANDIDATE", judged)

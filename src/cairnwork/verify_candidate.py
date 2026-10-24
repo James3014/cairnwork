@@ -32,7 +32,9 @@ from typing import Any
 from cairnwork import runlock
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.deferred_tests import (
+    BASE_COMPARE_RULE,
     OVERLAY_RULE,
+    BaseUncomparable,
     TestCommitRejected,
     check_roots_on_base,
     lay_tests_over,
@@ -75,8 +77,9 @@ def verify_candidate(
 ) -> dict[str, Any]:
     """``verified`` is true only for a Core verdict bound to what was judged: the candidate, or
     with deferred tests the tree that ran (candidate plus tests) and its ``binding`` (#229), whose
-    head is the candidate. Raises TaskRejected for malformed input and IntakeRefused when drained
-    or the mirror cannot be used."""
+    head is the candidate. ``status`` is VERIFIED, FAILED, REFUSED or UNCOMPARABLE (#234: the base
+    could not be compared; ``uncomparable`` says why, Core is never asked). Raises TaskRejected for
+    malformed input and IntakeRefused when drained or the mirror cannot be used."""
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
@@ -98,7 +101,7 @@ def verify_candidate(
     result = TaskResult(task.idempotency_key, f"a{secrets.token_hex(8)}", "FAILED")
     notary = intake.notary
     verifying = (account, python)
-    status, binding = "FAILED", None
+    status, binding, uncomparable = "FAILED", None, None
     with runlock.held(intake.state / "ownership.sqlite", exclusive=False):
         _require_accepting(intake)  # a drain that came in while we waited for the lock
         with _marked(intake, result.attempt_id):
@@ -106,6 +109,10 @@ def verify_candidate(
                 binding = _judge(intake, task, source, specs, candidate, notary, result, verifying)
             except (CandidateRejected, TestCommitRejected, WorkspaceError) as exc:
                 result.reason, status = str(exc), "REFUSED"
+            except BaseUncomparable as exc:  # before Core: nothing notarised, nothing to sign
+                result.reason, status = f"UNCOMPARABLE: {exc}", "UNCOMPARABLE"
+                found, rule = exc.comparison, BASE_COMPARE_RULE
+                uncomparable = {"code": found.code, "detail": found.detail, "rule": rule}
     judged = result.candidate_commit or candidate
     subject = binding["head"] if binding else judged  # a bound row names the head (#229)
     verdict = notary.verdict(result.task_id, result.attempt_id, expected_candidate=subject)
@@ -122,6 +129,7 @@ def verify_candidate(
         "attempt_id": result.attempt_id,
         "logs": result.logs,
         "p2p": result.p2p,
+        "uncomparable": uncomparable,  # {code, detail, rule} when status is UNCOMPARABLE (#234)
     }
 
 

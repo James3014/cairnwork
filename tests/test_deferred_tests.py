@@ -3,6 +3,7 @@ commit that is verified and notarised carries the fix and the tests together."""
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import commit_change, git
@@ -97,11 +98,16 @@ def test_tests_that_already_pass_on_the_base_are_refused(project, tmp_path):
     assert result.status == "FAILED" and "TESTS_DO_NOT_FAIL_ON_BASE" in result.reason
 
 
-def test_tests_that_only_break_on_the_base_are_refused(project, tmp_path):
+def test_tests_that_only_break_on_the_base_are_uncomparable_but_plain_failed_for_a_same_uid_worker(
+    project, tmp_path
+):
+    # #234: a collection error on the base is no evidence (UNCOMPARABLE), not a refusal. This
+    # worker shares the owner's uid, so after WORKER_STARTED it stays a plain FAILED (no prefix).
     broken = "import no_such_module\ndef test_regression():\n    pass\n"
     base, test_commit = make_test_commit(project, {"tests/test_regression.py": broken})
     result = run(project, tmp_path, base, test_commit, SeeingWorker(FIX))
-    assert "TESTS_DO_NOT_FAIL_ON_BASE" in result.reason
+    assert result.status == "FAILED" and result.reason.startswith("BASE_COLLECTION_ERROR: ")
+    assert "TESTS_DO_NOT_FAIL_ON_BASE" not in result.reason
 
 
 @pytest.mark.parametrize(
@@ -133,28 +139,37 @@ class _Run:
         "tests.test_other": "tests/test_other.py",
     }
 
-    def __init__(self, tmp_path, name, code, failing=()):
+    def __init__(self, tmp_path, name, code, failing=(), **fields):
         self.log_path = tmp_path / name / "verifier.log"
+        self.spec = SimpleNamespace(verifier_id=name)
         self.returncode = code
         self.outcomes = {
             f"{path}::t": ("failed" if module in failing else "passed")
             for module, path in self._MODULE_FILE.items()
         }
+        self.timed_out, self.report_too_big, self.recorded, self.collect_errors = (
+            fields.get("timed_out", False), fields.get("report_too_big", False),
+            fields.get("recorded", True), fields.get("collect_errors", ()),
+        )  # fmt: skip
 
 
 TARGETS = frozenset({"tests/test_regression.py::t"})  # the new test of the test commit
 
 
+def kind(runs):
+    return dt.base_comparison(runs, TARGETS).kind
+
+
 def test_teeth_need_a_failing_case_from_the_deferred_files(tmp_path):
-    assert dt.failed_on_base([_Run(tmp_path, "a", 1, {"tests.test_regression"})], TARGETS)
-    # another file failing does not count, even with exit 1
-    assert not dt.failed_on_base([_Run(tmp_path, "b", 1, {"tests.test_other"})], TARGETS)
-    # passing everywhere, or a verifier breaking otherwise, does not count
-    assert not dt.failed_on_base([_Run(tmp_path, "c", 0)], TARGETS)
-    assert not dt.failed_on_base(
-        [_Run(tmp_path, "d", 1, {"tests.test_regression"}), _Run(tmp_path, "e", 2)], TARGETS
+    assert kind([_Run(tmp_path, "a", 1, {"tests.test_regression"})]) == "TEETH"
+    # another file failing does not count, even with exit 1; nor does passing everywhere
+    assert kind([_Run(tmp_path, "b", 1, {"tests.test_other"})]) == "NO_TEETH"
+    assert kind([_Run(tmp_path, "c", 0)]) == "NO_TEETH"
+    # a verifier that broke otherwise is not "no teeth" any more but no evidence (#234)
+    assert kind([_Run(tmp_path, "d", 1, {"tests.test_regression"}), _Run(tmp_path, "e", 2)]) == (
+        "UNCOMPARABLE"
     )
-    assert not dt.failed_on_base([_Run(tmp_path, "f", None)], TARGETS)
+    assert kind([_Run(tmp_path, "f", None)]) == "UNCOMPARABLE"
 
 
 class ScanningWorker(EditWorker):
@@ -205,7 +220,7 @@ def test_a_retry_with_the_same_test_commit_is_refused(project, tmp_path):
 
 
 # an oversized or forged verdict file is rejected by report_guard.read_verdict
-# (see tests/test_report_guard.py); failed_on_base works on the trusted outcomes.
+# (see tests/test_report_guard.py); base_comparison works on the trusted outcomes.
 
 
 def test_teeth_count_only_the_new_tests_and_ignore_parameters(tmp_path):
@@ -214,9 +229,9 @@ def test_teeth_count_only_the_new_tests_and_ignore_parameters(tmp_path):
         "tests/test_regression.py::t_old": "failed",  # failed on the base already (env)
         "tests/test_regression.py::t[case-1]": "failed",
     }
-    assert dt.failed_on_base([run], TARGETS)
+    assert kind([run]) == "TEETH"
     run.outcomes = {"tests/test_regression.py::t_old": "failed"}
-    assert not dt.failed_on_base([run], TARGETS)
+    assert kind([run]) == "NO_TEETH"
 
 
 SAME = "def test_same():\n    pass\n"
