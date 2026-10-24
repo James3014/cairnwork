@@ -212,8 +212,8 @@ class Isolated(EditWorker):
 
 
 def test_the_visible_tests_wrapper_passes_isolation_through():
-    assert VisibleTestsWorker(Isolated({}), pass_fail_only=True).isolated is True
-    plain = VisibleTestsWorker(EditWorker({}), pass_fail_only=True)
+    assert VisibleTestsWorker(Isolated({}), retries=1, pass_fail_only=True).isolated is True
+    plain = VisibleTestsWorker(EditWorker({}), retries=1, pass_fail_only=True)
     assert plain.isolated is False and plain.not_isolated_because == ""
 
 
