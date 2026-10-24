@@ -203,9 +203,12 @@ def cli_harness(tmp_path: Any, monkeypatch: Any):
     monkeypatch.setattr(corpus_io, "verify_canary", lambda path, out_dir: binding)
     monkeypatch.setattr(cli, "LoopbackEndpoint", lambda url: FakeEndpoint(state["replies"]))
 
+    worlds: dict[str, World] = {}
+
     def tools_factory(run_root, log, mode):
         assert mode == "worker"
-        state["world"] = World()
+        # One checkout per run root, as on disk: a reused root keeps what the last run left.
+        state["world"] = worlds.setdefault(str(run_root), World())
         return tools.WorkerTools(run_root, log, mode=mode, invoker=state["world"])
 
     monkeypatch.setattr(cli, "WorkerTools", tools_factory)

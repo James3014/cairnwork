@@ -334,3 +334,48 @@ def test_the_late_status_never_runs_past_max_wall_seconds(tmp_path):
     rec = episode.build_record(META, out)
     validate_record(rec)
     assert rec["first_edit_cut"]["cut_status"] == "UNOBSERVED"
+
+
+# -- B6: a resume continues the same task, configuration and base in a fresh run root ------------
+def _parent(run, out) -> str:
+    assert run([reply("read_file", path="src/app.py"), EDIT_SRC], "run", root="a" * 32) == 0
+    return str(out / "private" / lines(out)[0]["episode_id"] / "transcript.json")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"prompt": "another prompt"},
+        {"repo": "repo_y"},
+        {"public_tests": ["tests/test_other.py"]},
+        {"task_id": "TASK_02"},
+    ],
+)
+def test_resume_refuses_another_task_binding(harness, tmp_path, change):
+    run, out = harness
+    tr = _parent(run, out)
+    task = json.loads((tmp_path / "task.json").read_text())
+    other = tmp_path / "other-task.json"
+    other.write_text(json.dumps({**task, **change}))
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, "--task", str(other)) == 2
+    assert run(done, "resume", "--parent-transcript", tr) == 0  # the same task resumes
+
+
+def test_resume_refuses_another_model_configuration(harness):
+    run, out = harness
+    tr = _parent(run, out)
+    (out / "manifest.json").unlink()  # a fresh manifest, now with another temperature
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, "--temperature", "0.7") == 2
+
+
+def test_a_reused_run_root_keeps_its_checkout(harness):
+    """The harness keeps one fake checkout per run root, as on disk: what the parent wrote is
+    still there, so a resume in its root is refused (reused root, and a dirty tree)."""
+    run, out = harness
+    tr = _parent(run, out)
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, root="a" * 32) == 2
+    assert run(done, "run", "--seed", "5", root="a" * 32) == 2  # its tree is not clean at base
+    assert len(lines(out)) == 1

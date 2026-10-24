@@ -170,6 +170,20 @@ def _episode_id(a: argparse.Namespace, task: Task) -> str:
     return f"ep_{stamp}_{model}_{task.task_id}_{a.arm}_s{a.seed}_{secrets.token_hex(3)}"
 
 
+def _same_binding(parent: dict, task: Task, manifest_sha: str) -> None:
+    """Codex review of #239, B6: a resume continues the same task under the same configuration.
+    The task (id, repo, prompt, public targets) must equal the parent's, and so must the manifest
+    (model, endpoint, limits, temperature, tools, prompts, harness version); the base sha is
+    pinned by run(expected_base=...) and the run root must be fresh (checked by the caller)."""
+    want = {**asdict(task), "public_tests": list(task.public_tests)}
+    got = {**parent["task"], "public_tests": list(parent["task"].get("public_tests", ()))}
+    if got != want:
+        diff = sorted(k for k in want.keys() | got.keys() if want.get(k) != got.get(k))
+        raise corpus_io.InputRefused(f"the parent episode is for another task: {diff} differ")
+    if parent["record"]["manifest_sha256"] != manifest_sha:
+        raise corpus_io.InputRefused("the parent ran under another manifest (model or limits)")
+
+
 def _on_sigterm(signum: int, frame: Any) -> None:
     raise KeyboardInterrupt  # recorded as interrupted; cleanup and the line still happen
 
@@ -182,8 +196,7 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
     plan_sha, prefix = None, dict.fromkeys(PARENT_FIELDS)
     if resume:
         parent = corpus_io.load_transcript(a.parent_transcript, p["out_dir"])
-        if parent["task"]["task_id"] != task.task_id:
-            raise corpus_io.InputRefused("the parent episode is for another task")
+        _same_binding(parent, task, p["manifest_sha"])
         if parent["record"]["resume_parent_episode_id"] is not None:
             raise corpus_io.InputRefused("resume from a fresh (L0) episode, not from a resume run")
         root = p["run_root"].name
