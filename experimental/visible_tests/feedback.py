@@ -3,8 +3,22 @@
 The Agy worker runs headless and cannot run commands, so it edits blind. ``VisibleTestsWorker``
 wraps any worker (pipeline.Worker): after the inner worker's turn, Cairnwork itself runs the
 task's *visible* verification commands on the edit and, if they do not all pass, gives the inner
-worker another turn (``retries``, default one) with a short pass/fail summary appended to its
+worker another turn (up to ``retries`` of them) with a short pass/fail summary appended to its
 instructions. The pipeline then judges the final clone exactly as without the wrapper.
+
+Explicit opt-in only (council action 2, Issue #234): the product itself never retries, and the
+A2 arm was not shown worth its cost (its one A/B interval included 0). So ``retries`` has no
+default: a caller must pass a positive int (``VISIBLE_TESTS_NEEDS_RETRIES`` otherwise).
+
+Usage record: every run of the wrapper writes ``<run_root>/<attempt>.visible-tests.json`` (beside
+the clone and the ``-visible{turn}`` roots, never inside the clone), so the run's owner can see
+afterwards whether and how the feedback was used. Fields, all counts or fixed strings and no
+candidate-controlled text (no test, verifier or file names):
+
+* ``schema``: 1
+* ``feedback_source``: ``"visible-tests:pass-fail-only"`` or ``"visible-tests:account-detail"``
+* ``retries``: the extra turns allowed
+* ``extra_turns``: extra turns started (0..retries); a turn whose inner run raises still counts
 
 What the probe reuses and what the worker can see:
 
@@ -41,13 +55,14 @@ What the probe reuses and what the worker can see:
   next turn starts.
 
 A probe failure (sandbox, account, git) propagates, so the pipeline records the attempt as
-WORKER_FAILED rather than silently judging an unprobed edit. Not wired into any runner: a run that
-wants it builds ``VisibleTestsWorker(AgyWorker(...), account=...)`` itself; core never imports
-this package.
+WORKER_FAILED rather than silently judging an unprobed edit. Not wired into any runner: a run
+that wants it builds ``VisibleTestsWorker(AgyWorker(...), retries=1, account=...)`` itself; core
+never imports this package.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -101,6 +116,13 @@ FOOTER = (
     "Your previous edits are still in the files. Change only the allowed files so these tests "
     "pass; do not modify tests and do not run commands."
 )
+NEEDS_RETRIES = (
+    "VISIBLE_TESTS_NEEDS_RETRIES: retries must be passed explicitly as a positive int; "
+    "visible-test feedback is an explicit opt-in"
+)
+SOURCE_PASS_FAIL = "visible-tests:pass-fail-only"
+SOURCE_DETAIL = "visible-tests:account-detail"
+RECORD_SUFFIX = ".visible-tests.json"
 NEEDS_ACCOUNT = (
     "VISIBLE_TESTS_NEEDS_ACCOUNT: without a verifier account the code under test can read "
     "same-user processes; pass account=... or pass_fail_only=True"
@@ -112,31 +134,55 @@ class VisibleTestsWorker:
     """A pipeline.Worker that wraps ``inner`` with the visible-test feedback loop."""
 
     inner: Any
-    retries: int = 1
+    retries: Any = None  # required: a positive int (None means "not passed")
     python: str | None = None  # the verifier Python (state config verifier_python)
     account: VerifierAccount | None = None
     timeout: int = DEFAULT_TIMEOUT_SECONDS
     pass_fail_only: bool = False  # required without an account: fixed wording, no test text
 
     def __post_init__(self) -> None:
+        if type(self.retries) is not int or self.retries <= 0:
+            raise ValueError(NEEDS_RETRIES)
         if self.account is None and not self.pass_fail_only:
             raise ValueError(NEEDS_ACCOUNT)
 
     def run(self, workdir: Path, task) -> None:
-        self.inner.run(workdir, task)
-        specs = visible_specs(task)
-        if not specs:
-            return
-        # Each extra turn gets the original instructions plus only the latest summary: the
-        # files already hold the earlier turns' work, and the prompt does not grow per turn.
-        for turn in range(1, self.retries + 1):
-            feedback = self.probe(workdir, task, specs, turn)
-            if feedback is None:
+        extra = 0
+        try:
+            self.inner.run(workdir, task)
+            specs = visible_specs(task)
+            if not specs:
                 return
-            _set_aside_log(workdir, turn)
-            self.inner.run(
-                workdir, replace(task, instructions=f"{task.instructions}\n\n{feedback}")
-            )
+            # Each extra turn gets the original instructions plus only the latest summary: the
+            # files already hold the earlier turns' work, and the prompt does not grow per turn.
+            for turn in range(1, self.retries + 1):
+                feedback = self.probe(workdir, task, specs, turn)
+                if feedback is None:
+                    return
+                _set_aside_log(workdir, turn)
+                extra += 1
+                self.inner.run(
+                    workdir, replace(task, instructions=f"{task.instructions}\n\n{feedback}")
+                )
+        finally:
+            self._write_record(workdir, extra)
+
+    def _write_record(self, workdir: Path, extra: int) -> None:
+        detail = self.account is not None and not self.pass_fail_only
+        record = {
+            "schema": 1,
+            "feedback_source": SOURCE_DETAIL if detail else SOURCE_PASS_FAIL,
+            "retries": self.retries,
+            "extra_turns": extra,
+        }
+        path = workdir.parent / f"{workdir.name}{RECORD_SUFFIX}"
+        tmp = path.with_name(path.name + ".tmp")
+        if os.path.lexists(tmp):
+            os.unlink(tmp)  # a leftover from a failed write; never followed if it is a symlink
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(json.dumps(record, sort_keys=True) + "\n")
+        os.replace(tmp, path)
 
     def probe(self, workdir: Path, task, specs: tuple[VerifierSpec, ...], turn: int) -> str | None:
         """Run the visible specs on the clone's current edit; None when they all pass."""
