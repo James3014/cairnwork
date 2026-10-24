@@ -108,6 +108,18 @@ def _wrapper_sha(path: Path) -> str | None:
     return sha256_bytes(path.read_bytes()) if path.is_file() else None
 
 
+def _finished_at(value: Any) -> datetime:
+    """The report's finish time: an ISO timestamp with a UTC offset, else refused (a naive one
+    cannot be compared with an aware now; Claude review of #239, NB10)."""
+    try:
+        when = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        when = None
+    if when is None or when.utcoffset() is None:
+        raise InputRefused(f"canary report finished_at {value!r} is not a time with a UTC offset")
+    return when
+
+
 def verify_canary(
     report_path: Path,
     out_dir: Path,
@@ -150,7 +162,7 @@ def verify_canary(
             raise InputRefused(f"canary report {key}={report.get(key)!r}, expected {want!r}")
     if installed != _wrapper_sha(REPO_WRAPPER):
         raise InputRefused("installed wrapper differs from this repository's local-worker-tool")
-    finished = datetime.fromisoformat(str(report.get("finished_at")))
+    finished = _finished_at(report.get("finished_at"))
     age = (now or datetime.now(UTC)) - finished
     if not timedelta(minutes=-5) <= age <= CANARY_MAX_AGE:
         raise InputRefused(f"canary report is {age} old (limit {CANARY_MAX_AGE})")

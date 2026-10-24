@@ -37,7 +37,7 @@ CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
     " a FIFO."
 )
 CUT_STATES = ("CUT", "NO_CUT", "UNOBSERVED")
-READ_ACTIONS = ("read_file", "list_dir", "search")
+READ_ACTIONS = ("read_file", "list_dir")  # the read tools the loop offers (no search tool)
 EDIT_ACTIONS = ("write_file", "edit_file")
 DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
 CUT_FIELDS = (

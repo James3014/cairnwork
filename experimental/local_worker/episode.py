@@ -37,6 +37,13 @@ from experimental.local_worker.redact import BasePaths, public_args
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
 TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed before the cut"
+WALL_TIME_RULE = (  # recorded in manifest.json (Claude review of #239, NB9)
+    "own_wall_seconds: this run alone (its turns' t_start/t_end, every cut field and cut_900s use"
+    " this run's own clock). wall_clock_seconds = parent_pre_cut_wall_seconds (null, i.e. 0, for"
+    " a fresh L0 run) + own_wall_seconds: the logical episode length the limits used. M5 time"
+    " of a ladder = the L0 run's wall_clock_seconds + each resume run's own_wall_seconds; never"
+    " add a resume run's wall_clock_seconds, which counts the parent's pre-cut time again."
+)
 EXIT_REASONS = ("COMPLETED", "TURN_LIMIT", "TIMEOUT", "ERROR_ABORT")
 
 
