@@ -11,7 +11,9 @@ Checks (each ``{"code", "detail"}``, code ``OK`` when it passes):
 * ``verifier_python``: the configured interpreter (or the account's) exists and is executable
   (``VERIFIER_PYTHON_MISSING``);
 * ``account``: the verifier account can run it (``VERIFIER_ACCOUNT_UNUSABLE``, with the first
-  directory it cannot traverse); ``walk`` lists every directory checked;
+  directory it cannot traverse); ``walk`` lists every directory checked; when the account's lock
+  stays busy for ``--lock-wait`` seconds (or its queue is unreadable) ``available()`` never ran,
+  so the result is ``ACCOUNT_CHECK_INCONCLUSIVE`` (not a pass; wait longer and run it again);
 * ``mirror``: the configured mirror is a directory (``MIRROR_MISSING``);
 * ``clone``: with ``--clone``, it is the state's mirror by real path (``CLONE_NOT_STATE_MIRROR``,
   the check ``cairnwork-issues`` makes at startup);
@@ -33,13 +35,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cairnwork.account_check import precheck, walk
+from cairnwork.account_check import blocked, precheck, walk
 from cairnwork.deferred_tests import BaseUncomparable
 from cairnwork.intake import Intake, IntakeRefused
 from cairnwork.route import agy_dispatch
 from cairnwork.workers.agy import AgyWorker
 
 OK = "OK"
+INCONCLUSIVE = "ACCOUNT_CHECK_INCONCLUSIVE"  # the lock stayed busy: available() did not run
 
 
 def _result(code: str, detail: str = "", **extra: Any) -> dict[str, Any]:
@@ -53,9 +56,12 @@ def _account(intake: Intake, python: str | None, lock_wait: float) -> dict[str, 
     py = python or account.python
     steps = walk(py, account.user)
     try:
-        precheck(account, py, timeout=lock_wait)
+        deferred = precheck(account, py, timeout=lock_wait)
     except BaseUncomparable as exc:
         return _result(exc.comparison.code, exc.comparison.detail, walk=steps)
+    if deferred is not None:  # available() never ran: not a pass (wait longer: --lock-wait)
+        hint = blocked(py, account.user) or "no blocked directory found"
+        return _result(INCONCLUSIVE, f"{deferred}; {hint}", walk=steps)
     return _result(OK, f"{account.user} can run {py}", walk=steps)
 
 

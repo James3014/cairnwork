@@ -90,7 +90,10 @@ class Intake:
 
     def config(self) -> dict[str, Any]:
         path = self.state / "config.json"
-        loaded = json.loads(path.read_text()) if path.exists() else {}
+        try:
+            loaded = json.loads(path.read_text()) if path.exists() else {}
+        except ValueError as exc:  # truncated or not UTF-8: refused, never a traceback (#234)
+            raise IntakeRefused("BAD_CONFIG", f"{path} is not valid JSON: {exc}") from exc
         if not isinstance(loaded, dict) or set(loaded) - set(DEFAULT_CONFIG):
             raise IntakeRefused("BAD_CONFIG", f"{path} keys must be among {sorted(DEFAULT_CONFIG)}")
         for key in (

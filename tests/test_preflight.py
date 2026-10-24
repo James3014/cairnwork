@@ -11,6 +11,7 @@ import pytest
 from conftest import git
 
 from cairnwork.intake import Intake
+from cairnwork.verifier_account import VerifierAccountError
 from scripts import preflight
 
 
@@ -61,6 +62,15 @@ def test_missing_python_and_mirror_have_their_own_codes(tmp_path, capsys):
     assert _codes(report)["verifier_python"] == "VERIFIER_PYTHON_MISSING"
 
 
+@pytest.mark.parametrize("raw", [b'{"verifier_account": fal', b'{"model": "\xff"}', b"[]"])
+def test_a_truncated_or_malformed_config_is_bad_config(tmp_path, capsys, raw):
+    state = _state(tmp_path)
+    (state / "config.json").write_bytes(raw)  # truncated, not UTF-8, not an object
+    code, report = _run(state, capsys=capsys)
+    assert code == 1 and _codes(report)["config"] == "BAD_CONFIG"
+    assert {c for n, c in _codes(report).items() if n != "config"} == {"SKIPPED"}
+
+
 def test_a_bad_config_or_a_missing_state_skips_the_rest(tmp_path, capsys):
     state = _state(tmp_path, nonsense=1)
     code, report = _run(state, capsys=capsys)
@@ -73,13 +83,30 @@ def test_a_bad_config_or_a_missing_state_skips_the_rest(tmp_path, capsys):
 class Unusable:
     user = "cairnwork-verifier"
     python = "/Users/nobody-here/venv/bin/python"
+    busy = False
+    probes = 0
 
     @contextmanager
     def exclusive(self, timeout=None):
+        if self.busy:
+            raise VerifierAccountError(f"RESOURCE_LEASE_TIMEOUT: busy for {timeout:g}s")
         yield
 
     def available(self, python=None):
+        type(self).probes += 1
         return False
+
+
+def test_a_busy_account_lock_is_inconclusive_not_ok(tmp_path, capsys, monkeypatch):
+    account = Unusable()
+    account.busy = True
+    monkeypatch.setattr(Unusable, "probes", 0)
+    monkeypatch.setattr(Intake, "verifier_account", lambda self: account)
+    code, report = _run(_state(tmp_path), "--lock-wait", "2", capsys=capsys)
+    check = report["checks"]["account"]
+    assert code == 1 and report["ok"] is False and Unusable.probes == 0
+    assert check["code"] == "ACCOUNT_CHECK_INCONCLUSIVE"
+    assert check["detail"].startswith("VERIFIER_ACCOUNT_ERROR: RESOURCE_LEASE_TIMEOUT: busy for 2s")
 
 
 def test_an_unusable_account_says_where_it_is_blocked(tmp_path, capsys, monkeypatch):

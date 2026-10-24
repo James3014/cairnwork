@@ -120,8 +120,12 @@ class AgyWorker:
             return f"agy_run_as_user {user} does not exist"
         if uid in (0, os.getuid()):
             return f"agy_run_as_user {user} is uid {uid}: root or the owner"
-        if self.verifier_user is not None and uid == _uid(self.verifier_user):
-            return f"agy_run_as_user {user} is the verifier account (uid {uid})"
+        if self.verifier_user is not None:  # None: no verifier account configured
+            verifier = _uid(self.verifier_user)
+            if verifier is None:
+                return f"verifier account {self.verifier_user} unresolved"
+            if uid == verifier:
+                return f"agy_run_as_user {user} is the verifier account (uid {uid})"
         return ""
 
     def run(self, workdir: Path, task) -> None:

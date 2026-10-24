@@ -120,6 +120,7 @@ class FakeAccount:
         yield
 
     def available(self, python=None):
+        self.probes = getattr(self, "probes", 0) + 1
         return self.usable
 
 
@@ -127,9 +128,9 @@ def test_precheck_takes_its_verdict_from_available_and_its_reason_from_the_walk(
     open_root, stranger
 ):
     home, python = _python_under(open_root, 0o750)
-    account_check.precheck(None, None)  # no account: nothing to check
+    assert account_check.precheck(None, None) is None  # no account: nothing to check
     usable: Any = FakeAccount(str(python), usable=True)
-    account_check.precheck(usable, None)  # mode bits say no, available() says yes: it decides
+    assert account_check.precheck(usable, None) is None  # mode bits say no, available() yes
     broken: Any = FakeAccount(str(python))
     with pytest.raises(BaseUncomparable) as caught:
         account_check.precheck(broken, None)
@@ -137,13 +138,14 @@ def test_precheck_takes_its_verdict_from_available_and_its_reason_from_the_walk(
     assert f"{home} 0750" in caught.value.comparison.detail
 
 
-def test_a_busy_account_is_never_waited_for_and_only_the_walk_may_refuse(open_root, stranger):
-    home, python = _python_under(open_root, 0o750)
+def test_a_busy_account_is_never_waited_for_and_never_refused(open_root, stranger):
+    _, python = _python_under(open_root, 0o750)  # the walk says blocked (an ACL might allow it)
     busy: Any = FakeAccount(str(python), busy=True)
-    with pytest.raises(BaseUncomparable, match=f"busy for 0.0s; {home} 0750"):
-        account_check.precheck(busy, None)  # one try (timeout 0), then the mode bits say no
-    home.chmod(0o755)
-    account_check.precheck(busy, None)  # nothing blocks: the run's own available() decides
+    deferred = account_check.precheck(busy, None)  # one try (timeout 0), then deferred
+    assert (
+        deferred == "VERIFIER_ACCOUNT_ERROR: RESOURCE_LEASE_TIMEOUT: busy for 0.0s"
+    )  # the run's own probe decides
+    assert getattr(busy, "probes", 0) == 0
 
 
 def test_an_account_without_a_lock_file_is_unusable(tmp_path):
@@ -207,14 +209,20 @@ def test_a_worker_with_its_own_uid_is_isolated(users):
     assert _agy("worker", verifier=None).isolated is True  # no verifier account configured
 
 
+def test_a_verifier_account_that_cannot_be_resolved_means_not_isolated(users):
+    worker = _agy("worker", verifier="lost-verifier")
+    assert worker.isolated is False
+    assert worker.not_isolated_because == "verifier account lost-verifier unresolved"
+
+
 class Isolated(EditWorker):
     isolated = True
 
 
-def test_the_visible_tests_wrapper_passes_isolation_through():
-    assert VisibleTestsWorker(Isolated({}), retries=1, pass_fail_only=True).isolated is True
-    plain = VisibleTestsWorker(EditWorker({}), retries=1, pass_fail_only=True)
-    assert plain.isolated is False and plain.not_isolated_because == ""
+def test_the_visible_tests_wrapper_is_never_isolated():
+    wrapped = VisibleTestsWorker(Isolated({}), retries=1, pass_fail_only=True)
+    assert wrapped.isolated is False  # its probe runs candidate code before verification
+    assert "probe runs candidate code" in wrapped.not_isolated_because
 
 
 # The Issue runner's --clone must be the state's mirror.
@@ -269,6 +277,13 @@ def test_a_copy_whose_config_diverged_is_refused(mirror, tmp_path, monkeypatch, 
     assert _main(_state(tmp_path, mirror), copy, monkeypatch) == 3
     assert '"error": "CLONE_NOT_STATE_MIRROR"' in capsys.readouterr().out
     assert Intake(_state(tmp_path, mirror)).clone_problem(copy).startswith("CLONE_NOT_STATE_MIRROR")
+
+
+def test_a_truncated_config_is_bad_config_at_startup(mirror, tmp_path, monkeypatch, capsys):
+    state = _state(tmp_path, mirror)
+    (state / "config.json").write_text('{"verifier_account": fal')
+    assert _main(state, mirror, monkeypatch) == 3
+    assert '"error": "BAD_CONFIG"' in capsys.readouterr().out
 
 
 def test_without_a_mirror_there_is_nothing_to_compare(mirror, tmp_path):

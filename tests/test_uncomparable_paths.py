@@ -342,3 +342,19 @@ def test_a_not_isolated_worker_says_why_in_the_reason(project, tmp_path, stub):
     assert result.reason.endswith(
         "(worker not isolated: agy_run_as_user cw is uid 501: root or the owner)"
     )
+
+
+def test_an_isolated_worker_wrapped_by_visible_tests_stays_failed(project, tmp_path, stub):
+    """The visible-tests probe runs candidate code before the base checks, so an account failure
+    after it may be the candidate's doing: never UNCOMPARABLE, however isolated the inner worker."""
+    from experimental.visible_tests import VisibleTestsWorker
+
+    calls = stub(TEETH)
+    inner = IsolatedWorker({"src/calc.py": FIX})
+    wrapped = VisibleTestsWorker(inner, retries=1, pass_fail_only=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pipeline_judge, "run_verifiers", _account_error)  # the base run
+        result = run_worker(project, tmp_path, wrapped)
+    assert result.status == "FAILED" and calls == []
+    assert result.reason.startswith("VERIFIER_ACCOUNT_UNUSABLE: "), result.reason
+    assert "probe runs candidate code before verification" in result.reason
