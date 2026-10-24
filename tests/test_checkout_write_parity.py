@@ -292,11 +292,10 @@ def test_links_out_of_the_checkout_change_nothing_outside_it(
     assert all(attempts[i, "sl"] == "ok" for i in range(len(expected))), attempts
     for i, path in enumerate(own):
         seen, info = report["seen"][len(outside) + i], os.lstat(path)
-        assert (
-            (seen["mode"], seen["uid"])
-            == (info.st_mode, info.st_uid)
-            == (seen["mode"], os.getuid())
-        )
+        # the owner is checked from outside: under bwrap the account's user namespace shows the
+        # unmapped owner uid as the overflow uid (65534), so the uid seen inside is not comparable
+        assert seen["mode"] == info.st_mode, path
+        assert info.st_uid == os.getuid(), path
         assert seen["nlink"] == info.st_nlink == 1, (path, attempts)
         if path != run.log_path:  # the log grows during the run; it stays owner-only
             assert seen["sha256"] == _fingerprint(path)[0], path
