@@ -95,7 +95,7 @@ def _contains(path: Path, needles) -> bool:
 
 
 def _plain(inner):
-    return VisibleTestsWorker(inner, pass_fail_only=True)
+    return VisibleTestsWorker(inner, retries=1, pass_fail_only=True)
 
 
 def _run(project, tmp_path, worker, verifiers, test_commit="", base=None, wrap=_plain):
@@ -136,13 +136,25 @@ def _with_account(monkeypatch, account):
         return run_verifiers(repo, commit, specs, account.run_root, run_id, **kw)
 
     monkeypatch.setattr(feedback, "run_verifiers", run_as_account)
-    return lambda inner: VisibleTestsWorker(inner, account=account)
+    return lambda inner: VisibleTestsWorker(inner, retries=1, account=account)
 
 
 def test_without_an_account_the_wrapper_refuses_unless_pass_fail_only():
     with pytest.raises(ValueError, match="VISIBLE_TESTS_NEEDS_ACCOUNT"):
-        VisibleTestsWorker(TurnWorker([CALC_FIX]))
+        VisibleTestsWorker(TurnWorker([CALC_FIX]), retries=1)
     assert NEEDS_ACCOUNT.startswith("VISIBLE_TESTS_NEEDS_ACCOUNT")
+
+
+@pytest.mark.parametrize("retries", [0, -1, True, False, "1", 1.0, None])
+def test_retries_must_be_an_explicit_positive_int(retries):
+    with pytest.raises(ValueError, match="VISIBLE_TESTS_NEEDS_RETRIES"):
+        VisibleTestsWorker(TurnWorker([CALC_FIX]), retries=retries, pass_fail_only=True)
+    assert feedback.NEEDS_RETRIES.startswith("VISIBLE_TESTS_NEEDS_RETRIES")
+
+
+def test_retries_has_no_default():
+    with pytest.raises(ValueError, match="VISIBLE_TESTS_NEEDS_RETRIES"):
+        VisibleTestsWorker(TurnWorker([CALC_FIX]), pass_fail_only=True)
 
 
 @pytest.mark.sandbox
@@ -255,7 +267,7 @@ def test_a_probe_that_raises_midway_still_cleans_up(project, tmp_path, monkeypat
 
     monkeypatch.setattr(feedback, "run_verifiers", half_run)
     inner = TurnWorker([CALC_WRONG, CALC_FIX])
-    wrap = lambda w: VisibleTestsWorker(w, account=account)  # noqa: E731
+    wrap = lambda w: VisibleTestsWorker(w, retries=1, account=account)  # noqa: E731
     result = _run(
         project, tmp_path, inner, (_verifier("pytest-0", "tests/test_sub.py"),), wrap=wrap
     )
