@@ -16,7 +16,7 @@ TARGET = "tests/test_regression.py::test_regression"
 TARGETS = frozenset({TARGET})
 
 
-def run(name="v", rc=1, *, failed=(TARGET,), **fields):
+def run(name: str = "v", rc: int | None = 1, *, failed=(TARGET,), **fields):
     """A stand-in VerifierRun with the fields base_comparison reads."""
     return SimpleNamespace(
         spec=SimpleNamespace(verifier_id=name),
@@ -102,7 +102,8 @@ def test_the_worker_reason_says_uncomparable_only_for_an_isolated_worker():
     found = Comparison("UNCOMPARABLE", "BASE_TIMEOUT", "v: BASE_TIMEOUT")
     assert found.worker_reason(isolated=True) == "UNCOMPARABLE: BASE_TIMEOUT: v: BASE_TIMEOUT"
     assert found.worker_reason(isolated=False) == "BASE_TIMEOUT: v: BASE_TIMEOUT"
-    assert found.worker_reason(isolated="yes") == "BASE_TIMEOUT: v: BASE_TIMEOUT"  # only True
+    truthy: object = "yes"  # only True counts, not any truthy value
+    assert found.worker_reason(isolated=truthy) == "BASE_TIMEOUT: v: BASE_TIMEOUT"  # pyright: ignore[reportArgumentType]
 
 
 # B2 (#234): the guard records whether its record exists and which collectors failed
