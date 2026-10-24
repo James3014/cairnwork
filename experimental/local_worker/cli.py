@@ -218,8 +218,10 @@ def run_episode(a: argparse.Namespace, resume: bool) -> int:
         used = corpus_io.used_checkouts(p["out_dir"]) | {parent["record"]["checkout_id"]}
         if root in used:
             raise corpus_io.InputRefused(f"resume needs a fresh run root; {root} was used before")
-        messages, first_turn, offset = resume_prefix(parent, a.cut_turn)
+        messages, first_turn, _ = resume_prefix(parent, a.cut_turn)
         prefix = parent_prefix(parent["turns"], first_turn)
+        offset = prefix["parent_pre_cut_wall_seconds"]  # the line's own number: one arithmetic
+        p["limits"].resume_budget(offset)  # RefusedStart before any directory or tool call
         expected_base, parent_id = parent["record"]["base_sha"], parent["episode_id"]
         if a.plan:
             plan = corpus_io.load_plan(a.plan, p["out_dir"])

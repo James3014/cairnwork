@@ -8,7 +8,8 @@ fixed ``status`` query; the observed tree decides the cut (episode.first_edit_cu
 
 Limits (frozen in the manifest): ``max_steps`` turns (one model reply plus at most one tool call;
 extra tool calls in a reply are dropped and counted), one deadline for the whole episode
-(``max_wall_seconds`` minus a cleanup reserve), and a context cap on the last reply's prompt +
+(``max_wall_seconds`` minus a cleanup reserve; a resume has what its parent left before the cut,
+loop_config.Limits.resume_budget), and a context cap on the last reply's prompt +
 completion tokens. Every endpoint request gets the deadline itself (endpoint.py: a watchdog, single
 receives and a check after the read). Every wrapper call gets an absolute deadline too
 (tools.WorkerTools.deadline): its timeout leaves room for the kill grace a timed-out call may still
@@ -58,6 +59,7 @@ from experimental.local_worker.episode import LoopOutcome, TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
 from experimental.local_worker.loop_config import Limits as Limits  # re-exported
+from experimental.local_worker.loop_config import RefusedStart as RefusedStart  # re-exported
 from experimental.local_worker.loop_config import Settings, Task
 from experimental.local_worker.tools import (
     ToolCall,
@@ -67,10 +69,6 @@ from experimental.local_worker.tools import (
 )
 
 UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
-
-
-class RefusedStart(RuntimeError):
-    """The checkout is not its clean base (see the package docstring): no episode is run."""
 
 
 class _StatusUnavailable(RuntimeError):
@@ -160,6 +158,8 @@ class AgentLoop:
         KeyboardInterrupt and no line is written: no turn has run. Once a stop is recorded (or
         _stopped is recording one), a signal is only counted and that stop stands."""
         lim = self.limits
+        if elapsed_offset:  # a resume: only what the parent left (refused before anything runs)
+            lim.resume_budget(elapsed_offset)
         self._start = self.clock() - elapsed_offset
         self._offset = elapsed_offset
         self._final = self._start + lim.max_wall_seconds
