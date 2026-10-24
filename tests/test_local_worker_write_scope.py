@@ -4,6 +4,7 @@ and the tool layer that passes it (write_scope.py)."""
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,7 @@ def test_a_write_in_scope_lands(runs, path, scope):
         ("sub/x.py", ("sub/y.py",)),  # a file entry is not its directory
         ("subx/f.py", ("sub",)),  # a prefix only at a "/" boundary
         ("su", ("sub",)),
-        ("Sub/x.py", ("sub/x.py",)),  # case-sensitive, as K's match
+        ("sub/x.py", ("sub/X.py",)),  # byte for byte, as K's match
     ],
 )
 def test_a_write_out_of_scope_is_refused_and_writes_nothing(runs, path, scope):
@@ -124,6 +125,33 @@ def test_a_case_variant_cannot_reach_an_existing_file_out_of_scope(runs):
     assert (co / "sub" / "X.py").read_text() == "keep\n"
     assert write(runs, "SUB/X.py", "sub/X.py").returncode == 0  # lands on sub/X.py: in scope
     assert (co / "sub" / "X.py").read_bytes() == b"new\n"
+
+
+@pytest.mark.sandbox
+def test_paths_are_canonical_and_an_entry_must_match_the_disk(runs):
+    """The landing path takes each existing component's on-disk case; entries stay literal."""
+    co = runs / TAG / "checkout"
+    if not _case_insensitive(co / "a.txt"):
+        pytest.skip("a case-sensitive volume: SUB is another directory")
+    proc = write(runs, "SUB/n.py", "SUB")  # lands on sub/n.py: the entry SUB is not sub
+    assert refused(proc) and b"out of write scope" in proc.stderr
+    assert not (co / "sub" / "n.py").exists()
+    assert write(runs, "SUB/n.py", "sub").returncode == 0  # lands on sub/n.py: in scope
+    assert (co / "sub" / "n.py").read_bytes() == b"new\n"
+
+
+@pytest.mark.sandbox
+def test_an_nfd_entry_does_not_match_an_nfc_directory(runs):
+    nfc, nfd = unicodedata.normalize("NFC", "caf\u00e9"), unicodedata.normalize("NFD", "caf\u00e9")
+    co = runs / TAG / "checkout"
+    (co / nfc).mkdir()
+    if not (co / nfd).exists():
+        pytest.skip("a normalization-sensitive volume: the NFD name is another directory")
+    proc = write(runs, f"{nfd}/x.py", nfd)  # lands in the NFC directory: not the NFD entry
+    assert refused(proc) and b"out of write scope" in proc.stderr
+    assert os.listdir(co / nfc) == []
+    assert write(runs, f"{nfd}/x.py", nfc).returncode == 0  # lands in the NFC entry
+    assert os.listdir(co / nfc) == ["x.py"]
 
 
 @pytest.mark.sandbox

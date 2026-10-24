@@ -45,14 +45,17 @@
 # each entry is a canonical relpath (the rules above), a file or a directory. The write is refused
 # (exit 64, "out of write scope") unless the path it would land on equals an entry or lies under
 # one, the match of Nexus direct_operation_journal._is_path_in_scope (exact, or entry + "/"
-# prefix; case-sensitive). That path is the physical one, resolved here as the worker: the deepest
-# existing directory through `cd -P` (no symlinked or other-case component survives), then the
-# components mkdir will create, or an existing file's own name (realpath), so neither a symlink in
-# the checkout nor a case variant of a name can move a write out of scope. Entries are taken
-# literally, never resolved (a symlink planted at an entry must not widen it). The profile then
-# allows writes in the checkout only under the entries (plus creating their ancestor
-# directories): Seatbelt checks the resolved path, so a symlink swapped in after the check
-# (by a process a sweep missed) cannot land the write elsewhere either.
+# prefix; byte for byte). That path is the canonical one, resolved here as the worker with
+# /bin/realpath (the shell's own `cd -P`/`pwd -P` keep the typed case and Unicode form): the
+# existing file itself, else its deepest existing directory followed by the components mkdir will
+# create, as typed. Every existing component is thus a real directory under its on-disk name, case
+# and Unicode form, so neither a symlink in the checkout nor a case or normalization variant of a
+# name can move a write out of scope. Entries are taken literally, never resolved (a symlink
+# planted at an entry must not widen it): an entry must name existing components in their on-disk
+# case and Unicode form, or every write under it is refused (refused, never let through). The
+# profile then allows writes in the checkout only under the entries (plus creating their
+# ancestors): Seatbelt checks the resolved path, so a symlink swapped in after the check (by a
+# process a sweep missed) cannot land the write elsewhere either.
 #
 # For tests and the pre-install canary the Owner may run this file directly (not through sudo) with
 # CAIRNWORK_LOCAL_WORKER_RUNS / CAIRNWORK_LOCAL_WORKER_PYROOT set; running as the worker account,
@@ -166,7 +169,7 @@ require_in_scope() {
   if [ -e "$TARGET" ]; then
     landed=$(/bin/realpath -- "$TARGET") || refuse "write target cannot be resolved"
   else
-    landed=$(physical_dir "$2")${TARGET#"$2"} || refuse "write directory cannot be resolved"
+    landed=$(/bin/realpath -- "$2")${TARGET#"$2"} || refuse "write directory cannot be resolved"
   fi
   case "$landed" in
     "$CHECKOUT"/*) ;;
