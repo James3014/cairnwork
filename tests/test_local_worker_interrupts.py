@@ -257,3 +257,43 @@ def test_w1_a_signal_as_the_finish_turn_returns_is_only_counted(tmp_path, on_sig
     )
     assert loop.late_signals == 1 and out.cleanup == "ok"
     validate_record(episode.build_record(META, out))
+
+
+def test_w2_a_signal_while_a_system_exit_unwinds_keeps_the_exit(tmp_path, on_sigterm, monkeypatch):
+    """Review of PR #248, W2: the KeyboardInterrupt replaces the SystemExit in flight; the exit is
+    still deferred to the caller (it was lost and the CLI exited 0)."""
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    exit_seven = SystemExit(7)
+
+    def step(log, messages, deadline):
+        try:
+            raise exit_seven
+        finally:
+            os.kill(os.getpid(), signal.SIGTERM)  # arrives while SystemExit unwinds
+
+    monkeypatch.setattr(loop, "_step", step)
+    out = _run(loop)
+    assert out.abort_cause == "interrupted" and loop.deferred is exit_seven
+    assert out.cleanup == "ok" and loop.late_signals == 0
+    validate_record(episode.build_record(META, out))
+
+
+def test_w2_the_cli_exits_with_the_replaced_system_exit(harness, monkeypatch):
+    run, out = harness
+
+    class ExitThenSignal(World):
+        def handle(self, action, args, stdin):
+            if action == "read":
+                try:
+                    raise SystemExit(9)
+                finally:
+                    os.kill(os.getpid(), signal.SIGTERM)
+            return super().handle(action, args, stdin)
+
+    monkeypatch.setattr(local_worker_fakes, "World", ExitThenSignal)
+    with pytest.raises(SystemExit) as exc:
+        run([READ], "run")
+    assert exc.value.code == 9
+    [rec] = lines(out)
+    assert rec["termination"]["abort_cause"] == "interrupted"

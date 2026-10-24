@@ -207,8 +207,10 @@ class AgentLoop:
             self._abort(out, cause or "internal_error", exc)
             return
         out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
-        if not isinstance(exc, KeyboardInterrupt):
-            self.deferred = self.deferred or exc
+        # W2 (review of PR #248): an interrupt raised while a SystemExit unwound replaced it
+        held = exc.__context__ if isinstance(exc, KeyboardInterrupt) else exc
+        if held is not None and not isinstance(held, (Exception, KeyboardInterrupt)):
+            self.deferred = self.deferred or held
 
     def _abort(self, out: LoopOutcome, cause: str, exc: Exception) -> None:
         out.exit_reason, out.abort_cause = "ERROR_ABORT", cause
