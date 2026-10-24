@@ -11,12 +11,16 @@ read-only, bottom-up order.
 import os
 import shutil
 import stat
+import subprocess
 import sys
 
 import pytest
 from conftest import commit_change
+from test_recovery import GOOD, crash, stores
+from test_recovery import project as project  # noqa: F401 - fixture
 
 from cairnwork import checkout_grant
+from cairnwork.recovery import recover
 from cairnwork.verifier_account import VerifierAccount
 from cairnwork.verifiers import parse_verifier, run_verifiers
 
@@ -121,6 +125,44 @@ def _clean_account_run_root():
 def test_account_mode_checkout_writes_match_owner_mode(repo, _clean_account_run_root):
     """Parity: the same EXPECTED table as owner mode, as the dedicated account."""
     _check(_run_scenarios(repo, ACCOUNT.run_root, ACCOUNT))
+
+
+@pytest.mark.sandbox
+@pytest.mark.verifier_account
+def test_recovery_removes_what_the_account_wrote_in_a_crashed_checkout(
+    project, tmp_path, _clean_account_run_root
+):
+    """A crash leaves a writable checkout holding a directory the account closed to itself.
+    Recovery removes all of it, even when the owner-side pass covers the same root: the account
+    goes first, before the owner's chmod 0o700 could shut it out."""
+    crash(project, tmp_path, "CANDIDATE", GOOD)
+    ledger, notary, journal = stores(tmp_path)
+    attempt = journal.entries(ledger.in_flight()[0].task_id)[-1].attempt_id
+    work = ACCOUNT.run_root / f"{attempt}-q-v0.work"
+    work.mkdir(mode=0o700)
+    os.chmod(work, 0o3770)  # as verifiers._run_all makes it
+    checkout = work / f"{attempt}-q-v0"
+    (checkout / "tests").mkdir(parents=True)
+    (checkout / "tests" / "test_x.py").write_text("x\n")
+    ACCOUNT.grant_write(checkout)
+    locked = checkout / "tests" / "locked"
+    code = (
+        f"import os; p = {str(locked)!r}; os.makedirs(p + '/inner');"
+        " open(p + '/inner/f', 'w').write('x'); os.chmod(p + '/inner', 0); os.chmod(p, 0)"
+    )
+    with ACCOUNT.exclusive():
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            ACCOUNT.wrap([ACCOUNT.python, "-P", "-c", code], None),
+            cwd=ACCOUNT.root, capture_output=True, text=True, timeout=60, check=False,
+        )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    assert os.lstat(locked).st_uid != os.getuid()  # the account's, closed to the owner
+    (decision,) = recover(
+        ledger=ledger, notary=notary, journal=journal, run_root=ACCOUNT.run_root,
+        verifier_account=ACCOUNT,
+    )  # fmt: skip
+    assert decision.detail == "", decision.detail
+    assert not os.path.lexists(work)
 
 
 def _tree(root):
