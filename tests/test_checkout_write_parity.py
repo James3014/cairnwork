@@ -79,7 +79,7 @@ def _normal(entry: str) -> str:
     return entry
 
 
-def _run_scenarios(repo, run_root, account):
+def _run_scenarios(repo, run_root, account, run_id):
     files = {f"tests/test_{name}.py": _HEAD + body for name, body in SCENARIOS.items()}
     files.update({"pkg/__init__.py": "", "pkg/data.txt": "v1\n", "pkg/sub/x.txt": "x\n"})
     head = commit_change(repo, files)
@@ -87,7 +87,6 @@ def _run_scenarios(repo, run_root, account):
         parse_verifier(name, ["python3", "-m", "pytest", f"tests/test_{name}.py"])
         for name in SCENARIOS
     )
-    run_id = "w" + os.urandom(6).hex()
     python = None if account is not None else sys.executable
     runs = run_verifiers(repo, head, specs, run_root, run_id, python=python, account=account)
     for run in runs:
@@ -108,29 +107,41 @@ def _check(runs):
 
 @pytest.mark.sandbox
 def test_owner_mode_checkout_writes(repo, tmp_path):
-    _check(_run_scenarios(repo, tmp_path / "runs", None))
+    _check(_run_scenarios(repo, tmp_path / "runs", None, "w" + os.urandom(6).hex()))
 
 
 @pytest.fixture
-def _clean_account_run_root():
-    before = set(os.listdir(ACCOUNT.run_root)) if ACCOUNT.run_root.is_dir() else set()
-    yield
-    for name in set(os.listdir(ACCOUNT.run_root)) - before:
-        ACCOUNT.remove(ACCOUNT.run_root / name)
-        shutil.rmtree(ACCOUNT.run_root / name, ignore_errors=True)
+def own_names():
+    """Name prefixes this test creates in the account's run root; only those are removed after
+    it. The run root is shared with other sessions' runs: never remove "whatever is new". If a
+    failure left owner directories shut (0o700), reopen them first so the account's rm gets in."""
+    prefixes: list[str] = []
+    yield prefixes
+    for name in os.listdir(ACCOUNT.run_root):
+        if not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        path = ACCOUNT.run_root / name
+        for top, dirs, _ in os.walk(path):
+            for entry in [top, *(os.path.join(top, d) for d in dirs)]:
+                if not os.path.islink(entry) and os.lstat(entry).st_uid == os.getuid():
+                    os.chmod(entry, os.lstat(entry).st_mode | 0o777)
+        ACCOUNT.remove(path)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.mark.sandbox
 @pytest.mark.verifier_account
-def test_account_mode_checkout_writes_match_owner_mode(repo, _clean_account_run_root):
+def test_account_mode_checkout_writes_match_owner_mode(repo, own_names):
     """Parity: the same EXPECTED table as owner mode, as the dedicated account."""
-    _check(_run_scenarios(repo, ACCOUNT.run_root, ACCOUNT))
+    run_id = "w" + os.urandom(6).hex()
+    own_names.append(f"{run_id}-")
+    _check(_run_scenarios(repo, ACCOUNT.run_root, ACCOUNT, run_id))
 
 
 @pytest.mark.sandbox
 @pytest.mark.verifier_account
 def test_recovery_removes_what_the_account_wrote_in_a_crashed_checkout(
-    project, tmp_path, _clean_account_run_root
+    project, tmp_path, own_names
 ):
     """A crash leaves a writable checkout holding a directory the account closed to itself.
     Recovery removes all of it, even when the owner-side pass covers the same root: the account
@@ -138,6 +149,7 @@ def test_recovery_removes_what_the_account_wrote_in_a_crashed_checkout(
     crash(project, tmp_path, "CANDIDATE", GOOD)
     ledger, notary, journal = stores(tmp_path)
     attempt = journal.entries(ledger.in_flight()[0].task_id)[-1].attempt_id
+    own_names.append(f"{attempt}-")
     work = ACCOUNT.run_root / f"{attempt}-q-v0.work"
     work.mkdir(mode=0o700)
     os.chmod(work, 0o3770)  # as verifiers._run_all makes it
