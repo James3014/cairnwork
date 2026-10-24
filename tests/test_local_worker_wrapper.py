@@ -281,6 +281,42 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
     tree = parse_status(run(runs, "status", root).stdout)
     assert tree.paths() == ["a.txt", "new dir/b.py", "x.log"]
     stat = run(runs, "numstat", root)
-    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (4, 0), stat.stdout
+    # staged with --force: the ignored x.log counts too (every file the run changed)
+    assert stat.returncode == 0 and parse_numstat(stat.stdout) == (5, 0), stat.stdout
     assert sorted(p.name for p in (co / ".git").rglob("*")) == before  # .git never written
     assert list((runs / TAG / "tmp").iterdir()) == []  # the throwaway index is removed
+
+
+def _git_checkout(runs):
+    co = runs / TAG / "checkout"
+    (co / ".git").rmdir()
+    git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (co / ".gitignore").write_text("*.log\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    return co, str(runs / TAG)
+
+
+@pytest.mark.sandbox
+def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
+    """Review of #239, finding 2: files the worker can write must not change what numstat counts.
+    $HOME/.config/git/* is ignored (HOME is /var/empty for git); a worktree .gitattributes "-diff"
+    or .gitignore "*" is itself part of the change, but cannot hide or binarise other lines."""
+    from experimental.local_worker.gitstate import parse_numstat
+
+    co, root = _git_checkout(runs)
+    assert run(runs, "write", root, "a.txt", stdin=b"hello\nworld\n").returncode == 0
+    assert run(runs, "write", root, "new/b.py", stdin=b"x\ny\nz\n").returncode == 0
+    base = parse_numstat(run(runs, "numstat", root).stdout)
+    assert base == (4, 0)
+    home = runs / TAG / "tmp"  # the sandboxed HOME of every other action
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "attributes").write_text("* -diff\n")
+    (home / ".config" / "git" / "ignore").write_text("*\n")
+    (home / ".gitconfig").write_text("[core]\n\tattributesFile = ~/.config/git/attributes\n")
+    assert parse_numstat(run(runs, "numstat", root).stdout) == base
+    assert run(runs, "write", root, ".gitattributes", stdin=b"* -diff\n").returncode == 0
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0)  # +1: the file itself
+    assert run(runs, "write", root, "sub/.gitignore", stdin=b"*\n").returncode == 0
+    assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0)  # nothing hidden

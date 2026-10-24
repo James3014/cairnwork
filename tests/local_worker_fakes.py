@@ -89,7 +89,7 @@ class World:
 
     def numstat(self) -> bytes:
         out = []
-        for p in [p for p in self.changed() if not p.endswith(".log")]:  # git diff skips ignored
+        for p in self.changed():  # like the wrapper: staged with --force, ignored files count
             old = self.base.get(p, "").splitlines()
             new = self.files.get(p, "").splitlines()
             diff = list(difflib.ndiff(old, new))
