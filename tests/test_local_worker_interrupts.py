@@ -233,3 +233,27 @@ def test_a_first_signal_during_cleanup_is_only_counted(tmp_path, on_sigterm, lim
     assert out.cleanup == "ok" and out.patch == (0, 0, 0) and loop.late_signals == 1
     assert [c[0] for c in world.calls][-2:] == ["sweep", "numstat"]  # the cleanup went on
     validate_record(episode.build_record(META, out))
+
+
+def test_w1_a_signal_as_the_finish_turn_returns_is_only_counted(tmp_path, on_sigterm, monkeypatch):
+    """Review of PR #248, W1: the finish turn is appended before COMPLETED is recorded; an
+    interrupt there made an ERROR_ABORT line ending in a finish turn, which the schema refuses."""
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    real = loop._step
+
+    def step(log, messages, deadline):
+        finished = real(log, messages, deadline)
+        if finished is not None:
+            os.kill(os.getpid(), signal.SIGTERM)  # lands before _loop records COMPLETED
+        return finished
+
+    monkeypatch.setattr(loop, "_step", step)
+    out = _run(loop)
+    assert (
+        out.exit_reason == "COMPLETED"
+        and not out.interrupted
+        and out.turns[-1].action_type == "finish"
+    )
+    assert loop.late_signals == 1 and out.cleanup == "ok"
+    validate_record(episode.build_record(META, out))

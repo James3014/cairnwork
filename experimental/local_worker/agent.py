@@ -229,8 +229,7 @@ class AgentLoop:
                 log.t_end = self._own()
                 if log.assistant_msg_index >= 0:
                     out.turns.append(log)
-            if finished is not None:
-                self.interruptible = False
+            if finished is not None:  # _step already cleared interruptible
                 out.exit_reason, out.needs_spec = "COMPLETED", finished == "NEEDS_SPEC"
                 return
             turn += 1
@@ -304,11 +303,13 @@ class AgentLoop:
             log.action_type, log.error_category = "invalid_tool_call", "INVALID_CALL"
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(bad)})
             return None
-        log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
-        log.tool_args = args
-        if name == "finish":
+        if name == "finish":  # no interrupt once a turn is a finish: it can only be COMPLETED
+            self.interruptible = False  # (review of PR #248, W1); a signal is only counted now
+            log.action_type, log.tool_args = name, args
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": "finished"})
             return args["status"]
+        log.action_type = "run_test" if name == "run_tests" else name  # the spec's action name
+        log.tool_args = args
         text = self._execute(log, name, args, deadline)
         messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
         return None
