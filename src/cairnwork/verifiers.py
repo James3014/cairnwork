@@ -4,22 +4,24 @@ Verifiers come from the task, so they are untrusted text. Only one shape is
 accepted: ``python3 -m pytest [-q] [-p no:cacheprovider] tests/<file>.py[::<name>]...``.
 Anything else is rejected before it runs, and nothing goes through a shell.
 
-Each run happens in a new clone of the candidate commit made from Cairnwork's
-repository (never in the worker's clone), with a minimal environment (no
-GIT_*, no inherited credentials, HOME and TMPDIR inside the run directory,
-bytecode and the pytest cache disabled) and a timeout. A verifier passes only
-if it exits 0 and leaves the checkout identical to the candidate tree; a
-verifier that writes into the checkout fails. The pytest run must also leave a
-JUnit report showing at least one test run and none failed, errored, skipped or
-xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with rootdir
-and confcutdir at the checkout, so no ini in the candidate or a parent directory
-applies, and plugin autoloading is off; the ini holds only allow-listed keys from
-the task's base commit and plugins load by explicit -p (pytest_config.py). Output
-streams to a log file with a size cap, the run's process group is killed afterwards, and logs and
-reports live in a private directory, created with O_EXCL|O_NOFOLLOW. A process
-that starts its own session escapes the group kill; only a sandbox stops that.
-The observation hash binds the candidate commit, verifier id, full argv, exit
-code, timeout, mutations, test result and log hash.
+Each run happens in a new clone of the candidate commit made from Cairnwork's repository (never
+in the worker's clone), with a minimal environment (no GIT_*, no inherited credentials, HOME and
+TMPDIR inside the run directory, bytecode and the pytest cache disabled) and a timeout. A
+verifier passes only if it exits 0 and, at the end, the checkout matches the candidate tree: a
+final comparison (treecompare.py) of paths, bytes, symlink targets and the owner-execute bit. It
+does not cover the top-level .git (the verifier's scratch: never used by the owner afterwards),
+files next to the checkout, times, ownership, link counts or other mode bits, and a change made
+and undone during the run is not seen. Under a verifier account the checkout is the account's
+own copy, so a test may write, utime and chmod it as in owner mode (account_checkout.py, #240).
+The pytest run must also leave a JUnit report showing at least one test run and none failed,
+errored, skipped or xfailed. pytest's configuration is pinned to a Cairnwork-owned ini with
+rootdir and confcutdir at the checkout, so no ini in the candidate or a parent directory
+applies, and plugin autoloading is off; the ini holds only allow-listed keys from the task's
+base commit and plugins load by explicit -p (pytest_config.py). Output streams to a log file
+with a size cap, the run's process group is killed afterwards, and logs and reports live in a
+private directory, created with O_EXCL|O_NOFOLLOW. A process that starts its own session escapes
+the group kill; only a sandbox stops that. The observation hash binds the candidate commit,
+verifier id, full argv, exit code, timeout, mutations, test result and log hash.
 
 The run is confined with macOS Seatbelt (see cairnwork_sandbox): no network, reads only
 from the system, the interpreter and the checkout, writes only to the checkout
@@ -58,6 +60,7 @@ from pathlib import Path
 
 import cairnwork_sandbox
 from cairnwork import pytest_config, report_channel, report_guard
+from cairnwork.account_checkout import make_account_checkout
 from cairnwork.confined import ATTEMPT_ENV, MAX_LOG_BYTES, RUN_TOKEN_VAR
 from cairnwork.core_request import VerifierObservation
 from cairnwork.reasons import why_not_passed
@@ -208,11 +211,13 @@ def _run_all(
         work.parent.mkdir(parents=True, exist_ok=True)
         work.mkdir(mode=0o700)
         try:
-            if account is not None:
+            if account is None:
+                checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
+            else:  # the account's own copy: it may write, utime and chmod as the owner may (#240)
                 os.chmod(work, 0o3770)
-            checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
-            if account is not None:  # writable as in owner mode, whatever the umask (#240)
-                account.grant_write(checkout)
+                checkout = make_account_checkout(
+                    account, python, repo, candidate_commit, work, clone_id
+                )
             runs.append(
                 _run_one(
                     repo,
@@ -235,11 +240,11 @@ def _run_all(
 def _remove_checkout(work: Path, clone_id: str, account) -> None:
     """Remove a verifier's work dir and checkout; a leftover is only disk space, never a verdict.
 
-    Under the account the checkout holds files and directories the account made (#240). The
-    account removes them first, while every owner directory in the checkout is still open to it;
-    the owner then removes what is left (its own directories, which the account cannot chmod)
-    without ever walking a tree the account wrote with chmod. remove_attempt_clone is the owner
-    path only: its chmod 0o700 pass would shut the account out of its own leftovers."""
+    Under the account the checkout is the account's own copy (#240, account_checkout.py): the
+    account removes it first; the owner then removes the rest of ``work`` (it owns ``work`` and
+    any staging clone a failure left) without chmodding or walking the account's tree.
+    remove_attempt_clone is the owner path only: its chmod 0o700 pass cannot touch the account's
+    directories and, run first, could shut the account out of what is inside."""
     if account is not None:
         try:
             account.remove(work)

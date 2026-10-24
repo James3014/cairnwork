@@ -31,8 +31,8 @@ def _execute(argv, profile_path, checkout, env, timeout, log_path, account, back
     As if the verifier's venv were activated, its bin directory (argv[0] is its Python)
     leads PATH: tests that spawn plain ``python`` get the same interpreter as pytest."""
     env["PATH"] = os.pathsep.join(filter(None, (str(Path(argv[0]).parent), env.get("PATH"))))
-    # The verifier account does not own the checkout, so git would refuse it as a
-    # "dubious ownership" repository; trust exactly this checkout, nothing wider.
+    # git refuses a repository another uid owns ("dubious ownership"); trust exactly this
+    # checkout, nothing wider (under the account it is the account's own copy since #240).
     env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="safe.directory")
     env["GIT_CONFIG_VALUE_0"] = os.path.realpath(checkout)
     if account is None:
