@@ -47,7 +47,13 @@ from experimental.local_worker.agent_protocol import (
     decode_call,
     render,
 )
-from experimental.local_worker.endpoint import Endpoint, EndpointError, EndpointTimeout, parse_usage
+from experimental.local_worker.endpoint import (
+    Endpoint,
+    EndpointError,
+    EndpointTimeout,
+    first_message,
+    parse_usage,
+)
 from experimental.local_worker.episode import LoopOutcome, TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
@@ -266,8 +272,9 @@ class AgentLoop:
         resp = self.endpoint.chat(self._payload(messages), deadline)
         *tokens, log.usage_status = parse_usage(resp)
         log.tokens = (tokens[0], tokens[1], tokens[2])
-        log.usage_raw, log.server_model = resp.get("usage"), _str_or_none(resp.get("model"))
-        msg = _message(resp)
+        log.usage_raw, model = resp.get("usage"), resp.get("model")
+        log.server_model = model if isinstance(model, str) else None
+        msg = first_message(resp)
         calls = msg.get("tool_calls") or []
         assistant: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
         messages.append(assistant)
@@ -385,16 +392,3 @@ class AgentLoop:
             last.tree = self.observe()
         except (WorkerIsolationError, ToolDeadline):
             pass
-
-
-def _message(resp: dict) -> dict:
-    choices = resp.get("choices")
-    first = choices[0] if isinstance(choices, list) and choices else None
-    msg = first.get("message") if isinstance(first, dict) else None
-    if not isinstance(msg, dict):
-        raise EndpointError("response has no choices[0].message object")
-    return msg
-
-
-def _str_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
