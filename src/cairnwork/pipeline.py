@@ -32,7 +32,7 @@ from cairnwork.deferred_tests import (
 from cairnwork.gitcmd import OID
 from cairnwork.journal import AlreadyDispatched, Journal
 from cairnwork.notary import Notary
-from cairnwork.ownership import OWNER, OwnershipLedger, request_digest
+from cairnwork.ownership import OWNER, InvalidStatusTransition, OwnershipLedger, request_digest
 from cairnwork.p2p import p2p_for
 from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, DIRECT_MODE
 from cairnwork.pipeline_judge import judge_candidate, tests_with_teeth
@@ -209,7 +209,13 @@ def run_bound_task(
 
 
 def _execute(task, specs, record, ledger, notary, journal, worker, run_root, verifying):
-    """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable."""
+    """Dispatch a BOUND task: the journal entry comes first, so a crash is recoverable.
+
+    The task was read BOUND before the journal write, so a cancel (or supersede) can land in
+    between (#243). The ledger move then refuses (TRANSITIONS); the run returns NOT_BOUND with
+    the ledger's status and closes its append-only DISPATCHED row with a FINISHED row whose
+    detail is that status. Recovery never reads it (the task is not in flight, and the detail
+    is not COMPLETED/FAILED); ``status`` shows phase FINISHED instead of a dangling DISPATCHED."""
     attempt_id = f"a{secrets.token_hex(8)}"
     steps = _Steps(journal, record.task_id, attempt_id)
     try:
@@ -217,7 +223,12 @@ def _execute(task, specs, record, ledger, notary, journal, worker, run_root, ver
     except AlreadyDispatched:  # another runner took this task first
         status = ledger.get(task_id=record.task_id).status
         return TaskResult(record.task_id, "", status, reason="NOT_BOUND")
-    ledger.set_status(record.task_id, "DISPATCHED")
+    try:
+        ledger.set_status(record.task_id, "DISPATCHED")
+    except InvalidStatusTransition:  # lost the race after the read: the worker never ran
+        status = ledger.get(task_id=record.task_id).status
+        steps.reach("FINISHED", status)
+        return TaskResult(record.task_id, attempt_id, status, reason="NOT_BOUND")
     result = TaskResult(record.task_id, attempt_id, "FAILED")
     try:
         _attempt(
