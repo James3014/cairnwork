@@ -20,14 +20,13 @@ and nothing runs past start + max_wall_seconds.
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
 
-Once the base is verified, ``run`` never raises: a reply that breaks the tool-call structure
-(agent_protocol.ProtocolError, e.g. a tool name that is not a string) and any unexpected error end
-the episode as a recorded ERROR_ABORT, and the cleanup (sweep, numstat) always runs, in a
-``finally``. The first SIGTERM/SIGINT (cli.py installs ``interrupt``) stops the loop as
-"interrupted"; later ones are only counted, and a SystemExit is recorded and handed to the caller
-to re-raise after the line is written (review of #239, NB8). A call the
-model can repair (agent_protocol.BadCall: an unknown tool, a missing or extra argument) is an
-``invalid_tool_call`` turn: the model is told why and the episode goes on.
+Once the loop starts, ``run`` never raises: a reply that breaks the tool-call structure
+(agent_protocol.ProtocolError) and any unexpected error end the episode as a recorded ERROR_ABORT,
+and the cleanup (sweep, numstat) always runs, in a ``finally``. The first SIGTERM/SIGINT (cli.py
+installs ``interrupt``) stops the loop as "interrupted"; later ones are only counted
+(``late_signals``, in the private transcript); a SystemExit is handed to the caller to re-raise
+after the line is written (review of #239, NB8). A call the model can repair
+(agent_protocol.BadCall: an unknown tool, a missing or extra argument) is an invalid_tool_call.
 """
 
 from __future__ import annotations
@@ -48,12 +47,7 @@ from experimental.local_worker.agent_protocol import (
     decode_call,
     render,
 )
-from experimental.local_worker.endpoint import (
-    Endpoint,
-    EndpointError,
-    EndpointTimeout,
-    parse_usage,
-)
+from experimental.local_worker.endpoint import Endpoint, EndpointError, EndpointTimeout, parse_usage
 from experimental.local_worker.episode import LoopOutcome, TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_numstat, parse_tracked
 from experimental.local_worker.gitstate import parse_status as _parse_status
@@ -77,6 +71,14 @@ class _StatusUnavailable(RuntimeError):
     pass
 
 
+_ABORT_CAUSES = (  # checked in order; any other Exception is an internal_error
+    (EndpointError, "endpoint_error"),
+    (WorkerIsolationError, "worker_isolation"),
+    (_StatusUnavailable, "status_unavailable"),
+    (ProtocolError, "protocol_error"),
+)
+
+
 def initial_messages(task: Task) -> list[dict]:
     targets = "\n".join(f"{i}: {t}" for i, t in enumerate(task.public_tests))
     user = f"{task.prompt}\n\nPublic test targets (run_tests target_index):\n{targets}"
@@ -98,10 +100,7 @@ class AgentLoop:
         self.clock, self.now = clock, now
         tools.clock = clock  # every wrapper call is held to deadlines on this clock
         self.abort_detail: str | None = None
-        # Claude review of #239, NB8: the first SIGTERM/SIGINT while the loop runs interrupts it;
-        # later ones, and any during the cleanup and the line write, are only counted. A
-        # BaseException that is no interrupt (SystemExit) is recorded and kept for the caller
-        # to re-raise once the line is written.
+        # NB8 (review of #239): signal state (interrupt, _stopped); deferred SystemExit & co.
         self.interruptible = True
         self.late_signals = 0
         self.deferred: BaseException | None = None
@@ -150,8 +149,10 @@ class AgentLoop:
         elapsed_offset: float = 0.0,
         expected_base: str | None = None,
     ) -> LoopOutcome:
-        """Run from ``messages`` (a fresh start or a resume prefix) until a stop; never raises
-        once the base is verified: every stop is recorded in the returned outcome."""
+        """Run from ``messages`` (a fresh start or a resume prefix) until a stop, recorded in the
+        outcome. A SIGTERM/SIGINT before the loop starts (base observe, tracked query) escapes as
+        KeyboardInterrupt and no line is written: no turn has run. Once a stop is recorded (or
+        _stopped is recording one), a signal is only counted and that stop stands."""
         lim = self.limits
         self._start = self.clock() - elapsed_offset
         self._offset = elapsed_offset
@@ -164,27 +165,17 @@ class AgentLoop:
             raise RefusedStart(f"checkout HEAD {base.head} is not the pinned base {expected_base}")
         started = self.now().astimezone(UTC8).isoformat()
         out = LoopOutcome(base=base, base_paths=self._base_paths(), started_at=started)
+        pending: BaseException | None = None  # what stopped the loop, until _stopped records it
         try:
-            self._loop(messages, out, first_turn, deadline)
-        except (EndpointTimeout, TimeoutError):
-            out.exit_reason, out.timed_out, out.limit_hit = "TIMEOUT", True, "max_wall_seconds"
-        except KeyboardInterrupt:
-            out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
-        except EndpointError as exc:
-            self._abort(out, "endpoint_error", exc)
-        except WorkerIsolationError as exc:
-            self._abort(out, "worker_isolation", exc)
-        except _StatusUnavailable as exc:
-            self._abort(out, "status_unavailable", exc)
-        except ProtocolError as exc:
-            self._abort(out, "protocol_error", exc)
-        except Exception as exc:  # noqa: BLE001 - recorded, never lost: the line is still written
-            self._abort(out, "internal_error", exc)
-        except BaseException as exc:  # noqa: BLE001 - SystemExit & co.: re-raised after the line
-            out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
-            self.deferred = exc
+            try:
+                self._loop(messages, out, first_turn, deadline)  # clears interruptible on a stop
+            except BaseException as exc:  # noqa: BLE001 - every stop is recorded (_stopped)
+                pending = exc
+                self._stopped(out, exc)
+        except KeyboardInterrupt as exc:  # the one interrupt, landing as _stopped was entered
+            self.late_signals += pending is not None  # then it only interrupted the recording
+            self._stopped(out, pending or exc)
         finally:
-            self.interruptible = False  # from here on a signal is only counted
             self._cleanup(out)
             out.ended_at = self.now().astimezone(UTC8).isoformat()
             out.wall_seconds = self._own()
@@ -199,6 +190,20 @@ class AgentLoop:
         self.interruptible = False
         raise KeyboardInterrupt
 
+    def _stopped(self, out: LoopOutcome, exc: BaseException) -> None:
+        """Record why the loop stopped; a non-Exception (SystemExit) is deferred to the caller."""
+        self.interruptible = False  # the loop has stopped: from here on a signal is counted
+        if isinstance(exc, (EndpointTimeout, TimeoutError)):
+            out.exit_reason, out.timed_out, out.limit_hit = "TIMEOUT", True, "max_wall_seconds"
+            return
+        if isinstance(exc, Exception):
+            cause = next((c for kind, c in _ABORT_CAUSES if isinstance(exc, kind)), None)
+            self._abort(out, cause or "internal_error", exc)
+            return
+        out.exit_reason, out.interrupted, out.abort_cause = "ERROR_ABORT", True, "interrupted"
+        if not isinstance(exc, KeyboardInterrupt):
+            self.deferred = self.deferred or exc
+
     def _abort(self, out: LoopOutcome, cause: str, exc: Exception) -> None:
         out.exit_reason, out.abort_cause = "ERROR_ABORT", cause
         self.abort_detail = f"{type(exc).__name__}: {exc}"
@@ -207,6 +212,7 @@ class AgentLoop:
         while True:
             stop = self._limit(turn, messages, out.turns[-1] if out.turns else None, deadline)
             if stop:
+                self.interruptible = False  # a stop is recorded: a signal is only counted now
                 out.exit_reason, out.limit_hit = stop
                 out.timed_out = stop[0] == "TIMEOUT"
                 return
@@ -218,6 +224,7 @@ class AgentLoop:
                 if log.assistant_msg_index >= 0:
                     out.turns.append(log)
             if finished is not None:
+                self.interruptible = False
                 out.exit_reason, out.needs_spec = "COMPLETED", finished == "NEEDS_SPEC"
                 return
             turn += 1

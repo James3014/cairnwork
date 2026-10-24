@@ -94,3 +94,91 @@ def test_a_system_exit_is_raised_only_after_the_line_is_written(harness, monkeyp
     [rec] = lines(out)
     assert rec["termination"]["abort_cause"] == "interrupted"
     assert rec["termination"]["cleanup"] == "ok"
+
+
+@pytest.fixture
+def on_sigterm():
+    """Installs a loop's ``interrupt`` for SIGTERM (as cli.py does) and restores the old one."""
+    before = signal.getsignal(signal.SIGTERM)
+    yield lambda loop: signal.signal(signal.SIGTERM, loop.interrupt)
+    signal.signal(signal.SIGTERM, before)
+
+
+def _run(loop):
+    try:
+        return loop.run(initial_messages(TASK))
+    except KeyboardInterrupt:  # pytest would stop the whole session on it
+        pytest.fail("a signal escaped run()")
+
+
+def _sigterm_then(real):
+    def call(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return real(*args, **kwargs)
+
+    return call
+
+
+def test_a_signal_while_a_stop_is_recorded_is_only_counted(tmp_path, on_sigterm, monkeypatch):
+    loop, _, _, _ = make_loop(tmp_path, [READ], world=Raising("read", RuntimeError("boom")))
+    on_sigterm(loop)
+    monkeypatch.setattr(loop, "_abort", _sigterm_then(loop._abort))  # while it is recorded
+    out = _run(loop)
+    assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == "internal_error"
+    assert out.cleanup == "ok" and loop.late_signals == 1  # the recorded stop stands
+    validate_record(episode.build_record(META, out))
+
+
+@pytest.mark.parametrize(
+    ("exc", "cause"), [(RuntimeError("boom"), "internal_error"), (SystemExit(7), "interrupted")]
+)
+def test_a_signal_as_the_stop_is_being_recorded_keeps_that_stop(
+    tmp_path, on_sigterm, monkeypatch, exc, cause
+):
+    loop, _, _, _ = make_loop(tmp_path, [READ], world=Raising("read", exc))
+    on_sigterm(loop)
+    real, calls = loop._stopped, []
+
+    def stopped(out, caught):  # the signal lands before _stopped's first line runs
+        calls.append(caught)
+        if len(calls) == 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(out, caught)
+
+    monkeypatch.setattr(loop, "_stopped", stopped)
+    out = _run(loop)
+    assert calls == [exc, exc] and out.abort_cause == cause and loop.late_signals == 1
+    assert loop.deferred is (exc if isinstance(exc, SystemExit) else None)
+    assert out.cleanup == "ok"
+    validate_record(episode.build_record(META, out))
+
+
+def test_a_signal_after_the_model_finished_is_only_counted(tmp_path, on_sigterm, monkeypatch):
+    loop, _, _, _ = make_loop(tmp_path, [READ])
+    on_sigterm(loop)
+    real = loop._loop
+
+    def loop_then_signal(*args):
+        real(*args)
+        os.kill(os.getpid(), signal.SIGTERM)  # the stop is set; the handler runs on return
+
+    monkeypatch.setattr(loop, "_loop", loop_then_signal)
+    out = _run(loop)
+    assert out.exit_reason == "COMPLETED" and not out.interrupted and out.cleanup == "ok"
+    assert loop.late_signals == 1
+    validate_record(episode.build_record(META, out))
+
+
+def test_a_signal_before_the_loop_starts_escapes_and_no_line_is_written(harness, monkeypatch):
+    run, out = harness
+
+    class Early(World):
+        def handle(self, action, args, stdin):
+            if action == "tracked":
+                os.kill(os.getpid(), signal.SIGTERM)
+            return super().handle(action, args, stdin)
+
+    monkeypatch.setattr(local_worker_fakes, "World", Early)
+    with pytest.raises(KeyboardInterrupt):
+        run([READ], "run")
+    assert not list(out.glob("episodes-*.jsonl"))
