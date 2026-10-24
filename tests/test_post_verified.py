@@ -294,7 +294,8 @@ def test_a_broken_config_alerts_only_when_it_sets_a_hook(rig, monkeypatch, capsy
     out = runner.settle(rig["intake"], github, rig["clone"])
     assert out == [{"issue": 7, "pr": "https://github.com/James3014/demo/pull/1"}]
     err = capsys.readouterr().err
-    assert ("ALERT post_verified_hook skipped: JSONDecodeError" in err) == alerted
+    # a truncated config.json is IntakeRefused BAD_CONFIG since #234 (was a raw JSONDecodeError)
+    assert ("ALERT post_verified_hook skipped: IntakeRefused" in err) == alerted
     assert alerted or err == ""
 
 
