@@ -38,7 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cairnwork.changeset import ChangeSetError, read_change_set
-from cairnwork.gitcmd import OID, GitCommandError, run_git
+from cairnwork.diffcheck import diff_check_detail
+from cairnwork.gitcmd import OID, GitCommandError, run_git, run_git_bytes
 from cairnwork.protected_paths import is_protected
 from cairnwork.tamper_scan import CODE as TAMPER_CODE
 from cairnwork.tamper_scan import scan_patch
@@ -202,9 +203,12 @@ def check_candidate_commit(
     if tamper:
         raise CandidateRejected(TAMPER_CODE, ", ".join(str(finding) for finding in tamper[:5]))
     try:
-        run_git(repo, "diff", "--no-ext-diff", "--no-textconv", "--check", base, head)
+        run_git_bytes(
+            repo, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--check", base, head
+        )
     except GitCommandError as exc:
-        raise CandidateRejected("DIFF_CHECK_FAILED", "whitespace errors in the change") from exc
+        detail = diff_check_detail("whitespace errors in the change", exc.__cause__, change.paths)
+        raise CandidateRejected("DIFF_CHECK_FAILED", detail) from exc
     try:
         differences = tree_differences(repo, head, attempt.path)
     except GitCommandError as exc:
