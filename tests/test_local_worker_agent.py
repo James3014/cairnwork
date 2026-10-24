@@ -376,3 +376,25 @@ def test_validator_checks_the_new_fields(tmp_path, corrupt):
     corrupt(rec)
     with pytest.raises(SchemaError):
         validate_record(rec)
+
+
+def test_status_with_a_nonzero_exit_is_not_observed(tmp_path):
+    """Review of #239, finding 3: a failed git query is never parsed, even if its output looks
+    like a clean tree (base: refuse to start; after a tool call: abort)."""
+    world = World()
+    world.status_rc = 3
+    loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], world)
+    with pytest.raises(RefusedStart):
+        loop.run(initial_messages(TASK))
+    world = World()
+    loop, world, _, _ = make_loop(tmp_path / "b", [reply("read_file", path="src/app.py")], world)
+    orig = world.handle
+
+    def handle(action, args, stdin):
+        rc, data = orig(action, args, stdin)
+        after_read = len(world.calls) > 1 and world.calls[-2][0] == "read"
+        return (4 if action == "status" and after_read else rc), data
+
+    world.handle = handle
+    out = loop.run(initial_messages(TASK))
+    assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == "status_unavailable"

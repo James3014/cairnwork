@@ -327,3 +327,23 @@ def test_git_query_temp_dir_is_made_by_mktemp():
     text = WRAPPER.read_text()
     assert '/usr/bin/mktemp -d "$TMPDIR/gitq.XXXXXXXXXX"' in text
     assert "$$" not in text[text.index("GIT_QUERY=") : text.index("real_git()")]
+
+
+@pytest.mark.sandbox
+def test_git_queries_fail_on_an_unreadable_directory(runs):
+    """Review of #239, finding 3: git skips a directory it cannot open with a warning on stderr
+    and exit 0; the query must fail (not observed), never report a tree without it."""
+    co, root = _git_checkout(runs)
+    assert run(runs, "status", root).returncode == 0
+    hidden = co / "hidden"
+    hidden.mkdir()
+    (hidden / "f.py").write_text("x\n")
+    hidden.chmod(0)
+    try:
+        for action in ("status", "numstat"):
+            proc = run(runs, action, root)
+            assert proc.returncode in (3, 4), (action, proc.returncode, proc.stdout)
+            assert b"hidden" in proc.stdout  # git's message instead of a result
+    finally:
+        hidden.chmod(0o700)
+    assert list((runs / TAG / "tmp").iterdir()) == []  # temp dir removed on failure too
