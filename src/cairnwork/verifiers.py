@@ -241,14 +241,16 @@ def _run_all(
 
 def _remove_scratch(dirs, account) -> None:
     """HOME and TMPDIR of a finished run: as with the checkout (remove_checkout), a failing removal
-    never costs the verdict, which is decided by now."""
+    never costs the verdict, which is decided by now, and a leftover is an ALERT on stderr."""
     for scratch in dirs:
         if account is not None:
             try:
                 account.remove(scratch)
             except (VerifierAccountError, OSError, subprocess.SubprocessError):
-                pass  # the owner's rmtree below removes what it can; the rest is disk space
+                pass  # the owner's rmtree below removes what it can; the rest is reported
         shutil.rmtree(scratch, ignore_errors=True)
+        if os.path.lexists(scratch):
+            print(f"ALERT verifier cleanup: {scratch} was not removed", file=sys.stderr, flush=True)
 
 
 def _prepare_run(private: Path, ini: Path, ini_text: bytes, channel=None):

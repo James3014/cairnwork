@@ -24,7 +24,11 @@ each directory's and regular file's user r and x bits to group and other, and th
 ``tree_differences``. So the owner reads exactly what it could read as the checkout's owner in
 owner mode: a file replaced from a 0600 temporary file or a directory left at 0700 is compared as
 in owner mode (mode bits other than the owner's execute bit are not judged), and a path closed to
-its own owner (0000) stays "unreadable", which fails the run in both modes.
+its own owner (0000) stays "unreadable", which fails the run in both modes. Parity limits, both
+fail closed in account mode only: a regular file with more than one link is left as it is (its
+inode may have a name outside the copy, which this must not widen), so if the owner cannot read
+it, it is "unreadable"; and a share step that fails or outlives ``SHARE_TIMEOUT_SECONDS`` leaves
+the rest closed, so what the owner cannot read is "unreadable" too.
 
 A helper that outlives its timeout (``subprocess.run`` kills only sudo) is ended with
 ``account.kill_all()``: callers hold the account's lock (``VerifierAccount.exclusive``), so every
@@ -108,9 +112,10 @@ copy(source, target)
 """
 
 # Runs as the account with ``python -I -S -c SHARE_HELPER <checkout>`` after the run: symlinks
-# and other file types are skipped (lchmod where the platform has it), the top-level .git (not
-# compared) is skipped, and any error leaves that path as it was: the owner then finds it
-# "unreadable", which fails closed.
+# and other file types are skipped (lchmod where the platform has it), so are regular files with
+# more than one link (a name outside the copy may share the inode), and the top-level .git (not
+# compared); any error leaves that path as it was: the owner then finds it "unreadable", which
+# fails closed.
 SHARE_HELPER = r"""
 import os, stat, sys
 
@@ -124,6 +129,8 @@ while stack:
         continue
     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
         continue
+    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        continue  # the same inode has a name outside the copy: never widen it
     user = info.st_mode & 0o500
     try:
         os.chmod(path, stat.S_IMODE(info.st_mode) | user >> 3 | user >> 6, **NOFOLLOW)

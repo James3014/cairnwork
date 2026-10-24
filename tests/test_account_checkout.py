@@ -99,9 +99,16 @@ def _share(checkout, prefix=""):
 
 def test_share_gives_group_and_other_what_the_owner_may_read(tmp_path):
     """User r and x are copied to group and other; nothing else changes. A 0600 file and a 0700
-    directory become readable, a path closed to its owner stays closed, links are not followed,
-    and the top-level .git is left alone."""
+    directory become readable, a path closed to its owner stays closed, symlinks (to a file or to
+    a directory outside) are neither followed nor entered, a file with a second link outside is
+    left as it is, and the top-level .git is left alone."""
     root, outside = tmp_path / "co", tmp_path / "outside"
+    outdir = tmp_path / "outdir"  # stands in for an account-owned directory outside the copy
+    outdir.mkdir(mode=0o700)
+    (outdir / "secret").write_text("s")
+    os.chmod(outdir / "secret", 0o600)
+    (tmp_path / "hl-outside").write_text("h")
+    os.chmod(tmp_path / "hl-outside", 0o600)
     (root / "d700").mkdir(parents=True)
     (root / ".git").mkdir()
     (root / "sub" / ".git").mkdir(parents=True)
@@ -112,6 +119,8 @@ def test_share_gives_group_and_other_what_the_owner_may_read(tmp_path):
         (root / name).write_text("x")
         os.chmod(root / name, mode)
     (root / "link").symlink_to(outside)
+    (root / "dirlink").symlink_to(outdir, target_is_directory=True)
+    os.link(tmp_path / "hl-outside", root / "hl600")
     (root / ".git" / "config").write_text("c")
     os.chmod(root / ".git" / "config", 0o600)
     (root / "sub" / ".git" / "f").write_text("s")
@@ -128,12 +137,16 @@ def test_share_gives_group_and_other_what_the_owner_may_read(tmp_path):
     assert done.returncode == 0, done.stderr
     expected = {
         "f600": 0o644, "f700": 0o755, "f000": 0, "f200": 0o200, "d700/f640": 0o644,
-        "d700": 0o755, "d000": 0, ".git/config": 0o600, "sub/.git/f": 0o644,
+        "d700": 0o755, "d000": 0, ".git/config": 0o600, "sub/.git/f": 0o644, "hl600": 0o600,
     }  # fmt: skip
     for name in expected:
         modes_after.setdefault(name, stat.S_IMODE(os.lstat(root / name).st_mode))
     assert {name: modes_after[name] for name in expected} == expected
-    assert stat.S_IMODE(os.lstat(outside).st_mode) == 0o600  # the link's target is untouched
+    outside_modes = {
+        p: stat.S_IMODE(os.lstat(p).st_mode) for p in (outside, outdir, outdir / "secret")
+    }
+    assert outside_modes == {outside: 0o600, outdir: 0o700, outdir / "secret": 0o600}
+    assert stat.S_IMODE(os.lstat(tmp_path / "hl-outside").st_mode) == 0o600
 
 
 def test_the_owner_rmtree_never_follows_a_symlink_out():
@@ -232,3 +245,19 @@ def test_a_copy_that_times_out_ends_the_helper(repo, tmp_path, monkeypatch):
         make()
     assert account.killed == 1  # kill_all: subprocess.run ended only the outer process
     assert not (work / STAGE).exists()
+
+
+def test_a_failing_share_step_leaves_the_rest_unreadable_not_an_error(monkeypatch, tmp_path):
+    """The share step's failure (here its timeout) is swallowed: what it left closed is then
+    "unreadable" in the comparison, which fails the run; it is never raised past the verdict."""
+    import cairnwork.account_checkout as module
+
+    def timed_out(*_args):
+        raise subprocess.TimeoutExpired("share", 120)
+
+    monkeypatch.setattr(module, "_as_account", timed_out)
+    monkeypatch.setattr(module, "_same_directory", lambda *_args: True)
+    monkeypatch.setattr(module, "tree_differences", lambda *_args: ["unreadable pkg/x"])
+    account = _LocalAccount(ME, tmp_path)
+    found = module.checkout_differences(tmp_path, "c", tmp_path, None, account, sys.executable)
+    assert found == ("unreadable pkg/x",)
