@@ -306,12 +306,14 @@ def test_a_body_cut_off_before_its_length_is_an_error_not_json():
         endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(time.monotonic() + 5)
 
 
-def test_a_read_ended_by_the_watchdog_is_a_timeout(monkeypatch):
+@pytest.mark.parametrize("framing", [b"Connection: close", b"Content-Length: 99999"])
+def test_a_read_ended_by_the_watchdog_is_a_timeout(monkeypatch, framing):
     """Whichever wins at the deadline, the socket timeout or the watchdog's shutdown (which
-    reads as end of body), the result is TIMEOUT. Here the watchdog is made to win."""
+    reads as end of body, or as a cut-off body under Content-Length), the result is TIMEOUT.
+    Here the watchdog is made to win."""
     real_timer = threading.Timer
     monkeypatch.setattr(endpoint.threading, "Timer", lambda t, fn, args: real_timer(0.3, fn, args))
-    port = _drip_server(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", b"{" * 400)
+    port = _drip_server(b"HTTP/1.1 200 OK\r\n" + framing + b"\r\n\r\n", b"{" * 400)
     started = time.monotonic()
     with pytest.raises(endpoint.EndpointTimeout):
         endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1").models(started + 5)

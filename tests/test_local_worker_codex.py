@@ -379,3 +379,14 @@ def test_a_reused_run_root_keeps_its_checkout(harness):
     assert run(done, "resume", "--parent-transcript", tr, root="a" * 32) == 2
     assert run(done, "run", "--seed", "5", root="a" * 32) == 2  # its tree is not clean at base
     assert len(lines(out)) == 1
+
+
+def test_the_parents_root_is_refused_even_once_its_corpus_file_is_archived(harness, capsys):
+    run, out = harness
+    tr = _parent(run, out)
+    for corpus in out.glob("episodes-*.jsonl"):
+        corpus.rename(out.parent / corpus.name)  # archived: no line names root a* any more
+    capsys.readouterr()
+    done = [reply("finish", status="DONE")]
+    assert run(done, "resume", "--parent-transcript", tr, root="a" * 32) == 2
+    assert "needs a fresh run root" in capsys.readouterr().err
