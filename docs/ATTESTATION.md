@@ -203,6 +203,14 @@ Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces 
 lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
 not yet refuse `auto` bundles.
 
+### No receipt without a comparison (#234)
+
+A run whose base could not be compared (`status: "UNCOMPARABLE"` from `cairnwork-verify`, or a
+worker attempt with reason `UNCOMPARABLE: <code>`) **never produces a receipt**. The decision is
+made before Core is called, so there is no Core response, no notary record and nothing for
+`cairnwork-attest statement` to sign; `statement` for that candidate fails as for any candidate
+without a VERIFIED record. UNCOMPARABLE means "no evidence", never "verified" and never "blocked".
+
 ## External candidates (v0.2, Issue #229)
 
 `cairnwork-verify run --test-commit` runs the verifiers on the candidate with the deferred tests

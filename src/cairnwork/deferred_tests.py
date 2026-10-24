@@ -5,9 +5,9 @@ which adds or changes files under ``tests/`` only (no ``conftest.py``, regular f
 only). The worker never gets it: its attempt clone holds the base. Cairnwork then
 
 1. runs the verifiers on the test commit itself (base + tests) and requires a real
-   failure there (pytest exit 1 for at least one verifier, and no verifier erroring
-   with any other non-zero code): tests that already pass, or only fail to import,
-   prove nothing about the fix;
+   failure there (base_comparison): tests that already pass prove nothing about the fix
+   (REFUSED); a base that cannot run them cleanly (collection error, timeout, no sandbox,
+   no report) gives no evidence either way (UNCOMPARABLE, #234);
 2. lays the test files over the worker's candidate in a private index and commits the
    result on top of it; that commit is what the verifiers run, Core notarises and a PR
    would carry (fix and tests together).
@@ -22,9 +22,11 @@ could still be found by a worker with network access.
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from cairnwork.gitcmd import OID, GitCommandError, run_git
+from cairnwork.reasons import _names
 from cairnwork.workspace import ATTEMPT_REF_PREFIX
 
 _IDENTITY = ("-c", "user.name=Cairnwork", "-c", "user.email=cairnwork@localhost")
@@ -196,17 +198,66 @@ def _test_functions(repo: Path, blob: str) -> dict[str, str]:
     return functions
 
 
-def failed_on_base(runs, targets: frozenset[str]) -> bool:
-    """Tests with teeth: one of the new or changed tests failed on the base (the
-    verifier's trusted result, report_guard), and no verifier broke in another way
-    (exit codes other than 0 and 1)."""
-    if any(run.returncode not in (0, 1) for run in runs):
-        return False
+BASE_COMPARE_RULE = "base-compare-v1"  # how base runs map to a Comparison (#234)
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """The deferred tests on the base (#234): TEETH, NO_TEETH (REFUSED) or UNCOMPARABLE (the base
+    could not be judged: no evidence either way, never verified and never a refusal)."""
+
+    kind: str
+    code: str = ""
+    detail: str = ""
+
+    def worker_reason(self, *, isolated: bool) -> str:
+        """Base runs come after WORKER_STARTED, and a worker with the owner's uid could have broken
+        the base on purpose: only an isolated worker's attempt may say UNCOMPARABLE."""
+        return ("UNCOMPARABLE: " if isolated is True else "") + f"{self.code}: {self.detail}"
+
+
+class BaseUncomparable(Exception):
+    """Carries an UNCOMPARABLE Comparison. Not a TestCommitRejected, so no catch site reads it as
+    REFUSED; each boundary maps it explicitly."""
+
+    def __init__(self, comparison: Comparison) -> None:
+        super().__init__(f"{comparison.code}: {comparison.detail}")
+        self.comparison = comparison
+
+
+def _base_problem(run) -> str:
+    rc = run.returncode
+    if run.timed_out or rc is None:  # None without a timeout: no sandbox, nothing ran
+        return "BASE_TIMEOUT" if run.timed_out else "BASE_NOT_EXECUTED"
+    if run.report_too_big:
+        return "BASE_REPORT_OVER_CAP"
+    if run.collect_errors:  # the guard saw a collector fail (exit 2 alone may be an interrupt)
+        return "BASE_COLLECTION_ERROR"
+    if rc not in (0, 1):  # 5: nothing collected; 2 without collect_errors, 3, 4, others: pytest
+        return "BASE_NO_TESTS" if rc == 5 else "BASE_PYTEST_ERROR"
+    return "" if run.recorded else "BASE_NO_REPORT"
+
+
+def base_comparison(runs, targets: frozenset[str]) -> Comparison:
+    """Every run is judged (no short-circuit): one uncomparable run makes it UNCOMPARABLE even when
+    another has teeth. Teeth: a new or changed test (``targets``) failed in the guard's record."""
+    problems = [(run, code) for run in runs if (code := _base_problem(run))]
+    if problems:
+        files = {target.split("::", 1)[0] for target in targets}
+        detail = "; ".join(
+            f"{run.spec.verifier_id}: {code} (exit {run.returncode})"
+            + (f", collection errors {_names(run.collect_errors)}" if run.collect_errors else "")
+            + ("; import fix-introduced symbols inside the test function"
+               if set(run.collect_errors) & files else "")
+            for run, code in problems
+        )  # fmt: skip
+        return Comparison("UNCOMPARABLE", problems[0][1], detail)
     for run in runs:
         for nodeid, outcome in run.outcomes.items():
             if outcome == "failed" and nodeid.split("[", 1)[0] in targets:
-                return True
-    return False
+                return Comparison("TEETH")
+    codes = [run.returncode for run in runs]
+    return Comparison("NO_TEETH", "TESTS_DO_NOT_FAIL_ON_BASE", f"pytest exit codes {codes}")
 
 
 def overlay_tree(

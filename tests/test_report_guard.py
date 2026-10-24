@@ -86,7 +86,7 @@ def test_a_failing_test_is_not_a_pass_but_outcomes_are_kept(tmp_path):
         tmp_path, {"nonce": NONCE, "collected": ["t.py::a"], "outcomes": {"t.py::a": "failed"}}
     )
     v = report_guard.read_verdict(path, NONCE)
-    assert not v.ran and v.outcomes == {"t.py::a": "failed"}  # kept so failed_on_base can see it
+    assert not v.ran and v.outcomes == {"t.py::a": "failed"}  # kept so base_comparison sees it
 
 
 def test_the_plugin_records_a_passing_run_end_to_end(tmp_path):

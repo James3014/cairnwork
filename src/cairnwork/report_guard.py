@@ -102,6 +102,11 @@ class _Reporter:
         self._nonce = nonce
         self._collected = []
         self._outcomes = {}
+        self._collect_errors = []
+
+    def pytest_collectreport(self, report):
+        if report.failed:
+            self._collect_errors.append(report.nodeid)
 
     def pytest_collection_finish(self, session):
         self._collected = [item.nodeid for item in session.items]
@@ -113,7 +118,8 @@ class _Reporter:
             self._outcomes.setdefault(report.nodeid, report.outcome)
 
     def pytest_sessionfinish(self, session, exitstatus):
-        payload = {"nonce": self._nonce, "collected": self._collected, "outcomes": self._outcomes}
+        payload = {"nonce": self._nonce, "collected": self._collected, "outcomes": self._outcomes,
+                   "collect_errors": self._collect_errors}
         if self._fd is not None:
             data = json.dumps(payload).encode()
             os.ftruncate(self._fd, 0)
@@ -153,6 +159,8 @@ class Verdict:
     ran: bool
     outcomes: dict[str, str]
     too_big: bool = False  # the file exceeds MAX_REPORT_BYTES: nothing could be read from it
+    recorded: bool = False  # sessionfinish wrote a well-formed record with our nonce (#234)
+    collect_errors: tuple[str, ...] = ()  # node ids of collectors that failed (B2, #234)
 
 
 def read_verdict(path: Path, nonce: str) -> Verdict:
@@ -186,9 +194,10 @@ def read_verdict_fd(fd: int, nonce: str) -> Verdict:
 def parse_verdict(raw: bytes, nonce: str) -> Verdict:
     """``ran`` is true only when sessionfinish wrote the record, it matches
     the nonce, at least one test was collected, every collected test produced a result, and all
-    results are ``passed``. Outcomes are returned whenever the nonce matches (even when not all
-    passed) so failed_on_base can see a test that failed. A record over MAX_REPORT_BYTES (a suite
-    too large for one report, #184) is ``too_big`` so the caller can say why nothing was read."""
+    results are ``passed``. Outcomes, ``recorded`` and ``collect_errors`` are returned whenever the
+    nonce matches (even when not all passed) so base_comparison can see a test that failed. A
+    record over MAX_REPORT_BYTES (a suite too large for one report, #184) is ``too_big`` so the
+    caller can say why nothing was read."""
     if len(raw) > MAX_REPORT_BYTES:
         return Verdict(False, {}, too_big=True)
     try:
@@ -207,9 +216,12 @@ def parse_verdict(raw: bytes, nonce: str) -> Verdict:
         isinstance(node, str) and isinstance(result, str) for node, result in outcomes.items()
     ):
         return Verdict(False, {})
+    errors = data.get("collect_errors", [])
+    if not isinstance(errors, list) or not all(isinstance(node, str) for node in errors):
+        return Verdict(False, {})
     ran = (
         bool(collected)
         and set(outcomes) == set(collected)
         and all(outcome == "passed" for outcome in outcomes.values())
     )
-    return Verdict(ran, outcomes)
+    return Verdict(ran, outcomes, recorded=True, collect_errors=tuple(errors))

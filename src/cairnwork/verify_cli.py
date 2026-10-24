@@ -6,8 +6,9 @@
         # keep a deferred test commit in the private store (deferred_store.py), not on a remote
     cairnwork-verify --state DIR cleanup      # after a crashed run, before ``recover``
 
-Prints one JSON object. Exit codes for ``run``: 0 verified; 2 refused or not verified
-(``status`` and ``reason`` say which); 3 usage error; 1 internal error.
+Prints one JSON object. Exit codes for ``run``: 0 verified; 2 refused, uncomparable or not
+verified (``status`` says which: REFUSED, UNCOMPARABLE or FAILED; #234 added UNCOMPARABLE, so a
+caller that switches on REFUSED must handle it); 3 usage error; 1 internal error.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         return _emit({"error": exc.code, "detail": str(exc)}, 2)
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as success
         return _emit({"error": "INTERNAL", "detail": f"{type(exc).__name__}: {exc}"}, 1)
-    return _emit(result, 0 if result["verified"] else 2)
+    return _emit(result, 0 if result["verified"] is True else 2)  # UNCOMPARABLE is never 0
 
 
 def _import_tests(intake: Intake, args) -> int:

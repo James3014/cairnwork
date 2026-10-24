@@ -12,7 +12,9 @@ Failure paths, none of which can end VERIFIED:
   one guard report, #184: ``base-probe-report-over-cap``) in ``whole-suite``: degrade to
   ``module-dir`` once and say so in the record; when ``module-dir`` itself cannot be probed, or
   would run the same files again, or selects no test file at all, or none of its tests passes on
-  the base, the task is REFUSED (a degraded probe never turns into "nothing to run");
+  the base, the task is UNCOMPARABLE (``P2P_BASE_PROBE_UNUSABLE``, #234: no evidence, never
+  verified; a degraded probe never turns into "nothing to run"). A probe that worked but found no
+  base-passing test is only recorded (``targets: 0``);
 * the candidate run times out: its observation is not a pass, so Core says not verified;
 * the candidate run fails only because a test failed (``VerifierRun.plain_failure``: no timeout,
   mutated checkout, surviving process or oversized log, and the guard reported a failed test):
@@ -38,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from posixpath import basename
 
-from cairnwork.deferred_tests import TestCommitRejected
+from cairnwork.deferred_tests import BaseUncomparable, Comparison, TestCommitRejected
 from cairnwork.gitcmd import GitCommandError, run_git
 from cairnwork.issue_task import test_target
 from cairnwork.p2p_selection import DEFAULT_BUDGET_SECONDS, select_p2p_targets
@@ -140,11 +142,13 @@ def plan_p2p(task, specs, test_files, mode, budget, run_root, result, verifying)
                 raise _unusable(rule, "no module-dir test passes on the base")
             return plan
         rule["degraded"], tried = why, files
-    raise P2PRejected("P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']} in {rule['applied']} mode")
+    raise _unusable(rule, f"in {rule['applied']} mode")
 
 
-def _unusable(rule: dict, why: str) -> P2PRejected:
-    return P2PRejected("P2P_BASE_PROBE_UNUSABLE", f"{rule['degraded']}; {why}")
+def _unusable(rule: dict, why: str) -> BaseUncomparable:
+    """A failed base probe: no evidence about the base, so UNCOMPARABLE, not a refusal (#234)."""
+    detail = f"{rule['degraded']}; {why}"
+    return BaseUncomparable(Comparison("UNCOMPARABLE", "P2P_BASE_PROBE_UNUSABLE", detail))
 
 
 def _plan(task, specs, rule, targets, budget) -> P2PPlan:

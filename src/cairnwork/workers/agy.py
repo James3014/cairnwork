@@ -94,6 +94,11 @@ class AgyWorker:
     agy: str = "agy"
     dispatch: agy_dispatch.Dispatch | None = None
 
+    @property
+    def isolated(self) -> bool:
+        """Runs as another uid (agy_run_as_user): pipeline may then report UNCOMPARABLE (#234)."""
+        return self.dispatch is not None and self.dispatch.run_as_user is not None
+
     def run(self, workdir: Path, task) -> None:
         dispatch = self.dispatch
         binary = shutil.which(self.agy) if dispatch is None else None
