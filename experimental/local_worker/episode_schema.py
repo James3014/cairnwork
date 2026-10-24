@@ -13,6 +13,7 @@ from experimental.local_worker.episode import (
     CUT_FIELDS,
     EXIT_REASONS,
     PARENT_FIELDS,
+    READ_ACTIONS,
     SCHEMA_VERSION,
     SOURCE_FIELDS,
     VERIFICATION_POST_STEP,
@@ -270,6 +271,40 @@ def _check_parent(rec: dict) -> None:
         raise SchemaError("wall_clock_seconds must be parent pre-cut seconds + own seconds")
 
 
+def _pre_cut(turns: list, index: int) -> tuple[int, int | None, float, int]:
+    """(read actions, token sum, wall seconds, turns missing usage) before turn ``index``,
+    recomputed from the public turns exactly as episode._pre computes them."""
+    pos = index - turns[0]["turn_index"]
+    if not 0 <= pos < len(turns):
+        raise SchemaError(f"cut turn {index} is not among the turns")
+    keys = ("tokens_prompt", "tokens_completion", "tokens_cached")
+    before = turns[:pos]
+    values = [t[k] for t in before for k in keys]
+    tokens = None if any(v is None for v in values) else sum(values)
+    missing = sum(any(t[k] is None for k in keys) for t in before)
+    reads = sum(t["action_type"] in READ_ACTIONS for t in before)
+    return reads, tokens, turns[pos]["t_start_seconds"], missing
+
+
+def _check_pre_cut(rec: dict) -> None:
+    """Review finding 10: each cut's pre-cut counts equal those recomputed from the turns, and
+    the edit cut is the first turn whose observed tree differs from base."""
+    turns, edit, source = rec["turns"], rec["first_edit_cut"], rec["first_source_edit"]
+    differs = [n for n, t in enumerate(turns) if t["tree_differs_from_base"] is True]
+    if edit["cut_occurred"]:
+        if not differs or turns[differs[0]]["turn_index"] != edit["cut_turn_index"]:
+            raise SchemaError("first_edit_cut is not the first turn whose tree differs from base")
+        got = [edit[k] for k in CUT_FIELDS if k.startswith("pre_cut_")]
+        if got != list(_pre_cut(turns, edit["cut_turn_index"])):
+            raise SchemaError("first_edit_cut pre-cut values differ from the turns before it")
+    elif differs:
+        raise SchemaError("a turn's tree differs from base but first_edit_cut did not occur")
+    if source["occurred"]:
+        got = [source[k] for k in SOURCE_FIELDS[4:]]
+        if got != list(_pre_cut(turns, source["turn_index"])):
+            raise SchemaError("first_source_edit pre values differ from the turns before it")
+
+
 def validate_record(rec: Any) -> None:
     """Raise SchemaError unless ``rec`` is a complete, consistent corpus line."""
     _check(rec, {**TOP_SPEC, **TOP_EXTRA}, "record")
@@ -285,3 +320,4 @@ def validate_record(rec: Any) -> None:
     _check(rec["tokens_total"], TOKENS_TOTAL, "tokens_total")
     _check_turns(rec["turns"])
     _check_counts(rec)
+    _check_pre_cut(rec)

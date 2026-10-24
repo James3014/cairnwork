@@ -29,6 +29,14 @@ from experimental.local_worker.redact import public_args, public_path, public_pa
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
 TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed before the cut"
+CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
+    "first_edit_cut: the first turn after which the worker-observed git status (porcelain v2,"
+    " -uall, --ignored=matching) differs from base in any path; test files, doc files and"
+    " run_tests artifacts count. This deviates from EPISODE_CORPUS_SPEC_ZH §3/§8 (first edit of"
+    " a source file) per Plan v2 point 4, so that resume from it is valid. first_source_edit"
+    " carries the spec's cut: the first observed change to a path that is not a test, doc or"
+    " git-ignored file."
+)
 EXIT_REASONS = ("COMPLETED", "TURN_LIMIT", "TIMEOUT", "ERROR_ABORT")
 READ_ACTIONS = ("read_file", "list_dir", "search")
 EDIT_ACTIONS = ("write_file", "edit_file")

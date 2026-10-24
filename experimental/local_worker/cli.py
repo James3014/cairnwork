@@ -51,6 +51,7 @@ from experimental.local_worker.agent_protocol import (
 )
 from experimental.local_worker.endpoint import DEFAULT_URL, EndpointError, LoopbackEndpoint
 from experimental.local_worker.episode import (
+    CUT_DEFINITION,
     NULL_RULE,
     PARENT_FIELDS,
     SCHEMA_VERSION,
@@ -85,6 +86,7 @@ def build_manifest(a: argparse.Namespace, limits: Limits, endpoint: str) -> dict
         "tool_schemas_sha256": _sha(json.dumps(TOOL_SCHEMAS, sort_keys=True)),
         "null_rule": NULL_RULE,
         "tokens_accum_formula": TOKENS_ACCUM_FORMULA,
+        "cut_definition": CUT_DEFINITION,
         "canary": a.canary_binding,
         "created_at": datetime.now(UTC).isoformat(),
     }
