@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from cairnwork.lock_queue import ticket
-from cairnwork.verifier_account import VerifierAccount, VerifierAccountError
+from cairnwork.verifier_account import AccountBusy, VerifierAccount, VerifierAccountError
 
 
 def _tickets(root: Path) -> list[Path]:
@@ -204,7 +204,7 @@ def test_allocator_contention_times_out_without_publishing_ticket(tmp_path, proc
     assert ready.wait(10)
     account = VerifierAccount(root=tmp_path)
     started = time.monotonic()
-    with pytest.raises(VerifierAccountError, match="RESOURCE_LEASE_TIMEOUT") as error:
+    with pytest.raises(AccountBusy, match="RESOURCE_LEASE_TIMEOUT") as error:  # precheck defers
         with account.exclusive(timeout=0.3):
             pytest.fail("the allocator is still held")
     assert 0.25 <= time.monotonic() - started < 5

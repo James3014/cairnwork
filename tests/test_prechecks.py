@@ -339,11 +339,15 @@ def test_only_a_missing_marker_means_the_tests_were_not_consumed(tmp_path):
     (used / oid).write_text("")
     assert tests_consumed(intake, oid) is True
     (used / oid).unlink()
-    used.chmod(0o000)  # unknown: the marker cannot be looked up
-    try:
-        assert tests_consumed(intake, oid) is True
-    finally:
-        used.chmod(0o700)
+    (used / oid).symlink_to(used / "gone")  # a dangling link is still a marker (lstat, not stat)
+    assert tests_consumed(intake, oid) is True
+    (used / oid).unlink()
+    if os.geteuid() != 0:  # root could still look inside a mode-000 directory
+        used.chmod(0o000)  # unknown: the marker cannot be looked up
+        try:
+            assert tests_consumed(intake, oid) is True
+        finally:
+            used.chmod(0o700)
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.ELOOP, errno.ENOTDIR])
