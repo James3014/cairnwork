@@ -42,6 +42,15 @@ class Events:
         self.n += 1
 
 
+def _ticking(real, events: Events, name: str):
+    def call(*args):
+        result = real(*args)
+        events.tick(f"returned {name}")
+        return result
+
+    return call
+
+
 def _run(tmp_path, monkeypatch, action: str, at: int | None):
     events = Events(at)
 
@@ -51,21 +60,42 @@ def _run(tmp_path, monkeypatch, action: str, at: int | None):
             events.tick(f"set {name}")
 
     class HookedWorld(World):
+        changed_at: float | None = None  # when the checkout first left its base (own clock)
+
         def handle(self, action, args, stdin):
             events.tick(f"before {action}")
             result = super().handle(action, args, stdin)
+            if self.changed_at is None and self.files != self.base:
+                self.changed_at = loop._own()
             events.tick(f"after {action}")
             return result
 
     monkeypatch.setattr(agent, "TurnLog", Hooked)
     world = HookedWorld()
-    loop, world, _, _ = make_loop(tmp_path, [REPLIES[action]], world=world)
+    world.tool_seconds = 1.0  # each wrapper call takes a second: turns span time
+    loop, _, _, _ = make_loop(tmp_path, [REPLIES[action]], world=world)
+    for name in ("_dispatch", "observe"):  # a signal at the earliest point after they return
+        monkeypatch.setattr(loop, name, _ticking(getattr(loop, name), events, name))
     before = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM, loop.interrupt)
     try:
         return loop.run(initial_messages(TASK)), world, events
     finally:
         signal.signal(signal.SIGTERM, before)
+
+
+def _check_every_limit(out, changed_at: float | None, where: str) -> None:
+    """At every limit (quarter seconds over the run), cut_900s may claim only what was true
+    then: True only once the checkout had changed, False only while it had not."""
+    for k in range(int(out.wall_seconds * 4) + 8):
+        limit = k / 4
+        rec = episode.build_record(META, out, cut_seconds=limit)
+        validate_record(rec)
+        claim = rec["cut_900s"]["tree_differs_at_limit"]
+        if claim is True:
+            assert changed_at is not None and changed_at <= limit, (where, limit)
+        elif claim is False:
+            assert changed_at is None or changed_at > limit, (where, limit)
 
 
 @pytest.mark.parametrize("action", sorted(REPLIES))
@@ -89,6 +119,7 @@ def test_a_signal_at_any_point_of_a_turn_never_hides_a_change(tmp_path, monkeypa
             assert rec["first_edit_cut"]["cut_status"] != "NO_CUT", where
             ran = [t for t in rec["turns"] if t["tool_ran"]]
             assert ran and ran[-1]["tree_differs_from_base"] is not False, where
+        _check_every_limit(out, world.changed_at, where)
 
 
 def test_a_finished_turn_keeps_its_own_end_time(tmp_path, monkeypatch):
@@ -107,3 +138,42 @@ def test_a_finished_turn_keeps_its_own_end_time(tmp_path, monkeypatch):
     out = loop.run(initial_messages(TASK))
     assert out.exit_reason == "COMPLETED" and len(out.turns) == 2
     assert sets == {0: 1, 1: 1} and loop._open is None
+
+
+def test_tool_ran_is_set_before_the_wrapper_runs(tmp_path):
+    """Codex review of PR #248, round 2: tool_ran is pessimistic, True before the wrapper is
+    invoked, so no interrupt point after the wrapper started can leave it False."""
+    seen = []
+
+    class Watching(World):
+        def handle(self, action, args, stdin):
+            if action == "write":
+                seen.append(loop._open is not None and loop._open.tool_ran)
+            return super().handle(action, args, stdin)
+
+    loop, _, _, _ = make_loop(tmp_path, [REPLIES["write_file"]], world=Watching())
+    out = loop.run(initial_messages(TASK))
+    assert seen == [True] and out.turns[0].tool_ran is True
+
+
+def test_a_signal_as_the_wrapper_returns_keeps_the_turn_and_its_change(tmp_path, monkeypatch):
+    """A real SIGTERM at the earliest point after the write wrapper returned."""
+    loop, world, _, _ = make_loop(tmp_path, [REPLIES["write_file"]])
+    real = loop.tools.write_file
+
+    def write_file(*args):
+        call = real(*args)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return call
+
+    monkeypatch.setattr(loop.tools, "write_file", write_file)
+    before = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, loop.interrupt)
+    try:
+        out = loop.run(initial_messages(TASK))
+    finally:
+        signal.signal(signal.SIGTERM, before)
+    rec = episode.build_record(META, out)
+    validate_record(rec)
+    assert out.abort_cause == "interrupted" and rec["turns"][0]["tool_ran"] is True
+    assert world.files != world.base and rec["first_edit_cut"]["cut_status"] != "NO_CUT"

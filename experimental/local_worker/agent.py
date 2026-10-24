@@ -334,26 +334,23 @@ class AgentLoop:
         return t.run_tests([*RUN_TESTS_ARGS, *targets])
 
     def _execute(self, log: TurnLog, name: str, args: dict, deadline: float) -> str:
-        # Every wrapper call of the tool (both of edit_file's, the sweep after a pytest run or a
-        # timeout, and their kill graces) ends by the loop deadline: tools.WorkerTools._timeout.
+        # Each wrapper call of the tool (and its sweep, kill graces) ends by the loop deadline.
         self.tools.timeout_seconds = self.limits.tool_cap_seconds
         self.tools.deadline = deadline
         self.tools.turn_index = log.index
         started = self.tools.calls_started
+        log.tool_ran = True  # pessimistic first (Codex review of PR #248): it may run from here
         try:
             call = self._dispatch(name, args)
         except ToolDeadline:
             log.error_category = "TIMEOUT"
             raise
-        finally:  # a started wrapper process may have changed the tree, also when it then failed
+        finally:  # False only if no wrapper process started; an interrupt before this keeps True
             log.tool_ran = self.tools.calls_started > started
         log.exit_code, log.error_category = call.exit_code, call.error_category
         log.stdout_bytes, log.stdout_truncated = call.stdout_bytes, call.stdout_truncated
-        log.duration_ms, log.exec_identity, log.isolation = (
-            call.duration_ms,
-            call.exec_identity,
-            call.isolation,
-        )
+        log.duration_ms, log.exec_identity = call.duration_ms, call.exec_identity
+        log.isolation = call.isolation
         log.action_type = call.action_type  # run_tests is recorded as the spec's "run_test"
         # The status query is one of the reserve's three steps (sweep and numstat the others),
         # so a turn ending at the deadline still observes its tree within max_wall_seconds.
