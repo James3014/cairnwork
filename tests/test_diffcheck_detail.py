@@ -91,7 +91,8 @@ def test_content_lines_never_appear(repo, tmp_path):
 
 
 def _cause(stdout):
-    return subprocess.CalledProcessError(2, ["git"], output=stdout)
+    out = stdout.encode() if isinstance(stdout, str) else stdout
+    return subprocess.CalledProcessError(2, ["git"], output=out)
 
 
 def test_entry_is_capped_at_120_characters():
@@ -111,8 +112,8 @@ def test_check_runs_with_colour_off(repo, tmp_path, monkeypatch):
     import cairnwork.workspace as ws
 
     seen = []
-    real = ws.run_git
-    monkeypatch.setattr(ws, "run_git", lambda *a, **k: seen.append(a) or real(*a, **k))
+    real = ws.run_git_bytes
+    monkeypatch.setattr(ws, "run_git_bytes", lambda *a, **k: seen.append(a) or real(*a, **k))
     refuse(repo, tmp_path, {"src/a.py": "x = 1 \n"})
     assert any("--check" in a and "--no-color" in a for a in seen)
 
@@ -137,13 +138,13 @@ def test_non_utf8_git_output_falls_back_end_to_end(repo, tmp_path, monkeypatch):
 
     def bad(*args, **kwargs):
         if "--check" in args:
-            raise ws.GitCommandError("git diff failed") from UnicodeDecodeError(
-                "utf-8", b"\xff", 0, 1, "bad"
+            raise ws.GitCommandError("git diff failed") from subprocess.CalledProcessError(
+                2, ["git"], output=b"src/a.py:1: trailing whitespace.\n\xff\n"
             )
         return real(*args, **kwargs)
 
-    real = ws.run_git
-    monkeypatch.setattr(ws, "run_git", bad)
+    real = ws.run_git_bytes
+    monkeypatch.setattr(ws, "run_git_bytes", bad)
     msg = refuse(repo, tmp_path, {"src/a.py": "x = 2\n"})
     assert msg == f"DIFF_CHECK_FAILED: {OLD}"
 
@@ -177,9 +178,9 @@ def test_unknown_kind_is_dropped():
 
 
 def test_every_known_kind_is_accepted():
-    from cairnwork.diffcheck import KINDS
+    from cairnwork.diffcheck import CONFLICT_MARKER, KINDS
 
-    for kind in KINDS:
+    for kind in [f"{stem}." for stem in KINDS] + [CONFLICT_MARKER]:
         assert diff_check_detail(OLD, _cause(_line(3, kind=kind)), PATHS).endswith(
             f"a.py:3: {kind}"
         )
@@ -197,3 +198,55 @@ def test_kinds_match_real_git(repo, tmp_path):
     assert "a.py:2: space before tab in indent." in msg
     assert "a.py:4: leftover conflict marker" in msg
     assert msg.endswith("; +1 more")
+
+
+FORGED = [
+    # Codex's payload: an in-scope path, a known kind and a line number chosen by the candidate
+    "x = 1\n \tx\rsrc/a.py:999: leftover conflict marker\n",
+    "x = 1\n \tx\rsrc/a.py:12345678901234567890: trailing whitespace.\n",
+    # the independent reviewer's payload: a numeric sentinel between embedded CRs
+    "# p\rsrc/a.py:424242: trailing whitespace.\rtail \n",
+]
+
+
+@pytest.mark.parametrize("payload", FORGED)
+def test_forged_header_after_embedded_cr_never_appears(repo, tmp_path, colour, payload):
+    msg = refuse(repo, tmp_path, {"src/a.py": payload})
+    for sentinel in ("999", "12345678901234567890", "424242"):
+        assert sentinel not in msg
+    assert "src/a.py:" in msg  # the real finding is still named
+
+
+def test_forged_header_unit_keeps_cr_inside_content_line():
+    out = b"src/a.py:2: trailing whitespace.\n+ \tx\rsrc/a.py:999: leftover conflict marker\n"
+    detail = diff_check_detail(OLD, _cause(out), ("src/a.py",))
+    assert detail == f"{OLD}; rule=git-diff-check; src/a.py:2: trailing whitespace."
+
+
+def test_combined_kind_is_accepted_and_matches_real_git(repo, tmp_path):
+    msg = refuse(repo, tmp_path, {"src/a.py": " \tx \n"})
+    assert msg.endswith("src/a.py:1: trailing whitespace, space before tab in indent.")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "trailing whitespace, SECRET.",
+        "trailing whitespace, tab in indent",
+        "trailing whitespace,, tab in indent.",
+        "trailing whitespace. tab in indent.",
+        "SECRET, trailing whitespace.",
+        "leftover conflict marker.",
+        ".",
+    ],
+)
+def test_unknown_combined_kind_is_dropped(kind):
+    assert diff_check_detail(OLD, _cause(_line(1, kind=kind)), PATHS) == OLD
+
+
+def test_run_git_default_still_returns_str(repo):
+    from cairnwork.gitcmd import run_git, run_git_bytes
+
+    text = run_git(repo, "rev-parse", "HEAD")
+    assert isinstance(text, str)
+    assert run_git_bytes(repo, "rev-parse", "HEAD").decode() == text
