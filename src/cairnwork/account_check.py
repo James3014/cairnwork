@@ -87,12 +87,11 @@ def unusable(detail: str) -> BaseUncomparable:
     return BaseUncomparable(Comparison("UNCOMPARABLE", UNUSABLE, detail))
 
 
-def precheck(
-    account: VerifierAccount | None, python: str | None, timeout: float | None = None
-) -> None:
+def precheck(account: VerifierAccount | None, python: str | None, timeout: float = 0.0) -> None:
     """Raise UNCOMPARABLE ``VERIFIER_ACCOUNT_UNUSABLE`` unless the account (if any) can run
-    ``python`` (or its own). ``available()`` decides; ``blocked`` only explains. A busy lock past
-    ``timeout`` is unusable too (nothing has been spent yet)."""
+    ``python`` (or its own). ``available()`` decides; ``blocked`` only explains. It never queues
+    behind a run (``timeout`` 0: one try): a busy account is in use, so only the walk may refuse
+    then, and the run's own ``available()`` stays the final word."""
     if account is None:
         return
     py = python or account.python
@@ -100,8 +99,12 @@ def precheck(
         with account.exclusive(timeout):
             if account.available(py):
                 return
-    except VerifierAccountError as exc:
-        raise unusable(str(exc)) from exc
+    except VerifierAccountError as exc:  # busy, or the lock queue is unreadable
+        if hint := blocked(py, account.user):
+            raise unusable(f"{exc}; {hint}") from exc
+        return
+    except OSError as exc:  # e.g. no account root to hold the lock file
+        raise unusable(f"account {account.user} lock: {exc}") from exc
     hint = blocked(py, account.user) or "no blocked directory found; check sudo and import pytest"
     raise unusable(f"account {account.user} cannot run {py}: {hint}")
 

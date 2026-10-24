@@ -135,9 +135,23 @@ def test_precheck_takes_its_verdict_from_available_and_its_reason_from_the_walk(
         account_check.precheck(broken, None)
     assert caught.value.comparison.code == "VERIFIER_ACCOUNT_UNUSABLE"
     assert f"{home} 0750" in caught.value.comparison.detail
+
+
+def test_a_busy_account_is_never_waited_for_and_only_the_walk_may_refuse(open_root, stranger):
+    home, python = _python_under(open_root, 0o750)
     busy: Any = FakeAccount(str(python), busy=True)
-    with pytest.raises(BaseUncomparable, match="RESOURCE_LEASE_TIMEOUT: busy for 5s"):
-        account_check.precheck(busy, None, timeout=5)
+    with pytest.raises(BaseUncomparable, match=f"busy for 0.0s; {home} 0750"):
+        account_check.precheck(busy, None)  # one try (timeout 0), then the mode bits say no
+    home.chmod(0o755)
+    account_check.precheck(busy, None)  # nothing blocks: the run's own available() decides
+
+
+def test_an_account_without_a_lock_file_is_unusable(tmp_path):
+    from cairnwork.verifier_account import VerifierAccount
+
+    account = VerifierAccount(root=tmp_path / "missing")
+    with pytest.raises(BaseUncomparable, match="lock: .*No such file"):
+        account_check.precheck(account, sys.executable)
 
 
 def test_base_stage_turns_only_account_errors_into_uncomparable(open_root, stranger):
