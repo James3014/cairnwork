@@ -34,6 +34,9 @@ from experimental.local_worker.cuts import (
 from experimental.local_worker.gitstate import TreeState
 from experimental.local_worker.redact import BasePaths, public_args
 
+# v1 is the line shape of PR #248 (the #88 follow-up), which changed it (base_paths_observed,
+# verification.binary_files_changed, path digests with ext) without a version bump: no v1 corpus
+# was recorded before that change, so no v1 line has the PR #239 shape. Bump on the next change.
 SCHEMA_VERSION = "cairnwork.local_worker.episode/v1"
 NULL_RULE = "null = not observed / not applicable / not yet known; 0 = observed zero"
 TOKENS_ACCUM_FORMULA = "prompt + completion + cached per call (spec §3), summed before the cut"

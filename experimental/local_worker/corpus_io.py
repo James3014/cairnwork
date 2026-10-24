@@ -31,6 +31,7 @@ from experimental.local_worker.tools import INSTALLED_WRAPPER
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_WRAPPER = Path(__file__).with_name("local-worker-tool")
 CANARY_MAX_AGE = timedelta(days=7)
+# v1 includes wall_time_rule (PR #248); no manifest was recorded before it (see SCHEMA_VERSION).
 MANIFEST_SCHEMA = "cairnwork.local_worker.manifest/v1"
 UNFROZEN = ("canary", "created_at")  # may change between episodes of one manifest
 ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
