@@ -200,7 +200,8 @@ class AgentLoop:
         raise KeyboardInterrupt
 
     def _stopped(self, out: LoopOutcome, exc: BaseException) -> None:
-        """Record why the loop stopped; a non-Exception (SystemExit) is deferred to the caller."""
+        """Record why the loop stopped. A SystemExit (also one an interrupt replaced) is deferred to
+        the caller; any other non-Exception BaseException is recorded "interrupted", not raised."""
         self.interruptible = False  # the loop has stopped: from here on a signal is counted
         if isinstance(exc, (EndpointTimeout, TimeoutError)):
             out.exit_reason, out.timed_out, out.limit_hit = "TIMEOUT", True, "max_wall_seconds"
