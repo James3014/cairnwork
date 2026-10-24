@@ -345,7 +345,8 @@ def test_own_wall_seconds_excludes_the_resumed_prefix(tmp_path):
     loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], model_seconds=10.0)
     out = loop.run(initial_messages(TASK), first_turn=3, elapsed_offset=120.0)
     parent = dict(zip(episode.PARENT_FIELDS, (3, 480, 120.0, 0), strict=True))
-    rec = build_record(dict(META, resume_parent_episode_id="ep_parent", **parent), out)
+    meta = dict(META, resume_parent_episode_id="ep_parent", resume_cut_turn_index=3, **parent)
+    rec = build_record(meta, out)
     validate_record(rec)
     assert rec["own_wall_seconds"] == pytest.approx(20.0)  # two model replies, 10 s each
     assert rec["wall_clock_seconds"] == pytest.approx(120.0 + 20.0)

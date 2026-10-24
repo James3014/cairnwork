@@ -21,7 +21,12 @@ def digest(text: Any) -> dict:
 
 
 def is_digest(value: Any) -> bool:
-    return isinstance(value, dict) and set(value) == {"sha256", "bytes"}
+    """Exactly {sha256: 64 lowercase hex characters, bytes: a non-negative integer}."""
+    if not isinstance(value, dict) or set(value) != {"sha256", "bytes"}:
+        return False
+    sha, size = value["sha256"], value["bytes"]
+    hex_ok = isinstance(sha, str) and len(sha) == 64 and set(sha) <= set("0123456789abcdef")
+    return hex_ok and isinstance(size, int) and not isinstance(size, bool) and size >= 0
 
 
 def public_path(path: str) -> str | dict:

@@ -33,6 +33,7 @@ from experimental.local_worker.schema_base import (
     check,
 )
 from experimental.local_worker.schema_cuts import check_cuts
+from experimental.local_worker.schema_rules import check_rules
 
 TOP_SPEC: dict[str, tuple[Any, bool]] = {  # spec §2: (type, nullable)
     "episode_id": (STR, False),
@@ -202,3 +203,4 @@ def validate_record(rec: Any) -> None:
     _check_turns(rec["turns"])
     _check_counts(rec)
     check_cuts(rec)
+    check_rules(rec)
