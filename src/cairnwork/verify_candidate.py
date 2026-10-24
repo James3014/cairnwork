@@ -32,6 +32,7 @@ from typing import Any
 from cairnwork import runlock
 from cairnwork.confined import ATTEMPT_ENV, sweep_marked
 from cairnwork.deferred_tests import (
+    OVERLAY_RULE,
     TestCommitRejected,
     check_roots_on_base,
     lay_tests_over,
@@ -39,6 +40,7 @@ from cairnwork.deferred_tests import (
 )
 from cairnwork.gitcmd import OID, GitCommandError, run_git
 from cairnwork.intake import Intake, IntakeRefused
+from cairnwork.notary_verify import binding_hash
 from cairnwork.ownership import request_digest
 from cairnwork.p2p import p2p_for
 from cairnwork.pipeline import (
@@ -71,9 +73,10 @@ def verify_candidate(
     verifiers: tuple[tuple[str, tuple[str, ...]], ...],
     test_commit: str = "",
 ) -> dict[str, Any]:
-    """``verified`` is true only for a Core verdict bound to the commit that was judged
-    (the candidate, plus the deferred tests when given). Raises TaskRejected for malformed
-    input and IntakeRefused when drained or the mirror cannot be used."""
+    """``verified`` is true only for a Core verdict bound to what was judged: the candidate, or
+    with deferred tests the tree that ran (candidate plus tests) and its ``binding`` (#229), whose
+    head is the candidate. Raises TaskRejected for malformed input and IntakeRefused when drained
+    or the mirror cannot be used."""
     task = TaskSpec(
         f"verify-{secrets.token_hex(8)}", "verify", "verify", "", repo, base,
         allowed_files, verifiers, test_commit=test_commit,
@@ -95,23 +98,26 @@ def verify_candidate(
     result = TaskResult(task.idempotency_key, f"a{secrets.token_hex(8)}", "FAILED")
     notary = intake.notary
     verifying = (account, python)
-    status = "FAILED"
+    status, binding = "FAILED", None
     with runlock.held(intake.state / "ownership.sqlite", exclusive=False):
         _require_accepting(intake)  # a drain that came in while we waited for the lock
         with _marked(intake, result.attempt_id):
             try:
-                _judge(intake, task, source, specs, candidate, notary, result, verifying)
+                binding = _judge(intake, task, source, specs, candidate, notary, result, verifying)
             except (CandidateRejected, TestCommitRejected, WorkspaceError) as exc:
                 result.reason, status = str(exc), "REFUSED"
     judged = result.candidate_commit or candidate
-    verdict = notary.verdict(result.task_id, result.attempt_id, expected_candidate=judged)
+    subject = binding["head"] if binding else judged  # a bound row names the head (#229)
+    verdict = notary.verdict(result.task_id, result.attempt_id, expected_candidate=subject)
     return {
         "status": "VERIFIED" if result.verified else status,
         "verified": result.verified,
         "reason": result.reason,
         "core_status": verdict.status if verdict else "",
         "candidate_commit": candidate,
-        "judged_commit": judged,
+        "judged_commit": judged,  # with tests: a commit of the scratch clone only, gone now
+        "executed_tree": binding["executed_tree"] if binding else "",
+        "binding": binding,
         "task_id": result.task_id,
         "attempt_id": result.attempt_id,
         "logs": result.logs,
@@ -203,7 +209,7 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
         raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
 
 
-def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> None:
+def _judge(intake, task, source, specs, candidate, notary, result, verifying) -> dict | None:
     run_root = intake.run_root
     _check_parent(task.repo, task.base_commit, candidate)
     if task.test_commit:
@@ -211,16 +217,17 @@ def _judge(intake, task, source, specs, candidate, notary, result, verifying) ->
         _burn(intake, task.test_commit, record=False)
     with _scratch(intake, source, task.repo, task, candidate, result.attempt_id) as scratch:
         task = replace(task, repo=scratch)
-        _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying)
+        return _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying)
+    return None  # pragma: no cover - _scratch always yields or raises
 
 
-def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying) -> None:
+def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifying) -> dict | None:
     check_roots_on_base(task.repo, task.base_commit, task.test_roots)
     clone = create_attempt_clone(task.repo, candidate, run_root, result.attempt_id)
     try:
         attempt = Attempt(clone.attempt_id, task.base_commit, clone.path, clone.refs_before)
         check_candidate_commit(task.repo, attempt, candidate, task.allowed_files)
-        judged, test_files = candidate, ()
+        judged, test_files, binding = candidate, (), None
         if task.test_commit:
             _burn(intake, task.test_commit, record=True)  # before the tests are fetched
             mode = "bundle" if task.test_store and task.test_store.required else "auto"
@@ -231,26 +238,34 @@ def _judge_in(intake, task, specs, candidate, notary, run_root, result, verifyin
             judged = lay_tests_over(
                 task.repo, judged, task.test_commit, test_files, result.attempt_id, run_root
             )
+            binding = _binding(task, candidate, test_files, judged)
         plan = p2p_for(task, specs, test_files, run_root, result, verifying)
         result.candidate_commit = judged
         digest = request_digest(task.request() | {"candidate": candidate})
+        if binding:  # what a receiver can recompute, unlike the scratch paths in the request
+            digest = binding_hash(binding)
         judge_candidate(
-            task,
-            specs,
-            digest,
-            notary,
-            run_root,
-            result,
-            test_files,
-            verifying,
-            lambda _: None,
-            plan,
-        )
+            task, specs, digest, notary, run_root, result, test_files, verifying, lambda _: None,
+            plan, binding,
+        )  # fmt: skip
+        return binding
     finally:
         try:
             remove_attempt_clone(run_root, result.attempt_id)
         except WorkspaceError as exc:  # keep the run's own outcome; note the leftover
             result.logs.append(f"cleanup failed: {exc}")
+
+
+def _binding(task, head: str, test_files: tuple[str, ...], judged: str) -> dict[str, Any]:
+    """#229: what the receipt is bound to. The scratch commit that carried the tests dies with
+    the scratch clone and its id cannot be rebuilt (commit time), so the receipt names the PR head,
+    the tests and the tree that ran, which a receiver rebuilds with deferred_tests.overlay_tree."""
+    tree = run_git(task.repo, "rev-parse", f"{judged}^{{tree}}").strip()
+    return {
+        "rule": OVERLAY_RULE, "base": task.base_commit, "head": head,
+        "test_commit": task.test_commit, "test_paths": sorted(test_files), "executed_tree": tree,
+        "verifiers": [[verifier_id, list(argv)] for verifier_id, argv in task.verifiers],
+    }  # fmt: skip
 
 
 def _gap() -> None:

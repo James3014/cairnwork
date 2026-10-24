@@ -35,9 +35,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cairnwork.changeset import GitChangeSet, read_change_set
+from cairnwork.changeset import GitChangeSet, read_change_set, read_tree_change_set
 from cairnwork.core_request import AcceptanceSpec, VerifierObservation, build_core_request
-from cairnwork.notary_schema import SCHEMA, SCHEMA_VERSION
+from cairnwork.notary_schema import MIGRATIONS, SCHEMA, SCHEMA_VERSION
 from cairnwork.notary_verify import (  # readback helpers, split out for the 400-line cap
     CORE_ERROR,
     _columns_match,
@@ -46,6 +46,7 @@ from cairnwork.notary_verify import (  # readback helpers, split out for the 400
     _frozen,
     _is_verified,
     _status_and_integrity,
+    binding_hash,
 )
 from cairnwork.receipt_binding import request_matches
 from cairnwork_protocol import (
@@ -104,18 +105,18 @@ def default_core_identity() -> dict[str, Any]:
     return core_identity()
 
 
-def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    """Add the expected_identity column and bump to schema 2 (Issue #74); existing append-only rows
-    keep a NULL value. Serialised by BEGIN IMMEDIATE and idempotent under a concurrent migration."""
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add the columns of later schemas (expected_identity #74, binding_json #229); existing
+    append-only rows keep NULL there. Serialised by BEGIN IMMEDIATE and idempotent under a
+    concurrent migration (a version already current runs no ALTER)."""
     conn.execute("BEGIN IMMEDIATE")
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == SCHEMA_VERSION:  # another connection migrated while we waited for the lock
-            conn.execute("COMMIT")
-            return
-        if version != 1:
+        while version in MIGRATIONS:
+            conn.execute(MIGRATIONS[version])
+            version += 1
+        if version != SCHEMA_VERSION:
             raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
-        conn.execute("ALTER TABLE core_verifications ADD COLUMN expected_identity TEXT")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.execute("COMMIT")
     except BaseException:
@@ -151,8 +152,8 @@ class Notary:
                 conn.executescript(
                     f"BEGIN IMMEDIATE;{SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;"
                 )
-            elif version == 1 and SCHEMA_VERSION == 2:
-                _migrate_v1_to_v2(conn)
+            elif version in MIGRATIONS:
+                _migrate(conn)
             elif version != SCHEMA_VERSION:
                 raise NotarySchemaMismatch(f"user_version {version}, need {SCHEMA_VERSION}")
         finally:
@@ -197,11 +198,26 @@ class Notary:
         base_commit: str,
         candidate_commit: str,
         observations: tuple[VerifierObservation, ...],
+        binding: dict[str, Any] | None = None,
     ) -> Verdict:
-        """Verify one attempt with Core, once; later calls return the recorded verdict."""
+        """Verify one attempt with Core, once; later calls return the recorded verdict. With a
+        binding (#229, an external candidate) Core judges the tree of candidate_commit (the
+        scratch commit the verifiers ran) and the row names binding's head as its candidate."""
         if spec.contract_id != task_id:
             raise NotaryInputError(f"spec.contract_id {spec.contract_id!r} is not task {task_id!r}")
-        change = read_change_set(repo, base_commit, candidate_commit)
+        if binding is None:
+            change = read_change_set(repo, base_commit, candidate_commit)
+            subject = change.candidate_commit
+        else:
+            change = read_tree_change_set(repo, base_commit, candidate_commit)
+            subject = binding.get("head")
+            if not isinstance(subject, str) or not _OID.fullmatch(subject):
+                raise NotaryInputError("binding head must be a 40-hex commit id")
+            named = (binding.get("base"), binding.get("executed_tree"))
+            if named != (base_commit, change.candidate_tree):
+                raise NotaryInputError("binding does not name this base and executed tree")
+            if spec.requirements_hash != binding_hash(binding):
+                raise NotaryInputError("requirements_hash is not the binding's hash")
         request = _frozen(build_core_request(spec, change, observations, attempt_id=attempt_id))
         request_hash = _digest(request)
         recorded = self._recorded(task_id, attempt_id, request_hash)
@@ -213,7 +229,7 @@ class Notary:
             task_id,
             attempt_id,
             change.base_commit,
-            change.candidate_commit,
+            subject,
             request_hash,
             _dumps(request),
             http_status,
@@ -222,14 +238,15 @@ class Notary:
             _dumps(response),
             datetime.now(UTC).isoformat(),
             _dumps(self._expected_identity()),  # frozen so readback survives a later Core upgrade
+            None if binding is None else _dumps(binding),
         )
         conn = self._connect()
         try:
             conn.execute(
                 "INSERT INTO core_verifications (task_id, attempt_id, base_commit,"
                 " candidate_commit, request_hash, request_json, http_status, status,"
-                " integrity, response_json, recorded_at, expected_identity)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " integrity, response_json, recorded_at, expected_identity, binding_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
         except sqlite3.IntegrityError:
@@ -271,7 +288,8 @@ class Notary:
         try:
             row = conn.execute(
                 "SELECT base_commit, candidate_commit, request_hash, request_json, http_status,"
-                " status, integrity, response_json, expected_identity FROM core_verifications"
+                " status, integrity, response_json, expected_identity, binding_json"
+                " FROM core_verifications"
                 " WHERE task_id = ? AND attempt_id = ?",
                 (task_id, attempt_id),
             ).fetchone()
@@ -279,7 +297,8 @@ class Notary:
             conn.close()
         if row is None:
             return None
-        base, candidate, request_hash, request_json, http_status, status, integrity, resp, exp = row
+        base, candidate, request_hash, request_json, http_status, status, integrity, resp = row[:8]
+        exp, binding = row[8], None if row[9] is None else json.loads(row[9])
         request, response = json.loads(request_json), json.loads(resp)
         verified = _is_verified(http_status, status, integrity, response, request, request_hash)
         reason = ""
@@ -288,7 +307,7 @@ class Notary:
         verified = (
             verified
             and not reason
-            and _columns_match(request, task_id, attempt_id, base, candidate)
+            and _columns_match(request, task_id, attempt_id, base, candidate, binding)
         )
         if expected_candidate is not None and expected_candidate != candidate:
             verified = False

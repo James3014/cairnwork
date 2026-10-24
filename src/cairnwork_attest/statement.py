@@ -19,6 +19,8 @@ from cairnwork_attest.record import (
 from cairnwork_protocol import canonical_hash, canonical_json
 
 PREDICATE_TYPE = "https://cairnwork.github.io/attestation/verified-change/v0.1"
+# v0.2 (#229): an external candidate's receipt, bound to head + tests + executed tree (binding)
+PREDICATE_TYPE_BOUND = "https://cairnwork.github.io/attestation/verified-change/v0.2"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 _OID = re.compile(r"^[0-9a-f]{40}$")
 
@@ -139,7 +141,8 @@ def build_statement(
         if isinstance(bundle, dict) and isinstance(bundle.get("observations"), list):
             verifier_observations = bundle["observations"]
 
-    return {
+    binding = record.binding
+    statement = {
         "_type": STATEMENT_TYPE,
         "subject": [
             {
@@ -147,7 +150,7 @@ def build_statement(
                 "digest": {"gitCommit": record.candidate_commit},
             },
         ],
-        "predicateType": PREDICATE_TYPE,
+        "predicateType": PREDICATE_TYPE if binding is None else PREDICATE_TYPE_BOUND,
         "predicate": {
             "base_commit": record.base_commit,
             "request": record.request,
@@ -158,7 +161,7 @@ def build_statement(
             "integrity": record.integrity,
             "core_identity": core_identity,
             "verifier_observations": verifier_observations,
-            "hidden_test_commit": None,
+            "hidden_test_commit": None if binding is None else binding.get("test_commit"),
             "test_source": test_source,
             "producer": {
                 "name": producer.name,
@@ -170,6 +173,9 @@ def build_statement(
             "assurance": assurance.to_dict(),
         },
     }
+    if binding is not None:  # subject is the head the binding names (the record's candidate)
+        statement["predicate"]["binding"] = binding
+    return statement
 
 
 def statement_bytes(statement: Mapping[str, Any]) -> bytes:

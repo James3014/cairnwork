@@ -56,11 +56,12 @@ def tests_with_teeth(task, specs, run_root, result, verifying) -> tuple[str, ...
 
 def judge_candidate(
     task, specs, digest, notary, run_root, result, test_files, verifying, reach,
-    p2p: P2PPlan | None = None,
+    p2p: P2PPlan | None = None, binding: dict | None = None,
 ) -> None:  # fmt: skip
     """Verify result.candidate_commit and have Core notarise it; sets result.verified,
     result.reason and result.logs. Shared by the worker pipeline and ``verify_candidate``;
-    reach(phase) records progress."""
+    reach(phase) records progress. A binding (verify_candidate only, #229) binds the verdict to
+    the tree that ran and to the binding's head instead of to result.candidate_commit."""
     judged = result.candidate_commit
     task_id = result.task_id
     reach("VERIFYING")
@@ -96,7 +97,9 @@ def judge_candidate(
         task.base_commit,
         judged,
         tuple(run.observation for run in runs),
+        binding,
     )
-    recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=judged)
+    subject = binding["head"] if binding else judged
+    recorded = notary.verdict(task_id, result.attempt_id, expected_candidate=subject)
     result.verified = bool(verdict.verified and recorded and recorded.verified)
     result.reason = verdict_reason(result.verified, verdict, recorded) + explain(runs)

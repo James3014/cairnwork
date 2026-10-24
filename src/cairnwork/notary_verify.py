@@ -57,18 +57,32 @@ def _is_verified(
     return all(expected[key] is not None and echoed.get(key) == expected[key] for key in _HASH_KEYS)
 
 
+def binding_hash(binding: dict[str, Any]) -> str:
+    """The requirements_hash an external candidate's contract carries for its binding (#229)."""
+    return _digest(binding)
+
+
 def _columns_match(
-    request: dict[str, Any], task_id: str, attempt_id: str, base: str, candidate: str
-) -> bool:
-    """A row's key and commit columns must be the ones its stored request was built for."""
+    request: dict[str, Any], task_id: str, attempt_id: str, base: str, candidate: str,
+    binding: Any = None,
+) -> bool:  # fmt: skip
+    """A row's key and commit columns must be the ones its stored request was built for. With a
+    binding (#229) the target is its executed tree, and it names this base and head (candidate)
+    and hashes to the contract's requirements_hash."""
     change_set, contract = request.get("change_set"), request.get("acceptance_contract")
     if not isinstance(change_set, dict) or not isinstance(contract, dict):
         return False
+    target = f"git-commit:{candidate}"
+    if binding is not None:
+        named = isinstance(binding, dict) and [binding.get("base"), binding.get("head")]
+        if named != [base, candidate] or contract.get("requirements_hash") != binding_hash(binding):
+            return False
+        target = f"git-tree:{binding.get('executed_tree')}"
     return (
         contract.get("contract_id") == task_id
         and change_set.get("change_set_id") == f"{task_id}/{attempt_id}"
         and change_set.get("source_revision") == f"git-commit:{base}"
-        and change_set.get("target_revision") == f"git-commit:{candidate}"
+        and change_set.get("target_revision") == target
     )
 
 

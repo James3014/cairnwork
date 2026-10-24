@@ -65,7 +65,7 @@ def build_core_request(
     change_set = {
         "change_set_id": f"{spec.contract_id}/{attempt_id}",
         "source_revision": f"git-commit:{change.base_commit}",
-        "target_revision": f"git-commit:{change.candidate_commit}",
+        "target_revision": change.target_revision,
         "diff_hash": change_manifest_hash(manifest),
         "paths": change.paths,
         "deleted_paths": change.deleted_paths,

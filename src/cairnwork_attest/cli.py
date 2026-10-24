@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
-import hashlib
 import json
 import os
 import re
@@ -16,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from cairnwork_attest.bundle import BundleError, write_bundle
+from cairnwork_attest.bundle_facts import bundle_facts
 from cairnwork_attest.checkrun import add_subparser as _add_check_run
 from cairnwork_attest.checkrun import cmd_check_run
 from cairnwork_attest.dsse import sign_statement
@@ -31,12 +29,12 @@ from cairnwork_attest.on_verified import cmd_on_verified
 from cairnwork_attest.publish import publish_bundle
 from cairnwork_attest.record import AttestError, parse_strict_json, verify_record
 from cairnwork_attest.statement import (
-    TEST_SOURCES,
     build_statement,
     default_producer,
     run_test_source,
 )
 from cairnwork_attest.verify import verify_bundle
+from cairnwork_attest.verify_binding import PolicyError, load_policy
 from cairnwork_protocol import canonical_json
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
@@ -115,51 +113,6 @@ def _cmd_statement(args: argparse.Namespace) -> int:
     return 0
 
 
-def _bundle_facts(path: Path) -> dict[str, Any]:
-    nulls: dict[str, Any] = {
-        "base": None,
-        "statement_sha256": None,
-        "core_status": None,
-        "keyid": None,
-        "test_source": None,
-    }
-    try:
-        content = path.read_bytes()
-        envelope = json.loads(content)
-        raw_payload = base64.b64decode(envelope["payload"], validate=True)
-        statement = json.loads(raw_payload)
-        base = None
-        core_status = None
-        keyid_val = None
-        source = None
-        if isinstance(envelope, dict):
-            sigs = envelope.get("signatures")
-            if isinstance(sigs, list) and sigs and isinstance(sigs[0], dict):
-                k = sigs[0].get("keyid")
-                if isinstance(k, str):
-                    keyid_val = k
-        if isinstance(statement, dict):
-            pred = statement.get("predicate")
-            if isinstance(pred, dict):
-                b = pred.get("base_commit")
-                if isinstance(b, str) and _OID.fullmatch(b):
-                    base = b
-                st = pred.get("status")
-                if isinstance(st, str):
-                    core_status = st
-                if pred.get("test_source") in TEST_SOURCES:
-                    source = pred["test_source"]
-        return {
-            "test_source": source,
-            "base": base,
-            "statement_sha256": hashlib.sha256(raw_payload).hexdigest(),
-            "core_status": core_status,
-            "keyid": keyid_val,
-        }
-    except (OSError, ValueError, UnicodeDecodeError, KeyError, TypeError, binascii.Error):
-        return nulls
-
-
 def _print_json(
     *,
     ok: bool,
@@ -171,8 +124,10 @@ def _print_json(
     core_status: str | None = None,
     keyid: str | None = None,
     test_source: str | None = None,
+    assurance: dict[str, Any] | None = None,
 ) -> None:
     obj = {
+        "assurance": assurance,
         "base": base,
         "candidate": candidate,
         "code": code,
@@ -226,6 +181,12 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 )
         except (BundleError, OSError, UnicodeDecodeError) as exc:
             return _usage_error(f"cannot read core-identity: {exc}", candidate, args.json)
+    policy = None
+    if args.policy is not None:
+        try:
+            policy = load_policy(args.policy)
+        except PolicyError as exc:
+            return _usage_error(f"cannot use policy: {exc}", candidate, args.json)
 
     result = verify_bundle(
         Path(args.bundle),
@@ -234,10 +195,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         expected_candidate=candidate,
         core_identity_pin=core_id_pin,
         expected_base=expected_base,
+        policy=policy,
     )
 
     if args.json:
-        facts = _bundle_facts(Path(args.bundle))
+        facts = bundle_facts(Path(args.bundle))
         _print_json(
             ok=result.ok,
             code="OK" if result.ok else result.code,
@@ -248,12 +210,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             core_status=facts["core_status"],
             keyid=facts["keyid"],
             test_source=facts["test_source"],
+            assurance=result.assurance if result.ok else None,
         )
         return 0 if result.ok else 1
 
     if result.ok and result.statement is not None:
         cand = result.statement["subject"][0]["digest"]["gitCommit"]
         print(f"OK {cand}")
+        if result.assurance is not None:  # v0.2: what this receiver could check itself
+            print(f"assurance: {json.dumps(result.assurance, sort_keys=True)}")
         return 0
 
     detail = f": {result.detail}" if result.detail else ""
@@ -333,6 +298,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument(
         "--core-identity", type=Path, default=None, help="Path to Core identity JSON pin file"
     )
+    p_ver.add_argument(
+        "--policy", type=Path, default=None,
+        help="Receiver policy JSON (rule, test_commit, core_identity, key_id) for v0.2 receipts",
+    )  # fmt: skip
     p_ver.add_argument(
         "--json",
         action="store_true",

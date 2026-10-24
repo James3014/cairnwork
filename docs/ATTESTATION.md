@@ -31,7 +31,8 @@ An attestation statement is an unsigned in-toto v1 Statement containing:
 - `subject`: Identifies the candidate git revision under evaluation (exactly one entry):
   - `git-commit:<candidate>`: Target revision under evaluation.
 - `predicateType`: Provisional type URI
-  `https://cairnwork.github.io/attestation/verified-change/v0.1`.
+  `https://cairnwork.github.io/attestation/verified-change/v0.1`, or `.../v0.2` for an external
+  candidate verified with deferred tests (see "External candidates" below).
 - `predicate`: A dictionary binding the execution outcome and provenance:
   - `base_commit`: Base revision against which the change was produced.
   - `request`: The complete generic verification request payload verbatim.
@@ -42,7 +43,8 @@ An attestation statement is an unsigned in-toto v1 Statement containing:
   - `integrity`: Integrity flag from Core (e.g., `"VALID"`).
   - `core_identity`: Reported Core identity from the verification response.
   - `verifier_observations`: Exact list of observations from the evidence bundle.
-  - `hidden_test_commit`: Null in Phase 1 (not carried in the notary record).
+  - `hidden_test_commit`: Null in v0.1. In v0.2 the test commit the binding names.
+  - `binding` (v0.2 only): the external candidate's binding (see "External candidates").
   - `test_source`: `"bundle"`, `"auto"` or `"none"`, the hidden-test mode the run itself used
     (the pipeline journals a `TEST_SOURCE` row in `journal.sqlite` before it checks the deferred
     tests; `statement` reads that row read-only by task and attempt, never `config.json`).
@@ -201,6 +203,107 @@ Missing or malformed `--candidate` (not a 40-character hex commit SHA) produces 
 lacks it, e.g. one signed before this field existed). The field is informational: `verify` does
 not yet refuse `auto` bundles.
 
+## External candidates (v0.2, Issue #229)
+
+`cairnwork-verify run --test-commit` runs the verifiers on the candidate with the deferred tests
+laid over it. That commit exists only in the run's scratch clone, which is deleted, and its id
+contains a commit time, so no receiver could ever rebuild it. Such a run is therefore bound to
+the **tree** that ran, and its receipt names the **PR head** (the candidate) as its subject:
+
+- The Core request's `change_set.target_revision` is `git-tree:<executed tree>` (the pinned
+  nexus-certify accepts tree targets and checks them against `change_manifest.target_tree`);
+  the manifest is base commit -> executed tree.
+- `binding` is a JSON object with exactly `rule` (`"overlay-v1"`), `base`, `head`, `test_commit`,
+  `test_paths` (sorted), `executed_tree` and `verifiers` (`[[id, argv], ...]`, the task's
+  verifiers; tests P2P selects are not included).
+- `"sha256:" + sha256(canonical JSON of binding)` replaces `acceptance_contract.requirements_hash`
+  on this path only. Core's response echoes `acceptance_contract_hash`, so the chain binding ->
+  requirements_hash -> contract -> Core response breaks if a binding is edited or taken from
+  another run.
+- The notary row (schema 3) keeps the binding in a nullable `binding_json` column and names the
+  head as its `candidate_commit`; the notary refuses a binding that does not name the base and the
+  tree of the commit the verifiers ran, or whose hash is not the contract's. Ledgers at schema 1
+  or 2 are migrated with `ALTER TABLE ... ADD COLUMN` when a `Notary` opens them (a write, also
+  when `cairnwork-attest` reads); `read_record` reads an unmigrated schema-2 ledger as is.
+- Unchanged: the Issue runner (its PR head is the commit notarized; no binding), a verify run
+  without `--test-commit` (bound to the candidate commit, v0.1), old rows and v0.1 bundles.
+  External-candidate receipts signed before this change (subject = scratch commit) still cannot
+  be verified by a receiver.
+
+**overlay-v1** (`cairnwork.deferred_tests.overlay_tree`, the one function the verifier and the
+receiver share): read head's tree into a private index, then for each test path take its entry in
+the test commit, which must be a regular file (`100644` or `100755`; symlinks, gitlinks and
+directories are refused, as are paths with an empty, `.` or `..` component or a `.git` component
+in any case: `OVERLAY_UNSUPPORTED_ENTRY`), add or replace exactly that path with
+`update-index --cacheinfo`, and `write-tree`. Plumbing only, so worktree, attributes and git
+config play no part. A receiver in full mode writes the rebuilt tree objects (no refs) into its
+repository.
+
+### Verifying a v0.2 receipt
+
+`cairnwork-attest verify` picks the mode by whether the receiver's repository holds the test
+commit:
+
+- **full**: the test commit is here. The executed tree is rebuilt from head and test commit with
+  overlay-v1 and must equal the bound tree, and Core's manifest must equal base -> rebuilt tree.
+- **confidential**: the test commit is not here (the tests stay secret). A policy is required.
+  The claim is limited to: the signer states that it ran the policy-named test source on a tree
+  whose non-test paths are byte-identical to head. Every non-test path of Core's manifest must
+  equal base -> head; each test path must be added or modified as a regular file. The test
+  contents and the overlay are not verified.
+
+The **policy** is the receiver's own configuration (for verify-action: a protected path in the
+receiving repository), never shipped by the submitter or read from the receipt:
+
+```json
+{"rule": "overlay-v1", "test_commit": "<40-hex>", "core_identity": {...}, "key_id": "<64-hex>"}
+```
+
+Exactly these four keys (strict JSON); an unreadable or malformed policy is a usage error (exit
+2). `key_id` must be the key id of `--public-key`, `core_identity` is pinned like
+`--core-identity` (both apply when both are given), and the receipt's test commit and rule must
+equal the policy's. A policy can also be given in full mode. A v0.1 receipt under a policy fails
+with `TEST_SOURCE_MISMATCH` (it binds no tests). A caller of the Python API that passes a policy
+dict of the wrong shape gets `POLICY_MALFORMED`.
+
+Without `--policy` a receiver cannot tell whether tests were required: a v0.1 receipt without
+tests for the same head also verifies `OK`. Whenever the receiver requires tests, give
+`--policy` (in full mode too).
+
+```bash
+cairnwork-attest verify bundle.json --public-key pub.pem --repo <clone> --candidate <PR head> \
+  [--policy policy.json] [--base <sha>] [--core-identity core.json] [--json]
+```
+
+Checks run in this order and the first failure is reported:
+
+1. signature (`SIGNATURE_INVALID`, also when the policy pins another key)
+2. shape (`STATEMENT_SHAPE`, `SUBJECT_SHAPE`; an unknown `rule` is a shape failure)
+3. policy present in confidential mode (`POLICY_REQUIRED`)
+4. binding-hash chain (`REQUEST_HASH_MISMATCH`, `BINDING_HASH_MISMATCH`: requirements_hash, the
+   contract Core echoed, and the request's target tree and source commit)
+5. head: subject == binding head == `--candidate` (`HEAD_MISMATCH`; `COMMIT_NOT_FOUND` when absent)
+6. base: binding base == predicate base (== `--base`) (`BASE_MISMATCH`), present (`BASE_NOT_FOUND`)
+7. test source: `hidden_test_commit` and the policy's pins; in full mode the test commit is one
+   commit on the base changing exactly `test_paths` (`TEST_SOURCE_MISMATCH`)
+8. tree (full: `TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`; `REBUILD_FAILED` when git cannot
+   rebuild the tree in the receiver's repository, e.g. it is read-only, which says nothing about
+   the receipt) or head-tree (confidential: `HEAD_TREE_MISMATCH`, `OVERLAY_UNSUPPORTED_ENTRY`)
+9. Core verdict (`RESPONSE_NOT_VERIFIED`, `CORE_IDENTITY_MISMATCH`), as for v0.1
+
+On success `verify --json` adds `assurance`, what the receiver checked itself (`null` for v0.1):
+`mode` (`full`/`confidential`), `test_source` (`policy_pinned` with `--policy`, otherwise
+`signer_choice`: the test commit the signer chose, which the receiver should read itself), `head`, `non_test_paths` (`verified` or
+`verified_against_core_manifest`), `test_contents` (`verified` or `not_verified`), `overlay`
+(`rebuilt` or `not_verified`) and `verifier_runs` (always `signer_claim`). Without `--json` the
+same object follows the `OK` line. A verify-action that predates v0.2 refuses these receipts with
+`STATEMENT_SHAPE` (closed, not open); the note is attached to the PR head, so `publish` is
+unchanged. `check-run --repo` without a policy reports `POLICY_REQUIRED` when the tests are
+absent.
+
+Limits: tree and blob ids are SHA-1 (git's collision resistance); a test that reads commit
+metadata (message, log) sees the scratch commit, which the binding does not cover.
+
 ## Publishing to a forge (Phase 2, step 1)
 
 Once a signed bundle exists, `cairnwork-attest publish` delivers it to the forge by attaching it as a git note on a dedicated notes ref and pushing that ref to the remote. Signing and publishing are separate steps by design: `publish` takes an already-signed bundle, never calls Core and never modifies the candidate commit.
@@ -265,7 +368,7 @@ The hook runs only in the verified branch, after the PR, labels and comment are 
 The following capabilities and gaps are explicitly deferred:
 - Sigstore signing and transparency log integration.
 - Enforcing forge status (the notes push is `cairnwork-attest publish`; the informational Check Run is `cairnwork-attest check-run`).
-- `hidden_test_commit`: Durably binding secret evaluation test commit in the notary record.
-- Verifier argv and execution log hashes: Explicit digests for verifier invocation commands and execution logs.
+- `hidden_test_commit` for the Issue runner: bound for external candidates (v0.2) only.
+- Execution log hashes: verifier argv is bound for external candidates (v0.2); log digests are not.
 - Sandbox profile hash: Not carried in the notary record or evidence bundle.
 - Timestamp validation: Timestamp is caller-supplied and not validated as UTC or against a trusted timestamping authority.
