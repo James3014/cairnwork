@@ -320,3 +320,10 @@ def test_numstat_ignores_planted_git_attributes_and_ignore_files(runs):
     assert parse_numstat(run(runs, "numstat", root).stdout) == (5, 0)  # +1: the file itself
     assert run(runs, "write", root, "sub/.gitignore", stdin=b"*\n").returncode == 0
     assert parse_numstat(run(runs, "numstat", root).stdout) == (6, 0)  # nothing hidden
+
+
+def test_git_query_temp_dir_is_made_by_mktemp():
+    """Review of #239, finding 4: no predictable name in the worker-writable tmp."""
+    text = WRAPPER.read_text()
+    assert '/usr/bin/mktemp -d "$TMPDIR/gitq.XXXXXXXXXX"' in text
+    assert "$$" not in text[text.index("GIT_QUERY=") : text.index("real_git()")]

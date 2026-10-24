@@ -172,9 +172,9 @@ G="$3 --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.fsmonitor=f
 if [ "$2" = status ]; then
   exec $G status --porcelain=v2 --branch -z -uall --renames --ignored=matching 2>/dev/null
 fi
-q=$TMPDIR/numstat.$$
-trap '\''rm -rf "$q"'\'' EXIT
-/bin/mkdir -p "$q/objects"
+q=$(/usr/bin/mktemp -d "$TMPDIR/gitq.XXXXXXXXXX")  # unpredictable, 0700, created atomically
+trap '\''/bin/rm -rf "$q"'\'' EXIT
+/bin/mkdir "$q/objects"
 /bin/cp "$c/.git/index" "$q/index"
 export GIT_INDEX_FILE="$q/index" GIT_OBJECT_DIRECTORY="$q/objects"
 export GIT_ALTERNATE_OBJECT_DIRECTORIES="$c/.git/objects"
