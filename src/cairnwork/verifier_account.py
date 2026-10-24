@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from cairnwork import confined, lock_queue, verifier_escape
+from cairnwork import checkout_grant, confined, lock_queue, verifier_escape
 from cairnwork_sandbox import Backend, platform_backend
 
 SUDO = "/usr/bin/sudo"
@@ -335,26 +335,15 @@ class VerifierAccount:
             os.chmod(directory, 0o2770)
 
     @staticmethod
-    def grant_read(root: Path) -> None:
-        """Let the account read and traverse, never write, a checkout, whatever the umask was.
+    def grant_write(root: Path) -> None:
+        """Let the account read AND write a fresh checkout, as the owner's verifier may (#240).
 
-        Read is granted to *other*, not only the shared group (Issue #91). The checkout cannot be
-        relied on to carry the shared ``cairnwork`` group: its parent ``work`` inherits the group
-        and the setgid bit from the run root, but the per-run ``chmod`` that opens ``work`` to the
-        group strips setgid on Linux whenever the owner process is not an effective member of the
-        group (a service whose session predates ``usermod -aG``), so git clones the checkout under
-        the owner's own primary group instead. Group bits then never reach the account. With the
-        default umask the clone happens to be other-readable and the run works; under a strict umask
-        (077) it is not, and the account cannot enter the checkout — the run fails. Granting *other*
-        read/traverse makes the account's access umask- and group-independent; it is no wider than
-        the default-umask clone already is, and is scoped to this throwaway checkout of the
-        code under test, never the owner's home or the run scratch."""
-        for top, dirs, files in os.walk(root):
-            for name, bits in [(d, 0o055) for d in dirs] + [(f, 0o044) for f in files]:
-                path = os.path.join(top, name)
-                if not os.path.islink(path):
-                    os.chmod(path, os.stat(path).st_mode | bits)
-        os.chmod(root, os.stat(root).st_mode | 0o055)
+        Granted to group and other, never following a symlink, bottom-up; a hard-linked file
+        stays read-only (checkout_grant.py). Other bits are needed because the checkout may not
+        carry the shared group (Issue #91); they reach no one else, since ``work`` is 0o3770 with
+        nothing for other. ``work`` stays sticky, so the account still cannot rename or replace
+        the checkout itself (``_same_directory`` would report it anyway)."""
+        checkout_grant.grant_write(root)
 
     @contextmanager
     def exclusive(self, timeout: float | None = None) -> Iterator[None]:

@@ -211,8 +211,8 @@ def _run_all(
             if account is not None:
                 os.chmod(work, 0o3770)
             checkout = create_attempt_clone(repo, candidate_commit, work, clone_id).path
-            if account is not None:
-                account.grant_read(checkout)  # whatever the caller's umask was
+            if account is not None:  # writable as in owner mode, whatever the umask (#240)
+                account.grant_write(checkout)
             runs.append(
                 _run_one(
                     repo,
@@ -228,12 +228,27 @@ def _run_all(
                 )
             )
         finally:
-            try:
-                remove_attempt_clone(work, clone_id)
-            except WorkspaceError:
-                pass  # the run's verdict stands; a leftover directory is only disk space
-            _remove_scratch((work,), account)
+            _remove_checkout(work, clone_id, account)
     return tuple(runs)
+
+
+def _remove_checkout(work: Path, clone_id: str, account) -> None:
+    """Remove a verifier's work dir and checkout; a leftover is only disk space, never a verdict.
+
+    Under the account the checkout holds files and directories the account made (#240). The
+    account removes them first, while every owner directory in the checkout is still open to it;
+    the owner then removes what is left (its own directories, which the account cannot chmod)
+    without ever walking a tree the account wrote with chmod. remove_attempt_clone is the owner
+    path only: its chmod 0o700 pass would shut the account out of its own leftovers."""
+    if account is not None:
+        account.remove(work)
+        shutil.rmtree(work, ignore_errors=True)
+        return
+    try:
+        remove_attempt_clone(work, clone_id)
+    except WorkspaceError:
+        pass  # the run's verdict stands; a leftover directory is only disk space
+    shutil.rmtree(work, ignore_errors=True)
 
 
 def _remove_scratch(dirs, account) -> None:
