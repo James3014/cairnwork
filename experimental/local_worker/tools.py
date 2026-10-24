@@ -186,7 +186,8 @@ class ToolCall:
 
 
 class WorkerTools:
-    """list_dir / read_file / write_file / edit_file / run_tests / status / numstat, as the worker.
+    """list_dir / read_file / write_file / edit_file / run_tests / status / numstat / tracked, as
+    the worker.
 
     ``mode="worker"`` (the only mode an experiment may use) goes through ``sudo -n -u
     _cairnwork_worker`` and the installed wrapper. ``mode="direct"`` runs a wrapper copy as the
@@ -272,7 +273,8 @@ class WorkerTools:
         return self._call("sweep", "sweep", [], {})
 
     def status(self) -> ToolCall:
-        """Fixed ``git status --porcelain=v2 --branch -z -uall`` of the checkout, as the worker."""
+        """Fixed ``git status --porcelain=v2 --branch -z -uall`` of the checkout, then its empty
+        directories, FIFOs and sockets (gitstate.parse_status), as the worker."""
         return self._call("status", "status", [], {})
 
     def tracked(self) -> ToolCall:
@@ -280,7 +282,8 @@ class WorkerTools:
         return self._call("tracked", "tracked", [], {})
 
     def numstat(self) -> ToolCall:
-        """Fixed ``git diff --numstat -z HEAD`` (untracked files included), as the worker."""
+        """``PATCH <added> <removed> <binary_files_changed>`` against HEAD, untracked and ignored
+        files included, counted from the ``--text -U0`` patch (gitstate.parse_numstat)."""
         return self._call("numstat", "numstat", [], {})
 
     # -- plumbing ----------------------------------------------------------------------------
