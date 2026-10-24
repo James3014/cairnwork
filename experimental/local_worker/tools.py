@@ -30,6 +30,7 @@ INSTALLED_WRAPPER = Path("/Users/Shared/cairnwork-worker/local-bin/local-worker-
 SUDO = "/usr/bin/sudo"
 REFUSED_EXIT = 64
 TERM_GRACE_SECONDS = 5.0  # after SIGTERM, and again after SIGKILL, before giving up on a wait
+KILL_GRACE_SECONDS = 2 * TERM_GRACE_SECONDS  # how long a timed-out call can outlive its timeout
 START_MARKER = "LOCAL_WORKER_STARTED"  # first line the wrapper prints on stderr: "<marker> <nonce>"
 DEFAULT_MAX_OUTPUT_BYTES = 20_000
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -221,6 +222,7 @@ class WorkerTools:
         """Replace the single exact occurrence of ``target``; the text comes from a worker read."""
         tool_args = {"path": path, "target": target, "replacement": replacement}
         started = time.monotonic()
+        budget = self.timeout_seconds  # one timeout for the read and the write together
         rc, out, err = self._invoke("read", [path], None)
         if rc != 0:
             call = self._log("edit_file", tool_args, rc, out + err, started)
@@ -236,7 +238,10 @@ class WorkerTools:
             note = f"edit_file: target occurs {count} times in {path}; nothing written\n"
             return self._log("edit_file", tool_args, 1, note.encode(), started)
         new = text.replace(target, replacement, 1).encode()
-        rc, out, err = self._invoke("write", [path], new)
+        left = budget - (time.monotonic() - started)
+        if left <= 0:
+            return self._log("edit_file", tool_args, None, b"edit_file: no time left\n", started)
+        rc, out, err = self._invoke("write", [path], new, timeout=left)
         call = self._log("edit_file", tool_args, rc, out + err, started)
         self._after("write", rc)
         return call
@@ -257,13 +262,17 @@ class WorkerTools:
         build = sudo_argv if self.mode == "worker" else direct_argv
         return build(self.wrapper, action, self.run_root, args, nonce)
 
-    def _invoke(self, action: str, args: Sequence[str], stdin: bytes | None) -> Invoked:
+    def _invoke(
+        self, action: str, args: Sequence[str], stdin: bytes | None, timeout: float | None = None
+    ) -> Invoked:
         # The wrapper prints "<START_MARKER> <nonce>" as the first thing on stderr. Whether it
         # started is decided by that line alone, never by the exit code or by text such as
         # "sudo:" in the output: a test the model wrote may exit 126/127 or print anything.
         nonce = secrets.token_hex(8)
         argv = self._argv(action, args, nonce)
-        rc, out, err = self.invoker(argv, stdin, self.timeout_seconds)
+        rc, out, err = self.invoker(
+            argv, stdin, self.timeout_seconds if timeout is None else timeout
+        )
         marker = f"{START_MARKER} {nonce}\n".encode()
         if not err.startswith(marker):
             # No rule, missing binary, refused sudo: the wrapper never ran. Fail closed.

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
-from local_worker_fakes import cli_harness, lines, reply
+import socket
+import threading
+import time
 
-from experimental.local_worker import episode
+import pytest
+from local_worker_fakes import TASK, World, cli_harness, lines, make_loop, reply
+
+from experimental.local_worker import endpoint, episode, tools
+from experimental.local_worker.agent import Limits, RefusedStart, initial_messages
 
 EDIT_SRC = reply("edit_file", path="src/app.py", target="x = 1", replacement="x = 2")
 
@@ -72,3 +77,119 @@ def test_cut_900s_budget_shrinks_by_the_parent_prefix():
     got = episode.cut_at(turns, "COMPLETED", 60.0, max(0.0, 900.0 - 870.0))
     assert got["limit_seconds"] == 30.0 and got["within_limit"] is False
     assert got["exit_reason"] == "TIMEOUT" and got["turns_completed"] == 0
+
+
+# -- finding 5: no overrun of the deadline -----------------------------------------------------
+def test_reserve_must_hold_three_steps_with_their_kill_grace():
+    with pytest.raises(ValueError):
+        Limits(context_cap=1000, cleanup_reserve_seconds=20)
+    lim = Limits(context_cap=1000)
+    assert 3 * (lim.step_seconds + tools.KILL_GRACE_SECONDS) == lim.cleanup_reserve_seconds
+
+
+def test_edit_file_read_and_write_share_one_timeout(tmp_path):
+    seen = []
+
+    def invoker(argv, stdin, timeout):
+        seen.append(timeout)
+        nonce = argv[argv.index("--start-nonce") + 1]
+        if argv[argv.index("--start-nonce") + 2] == "read":
+            time.sleep(0.3)
+            return 0, b"x = 1\n", f"{tools.START_MARKER} {nonce}\n".encode()
+        return 0, b"", f"{tools.START_MARKER} {nonce}\n".encode()
+
+    wt = tools.WorkerTools(tmp_path / ("0" * 32), tmp_path / "c.jsonl", invoker=invoker)
+    wt.timeout_seconds = 1.0
+    assert wt.edit_file("a.py", "x = 1", "x = 2").exit_code == 0
+    assert seen[0] == 1.0 and seen[1] <= 0.71
+
+
+def _drip_server(head: bytes, drip: bytes):
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(65536)
+        conn.sendall(head)
+        try:
+            for b in drip:
+                conn.sendall(bytes([b]))
+                time.sleep(0.1)
+        except OSError:
+            pass
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1]
+
+
+@pytest.mark.parametrize(
+    ("head", "drip"),
+    [
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 400\r\n\r\n", b"{" * 400),  # body drip
+        (b"HTTP/1.1 200 OK\r\n", b"X-Slow: " + b"a" * 400),  # header drip
+    ],
+)
+def test_a_dripping_server_cannot_pass_the_deadline(head, drip):
+    port = _drip_server(head, drip)
+    ep = endpoint.LoopbackEndpoint(f"http://127.0.0.1:{port}/v1")
+    started = time.monotonic()
+    with pytest.raises(endpoint.EndpointTimeout):
+        ep.models(started + 0.8)
+    assert time.monotonic() - started < 1.5  # each byte comes well inside the socket timeout
+
+
+def test_body_reads_are_single_receives_checked_against_the_deadline():
+    """Without the watchdog: each read1 is one receive, and the deadline is checked between them."""
+
+    class Drip:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def isclosed(self) -> bool:
+            return False
+
+        def read1(self, n: int) -> bytes:
+            self.reads += 1
+            return b"{"
+
+    class Sock:
+        def settimeout(self, t: float) -> None:
+            pass
+
+    left = iter([5.0, 4.0, 3.0])
+
+    def remaining() -> float:
+        try:
+            return next(left)
+        except StopIteration:
+            raise endpoint.EndpointTimeout("deadline passed") from None
+
+    drip = Drip()
+    with pytest.raises(endpoint.EndpointTimeout):
+        endpoint._read_bounded(drip, Sock(), remaining)  # type: ignore[arg-type]
+    assert drip.reads == 3
+
+
+def test_status_with_a_nonzero_exit_is_not_observed(tmp_path):
+    """Review of #239, finding 3: a failed git query is never parsed, even if its output looks
+    like a clean tree (base: refuse to start; after a tool call: abort)."""
+    world = World()
+    world.status_rc = 3
+    loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], world)
+    with pytest.raises(RefusedStart):
+        loop.run(initial_messages(TASK))
+    world = World()
+    loop, world, _, _ = make_loop(tmp_path / "b", [reply("read_file", path="src/app.py")], world)
+    orig = world.handle
+
+    def handle(action, args, stdin):
+        rc, data = orig(action, args, stdin)
+        after_read = len(world.calls) > 1 and world.calls[-2][0] == "read"
+        return (4 if action == "status" and after_read else rc), data
+
+    world.handle = handle
+    out = loop.run(initial_messages(TASK))
+    assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == "status_unavailable"

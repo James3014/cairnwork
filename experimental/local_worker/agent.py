@@ -8,8 +8,12 @@ fixed ``status`` query; the observed tree decides the cut (episode.first_edit_cu
 
 Limits (frozen in the manifest): ``max_steps`` turns (one model reply plus at most one tool call;
 extra tool calls in a reply are dropped and counted), one deadline for the whole episode
-(``max_wall_seconds`` minus a cleanup reserve) passed to every endpoint request and every tool
-timeout, and a context cap on the last reply's prompt + completion tokens.
+(``max_wall_seconds`` minus a cleanup reserve), and a context cap on the last reply's prompt +
+completion tokens. Every endpoint request gets the deadline itself. A wrapper call that times out
+can outlive its timeout by up to tools.KILL_GRACE_SECONDS (SIGTERM, then SIGKILL), so a tool call
+(edit_file makes two wrapper calls under one timeout) gets min(tool cap, time left minus twice that
+grace), and the cleanup reserve is split into three equal steps (the status query after a turn,
+sweep, numstat), each with room for its own grace: the episode ends within max_wall_seconds.
 
 ``run_tests`` takes no free-form arguments: it runs ``pytest -q --tb=short -- <targets>`` over the
 task's declared public test targets, or the one the model picks by ``target_index``.
@@ -24,6 +28,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+from experimental.local_worker.agent_protocol import (
+    NUDGE,
+    RUN_TESTS_ARGS,
+    SYSTEM_PROMPT,
+    TOOL_SCHEMAS,
+    BadCall,
+    decode_call,
+    render,
+)
 from experimental.local_worker.endpoint import (
     Endpoint,
     EndpointError,
@@ -33,60 +46,14 @@ from experimental.local_worker.endpoint import (
 from experimental.local_worker.episode import LoopOutcome, TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_numstat
 from experimental.local_worker.gitstate import parse_status as _parse_status
-from experimental.local_worker.tools import ToolCall, WorkerIsolationError, WorkerTools
-
-UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
-RUN_TESTS_ARGS = ("-q", "--tb=short", "--")
-NUDGE = "No tool call received. Reply with exactly one tool call, or call finish."
-SYSTEM_PROMPT = (
-    "You are fixing one task in a Python repository. You act only through the tools list_dir, "
-    "read_file, write_file, edit_file, run_tests and finish; paths are relative to the repository "
-    "root. Call exactly one tool per reply. run_tests runs the task's public tests (all of them, "
-    "or the one named by target_index). When your change is complete, call finish with status "
-    "DONE. If the task cannot be done because its specification lacks a fact (a name, a contract "
-    "or the expected behaviour), call finish with status NEEDS_SPEC and say what is missing."
+from experimental.local_worker.tools import (
+    KILL_GRACE_SECONDS,
+    ToolCall,
+    WorkerIsolationError,
+    WorkerTools,
 )
 
-
-def _fn(name: str, desc: str, props: dict, required: list[str]) -> dict:
-    params = {"type": "object", "properties": props, "required": required}
-    spec = {"name": name, "description": desc, "parameters": params}
-    return {"type": "function", "function": spec}
-
-
-_S = {"type": "string"}
-TOOL_SCHEMAS = [
-    _fn("list_dir", "List a directory of the repository.", {"path": _S}, ["path"]),
-    _fn("read_file", "Print a file of the repository.", {"path": _S}, ["path"]),
-    _fn("write_file", "Create or replace.", {"path": _S, "content": _S}, ["path", "content"]),
-    _fn(
-        "edit_file",
-        "Replace the single exact occurrence of target in a file.",
-        {"path": _S, "target": _S, "replacement": _S},
-        ["path", "target", "replacement"],
-    ),
-    _fn(
-        "run_tests",
-        "Run the task's public tests: all of them, or one by index.",
-        {"target_index": {"type": "integer"}},
-        [],
-    ),
-    _fn(
-        "finish",
-        "End the task.",
-        {"status": {"type": "string", "enum": ["DONE", "NEEDS_SPEC"]}, "summary": _S},
-        ["status"],
-    ),
-]
-TOOLS_ABSENT = ("search",)  # the wrapper has no search action (Plan v1 design item 1: declared)
-_REQUIRED = {
-    "list_dir": ("path",),
-    "read_file": ("path",),
-    "write_file": ("path", "content"),
-    "edit_file": ("path", "target", "replacement"),
-    "run_tests": (),
-    "finish": ("status",),
-}
+UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
 
 
 @dataclass(frozen=True)
@@ -98,6 +65,16 @@ class Limits:
     tool_cap_seconds: float = 300.0
     cleanup_reserve_seconds: float = 60.0
     max_completion_tokens: int = 4096
+
+    def __post_init__(self) -> None:
+        if self.step_seconds < 1.0:
+            raise ValueError(f"cleanup_reserve_seconds must be >= {3 * (KILL_GRACE_SECONDS + 1)}")
+
+    @property
+    def step_seconds(self) -> float:
+        """Timeout of each bookkeeping step (status, sweep, numstat): a third of the reserve,
+        less the kill grace a timed-out step may still use."""
+        return self.cleanup_reserve_seconds / 3 - KILL_GRACE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -116,10 +93,6 @@ class Settings:
     temperature: float = 0.0
 
 
-class BadCall(ValueError):
-    """A tool call the loop cannot run; the model is told why and nothing executes."""
-
-
 class RefusedStart(RuntimeError):
     """The checkout is not clean at the expected base: no episode is run."""
 
@@ -132,37 +105,6 @@ def initial_messages(task: Task) -> list[dict]:
     targets = "\n".join(f"{i}: {t}" for i, t in enumerate(task.public_tests))
     user = f"{task.prompt}\n\nPublic test targets (run_tests target_index):\n{targets}"
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
-
-
-def decode_call(call: Any, n_targets: int) -> tuple[str, dict]:
-    fn = call.get("function") if isinstance(call, dict) else None
-    name = fn.get("name") if isinstance(fn, dict) else None
-    if name not in _REQUIRED:
-        raise BadCall(f"unknown tool {name!r}")
-    assert isinstance(fn, dict)
-    raw = fn.get("arguments") or "{}"
-    try:
-        args = json.loads(raw) if isinstance(raw, str) else raw
-    except ValueError:
-        raise BadCall("arguments are not valid JSON") from None
-    if not isinstance(args, dict):
-        raise BadCall("arguments must be a JSON object")
-    for key in _REQUIRED[name]:
-        if not isinstance(args.get(key), str):
-            raise BadCall(f"{name} needs a string {key!r}")
-    if name == "finish" and args["status"] not in ("DONE", "NEEDS_SPEC"):
-        raise BadCall("finish status must be DONE or NEEDS_SPEC")
-    index = args.get("target_index")
-    if name == "run_tests" and index is not None:
-        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < n_targets:
-            raise BadCall(f"target_index must be an integer in [0, {n_targets})")
-    return name, args
-
-
-def render(call: ToolCall) -> str:
-    rc = "timeout" if call.exit_code is None else str(call.exit_code)
-    note = ", output truncated" if call.stdout_truncated else ""
-    return f"[exit {rc}{note}]\n{call.output}"
 
 
 class AgentLoop:
@@ -192,7 +134,7 @@ class AgentLoop:
         return self._elapsed() - self._offset
 
     def observe(self, timeout: float) -> TreeState:
-        self.tools.timeout_seconds = max(timeout, 1.0)
+        self.tools.timeout_seconds = timeout
         call = self.tools.status()
         return _parse_status(call.raw) if call.exit_code == 0 else TreeState(observed=False)
 
@@ -210,7 +152,7 @@ class AgentLoop:
         self._start = self.clock() - elapsed_offset
         self._offset = elapsed_offset
         deadline = self._start + lim.max_wall_seconds - lim.cleanup_reserve_seconds
-        base = self.observe(lim.cleanup_reserve_seconds)
+        base = self.observe(lim.step_seconds)
         if not base.observed or base.entries or base.head is None:
             raise RefusedStart("checkout is not a clean git tree at its base")
         if expected_base is not None and base.head != expected_base:
@@ -336,7 +278,7 @@ class AgentLoop:
         return t.run_tests([*RUN_TESTS_ARGS, *targets])
 
     def _execute(self, log: TurnLog, name: str, args: dict, deadline: float) -> str:
-        left = deadline - self.clock()
+        left = deadline - self.clock() - 2 * KILL_GRACE_SECONDS
         if left <= 0:
             log.error_category = "TIMEOUT"
             raise TimeoutError("deadline passed before the tool call")
@@ -351,15 +293,15 @@ class AgentLoop:
             call.isolation,
         )
         log.action_type = call.action_type  # run_tests is recorded as the spec's "run_test"
-        # The status query has a third of the cleanup reserve (sweep and numstat the other two),
+        # The status query is one of the reserve's three steps (sweep and numstat the others),
         # so a turn ending at the deadline still observes its tree within max_wall_seconds.
-        log.tree = self.observe(self.limits.cleanup_reserve_seconds / 3)
+        log.tree = self.observe(self.limits.step_seconds)
         if not log.tree.observed:
             raise _StatusUnavailable(f"git status failed after turn {log.index}")
         return render(call)
 
     def _cleanup(self, out: LoopOutcome) -> None:
-        self.tools.timeout_seconds = max(self.limits.cleanup_reserve_seconds / 3, 1.0)
+        self.tools.timeout_seconds = self.limits.step_seconds
         try:
             sweep = self.tools.sweep()
             stat = self.tools.numstat()

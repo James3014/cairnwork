@@ -4,8 +4,10 @@ Only ``http://127.0.0.1:<port>`` or ``http://[::1]:<port>``: literal addresses (
 resolver or /etc/hosts in the path), an explicit port, no credentials, query or fragment. Requests
 go through ``http.client`` directly, which has no proxy layer (``http_proxy`` and friends are never
 consulted) and never follows redirects; any non-200 answer is an error. After connecting, the peer
-address must itself be loopback. Every request takes the loop's single deadline (monotonic seconds)
-and re-arms the socket timeout from it before each read, so a slow server cannot outlive it.
+address must itself be loopback. Every request takes the loop's single deadline (monotonic seconds):
+the socket timeout is recomputed from it before each step, the body is read with read1 (one receive
+per call) and checked against it between reads, and a watchdog timer shuts the socket down at the
+deadline itself, so a server that drips headers or body cannot hold a request past it.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import http.client
 import ipaddress
 import json
 import re
+import socket
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -110,11 +114,15 @@ class LoopbackEndpoint:
     def _request(self, method: str, path: str, body: bytes | None, deadline: float) -> dict:
         t = self.target
         conn = http.client.HTTPConnection(t.host, t.port, timeout=self._remaining(deadline))
+        watchdog: threading.Timer | None = None
         try:
             conn.connect()
             sock = conn.sock
             if sock is None or not peer_is_loopback(sock.getpeername()):
                 raise EndpointError("connected peer is not a loopback address")
+            watchdog = threading.Timer(self._remaining(deadline), _shutdown, (sock,))
+            watchdog.daemon = True
+            watchdog.start()
             headers = {"Content-Type": "application/json"} if body is not None else {}
             conn.request(method, t.base_path + path, body=body, headers=headers)
             sock.settimeout(self._remaining(deadline))
@@ -124,8 +132,12 @@ class LoopbackEndpoint:
         except TimeoutError as exc:
             raise EndpointTimeout(f"endpoint timed out: {exc}") from None
         except (OSError, http.client.HTTPException) as exc:
+            if self.clock() >= deadline:  # the watchdog shut the socket down
+                raise EndpointTimeout("endpoint passed the deadline") from None
             raise EndpointError(f"endpoint request failed: {type(exc).__name__}: {exc}") from None
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             conn.close()
         if status != 200:  # a redirect is an error too: it is never followed
             raise EndpointError(f"endpoint answered HTTP {status}")
@@ -143,7 +155,7 @@ def _read_bounded(resp: http.client.HTTPResponse, sock: Any, remaining: Callable
     size = 0
     while not resp.isclosed():  # http.client closes the socket once the body is complete
         sock.settimeout(remaining())
-        chunk = resp.read(65536)
+        chunk = resp.read1(65536)  # one receive: read(n) would loop recv until n bytes
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
@@ -151,6 +163,13 @@ def _read_bounded(resp: http.client.HTTPResponse, sock: Any, remaining: Callable
             raise EndpointError("endpoint response exceeds the size cap")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _shutdown(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed: the request finished first
 
 
 def _count(value: Any) -> int | None:

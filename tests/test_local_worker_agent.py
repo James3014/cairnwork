@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from local_worker_fakes import BASE_SHA, TASK, World, make_loop, reply
 
-from experimental.local_worker import agent, episode
+from experimental.local_worker import agent_protocol, episode, tools
 from experimental.local_worker.agent import RefusedStart, initial_messages
 from experimental.local_worker.endpoint import EndpointError, EndpointTimeout
 from experimental.local_worker.episode import build_record, first_edit_cut
@@ -159,7 +159,8 @@ def test_wall_clock_limit_uses_one_deadline(tmp_path):
     deadline = endpoint.deadlines[0]
     assert deadline == pytest.approx(1000.0 + 1000 - 60)
     tool_timeouts = [c[2] for c in world.calls if c[0] == "read"]
-    assert tool_timeouts == [300.0, deadline - 1800.0]  # min(tool cap, time left)
+    grace = 2 * tools.KILL_GRACE_SECONDS  # a timed-out call (edit_file: two) may outlive it
+    assert tool_timeouts == [300.0, deadline - 1800.0 - grace]  # min(tool cap, time left)
     assert rec["turns"][2]["error_category"] == "TIMEOUT"  # replied, but its tool never ran
     assert rec["turns"][2]["exit_code"] is None
     assert rec["termination"]["cleanup"] == "ok"
@@ -247,7 +248,7 @@ def test_run_tests_runs_only_declared_targets(tmp_path):
     _, _, world, endpoint = run(tmp_path, [reply("run_tests"), reply("run_tests", target_index=0)])
     pytest_args = [c[1] for c in world.calls if c[0] == "pytest"]
     assert pytest_args == [["-q", "--tb=short", "--", "tests/test_app.py"]] * 2
-    params = agent.TOOL_SCHEMAS[4]["function"]["parameters"]
+    params = agent_protocol.TOOL_SCHEMAS[4]["function"]["parameters"]
     assert set(params["properties"]) == {"target_index"}
     first = endpoint.payloads[0]
     assert first["seed"] == 7 and first["parallel_tool_calls"] is False
@@ -376,25 +377,3 @@ def test_validator_checks_the_new_fields(tmp_path, corrupt):
     corrupt(rec)
     with pytest.raises(SchemaError):
         validate_record(rec)
-
-
-def test_status_with_a_nonzero_exit_is_not_observed(tmp_path):
-    """Review of #239, finding 3: a failed git query is never parsed, even if its output looks
-    like a clean tree (base: refuse to start; after a tool call: abort)."""
-    world = World()
-    world.status_rc = 3
-    loop, _, _, _ = make_loop(tmp_path, [EDIT_SRC], world)
-    with pytest.raises(RefusedStart):
-        loop.run(initial_messages(TASK))
-    world = World()
-    loop, world, _, _ = make_loop(tmp_path / "b", [reply("read_file", path="src/app.py")], world)
-    orig = world.handle
-
-    def handle(action, args, stdin):
-        rc, data = orig(action, args, stdin)
-        after_read = len(world.calls) > 1 and world.calls[-2][0] == "read"
-        return (4 if action == "status" and after_read else rc), data
-
-    world.handle = handle
-    out = loop.run(initial_messages(TASK))
-    assert out.exit_reason == "ERROR_ABORT" and out.abort_cause == "status_unavailable"

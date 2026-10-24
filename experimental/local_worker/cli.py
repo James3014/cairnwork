@@ -35,16 +35,18 @@ from typing import Any
 
 from experimental.local_worker import corpus_io
 from experimental.local_worker.agent import (
-    RUN_TESTS_ARGS,
-    SYSTEM_PROMPT,
-    TOOL_SCHEMAS,
-    TOOLS_ABSENT,
     AgentLoop,
     Limits,
     RefusedStart,
     Settings,
     Task,
     initial_messages,
+)
+from experimental.local_worker.agent_protocol import (
+    RUN_TESTS_ARGS,
+    SYSTEM_PROMPT,
+    TOOL_SCHEMAS,
+    TOOLS_ABSENT,
 )
 from experimental.local_worker.endpoint import DEFAULT_URL, EndpointError, LoopbackEndpoint
 from experimental.local_worker.episode import (
