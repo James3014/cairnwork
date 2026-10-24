@@ -13,7 +13,8 @@
 #   local-worker-tool write  <run_root> <relpath>        replace a checkout file with stdin
 #   local-worker-tool pytest <run_root> [pytest args]    run <run_root>/venv/bin/python -m pytest
 #   local-worker-tool sweep  <run_root>                  kill this run's worker processes
-#   local-worker-tool status <run_root>                  git status of the checkout (porcelain v2)
+#   local-worker-tool status <run_root>                  git status of the checkout (porcelain v2,
+#                                                        then empty directories, FIFOs, sockets)
 #   local-worker-tool numstat <run_root>                 lines added/removed vs HEAD (one PATCH line)
 #
 # <run_root> is a canonical real directory directly inside $RUNS named by 32 lowercase hex digits,
@@ -230,6 +231,14 @@ export GIT_DIR="$o"
 if [ "$2" = status ]; then
   export GIT_INDEX_FILE="$c/.git/index"
   step $G status --porcelain=v2 --branch -z -uall --renames --ignored=matching
+  /bin/cat "$q/out"
+  # What git cannot see (Claude review of #239, NB10): empty directories ("x d <path>") and
+  # FIFOs or sockets ("x o <path>"), as extra NUL-terminated records after the porcelain ones.
+  cd "$c"
+  step /usr/bin/find . -path ./.git -prune -o -type d -empty -exec /usr/bin/printf "x d %s\0" {} +
+  /bin/cat "$q/out"
+  step /usr/bin/find . -path ./.git -prune -o \( -type p -o -type s \) \
+    -exec /usr/bin/printf "x o %s\0" {} +
   /bin/cat "$q/out"
   exit 0
 fi

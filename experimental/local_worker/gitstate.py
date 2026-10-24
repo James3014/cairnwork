@@ -1,7 +1,9 @@
 """Parsing the worker's two fixed git queries for the local worker loop (#88, Plan v2 point 4).
 
 ``status`` is ``git status --porcelain=v2 --branch -z -uall --renames --ignored=matching`` (ignored
-files are listed too, so a write to an ignored path still changes the observed tree); ``numstat``
+files are listed too, so a write to an ignored path still changes the observed tree), followed by
+what git cannot see: ``x d <path>`` for an empty directory and ``x o <path>`` for a FIFO or socket
+(Claude review of #239, NB10), so creating one changes the observed tree too; ``numstat``
 is one line, ``PATCH <added> <removed> <binary_files_changed>``, counted from the ``--text -U0``
 patch against HEAD with untracked and ignored files included. Output that does not parse is never
 guessed into a tree or a count: it is reported as not observed.
@@ -36,6 +38,8 @@ def _entry_paths(entry: str) -> list[str]:
         return [head.split(" ", 9)[-1], orig]
     if kind == "u":
         return [entry.split(" ", 10)[-1]]
+    if kind == "x":
+        return [entry[4:]]
     return []
 
 
@@ -55,6 +59,8 @@ def parse_status(raw: bytes) -> TreeState:
         elif f.startswith("2 ") and i + 1 < len(fields):
             entries.append(f + "\0" + fields[i + 1])
             i += 1
+        elif f[:6] in ("x d ./", "x o ./") or f in ("x d .", "x o ."):
+            entries.append(f[:4] + (f[6:] or "."))  # find's "./path" as the checkout path
         elif f and not f.startswith("# "):
             return TreeState(observed=False)  # not git porcelain: never guess a tree
         i += 1

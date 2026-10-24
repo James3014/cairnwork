@@ -28,6 +28,11 @@ CUT_DEFINITION = (  # recorded in manifest.json (review of #239, finding 10)
     " carries the spec's cut: the first observed change to a path that is not a test, doc or"
     " git-ignored file. cut_status UNOBSERVED (cut_occurred null): a turn whose tool ran was"
     " never observed before any cut, so whether and where the tree changed is unknown."
+    " Besides git's status, the observation lists the empty directories, FIFOs and sockets in"
+    " the checkout (git cannot see them), so creating one is a tree change for first_edit_cut;"
+    " they are never a source change. Not observed: anything outside the checkout (run_root/tmp,"
+    " the test process's HOME and TMPDIR), file modes git does not track, and the contents of"
+    " a FIFO."
 )
 CUT_STATES = ("CUT", "NO_CUT", "UNOBSERVED")
 READ_ACTIONS = ("read_file", "list_dir", "search")
@@ -141,8 +146,10 @@ def _first_change(turns: list[TurnLog], base: TreeState, source_only: bool):
             continue
         assert turn.tree is not None
         changed = [p for p in turn.tree.paths() if p not in base.paths()] or turn.tree.paths()
-        if source_only:  # git-ignored paths (status "!") are artifacts, never source
+        if source_only:  # git-ignored paths (status "!") are artifacts, never source; nor
+            # what git cannot see (x: an empty directory, a FIFO or a socket)
             ignored = {e[2:] for e in turn.tree.entries if e.startswith("! ")}
+            ignored |= {e[4:] for e in turn.tree.entries if e.startswith("x ")}
             changed = [p for p in changed if is_source_path(p) and p not in ignored]
         if changed or not source_only:
             return "CUT", n, turn, changed

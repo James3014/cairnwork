@@ -29,6 +29,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
 
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
+    (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
     git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
@@ -57,6 +58,7 @@ def test_git_queries_observe_the_tree_without_writing_git(runs):
 def _git_checkout(runs):
     co = runs / TAG / "checkout"
     (co / ".git").rmdir()
+    (co / "sub" / "keep.txt").write_text("k\n")  # no empty directory at base: status lists one
     git = ["git", "-C", str(co), "-c", "user.email=t@t", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
     (co / ".gitignore").write_text("*.log\n")
