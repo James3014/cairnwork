@@ -109,3 +109,20 @@ def test_the_pre_check_never_reads_an_unknown_marker_as_unused(tmp_path, make):
             _burn(intake, oid, record=False)
     finally:
         used.chmod(0o700)
+
+
+def test_a_marker_that_cannot_be_created_stops_the_run(tmp_path, monkeypatch):
+    import os
+
+    import cairnwork.verify_candidate as vc
+    from cairnwork.intake import Intake
+
+    intake = Intake(tmp_path / "state")
+    intake.prepare()
+
+    def vanished(path, *a, **kw):  # the directory went away between mkdir and open
+        raise FileNotFoundError(2, os.strerror(2), str(path))
+
+    monkeypatch.setattr(vc.os, "open", vanished)
+    with pytest.raises(FileNotFoundError):
+        vc._burn(intake, "c" * 40, record=True)

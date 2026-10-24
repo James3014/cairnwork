@@ -213,13 +213,14 @@ def _burn(intake: Intake, test_commit: str, *, record: bool) -> None:
     marker = _used(intake, test_commit)
     marker.parent.mkdir(mode=0o700, exist_ok=True)
     try:
-        if record:
+        if record:  # any failure to create the marker propagates: nothing runs unrecorded
             os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
-        else:
+            return
+        try:
             marker.lstat()  # any other lookup error propagates: unknown is never "unused"
-            raise FileExistsError
-    except FileNotFoundError:
-        return  # record=False: not used yet
+        except FileNotFoundError:
+            return  # not used yet
+        raise FileExistsError
     except FileExistsError:
         raise TestCommitRejected("TEST_COMMIT_ALREADY_EXPOSED", "push a new test commit") from None
 
