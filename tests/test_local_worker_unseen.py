@@ -10,9 +10,10 @@ import socket
 import subprocess
 
 import pytest
-from local_worker_fakes import BASE_SHA, NO_AUTO_MAINTENANCE, TAG, make_runs
+from local_worker_fakes import BASE_SHA, NO_AUTO_MAINTENANCE, TAG, TASK, World, make_loop, make_runs
 from local_worker_fakes import run_wrapper as run
 
+from experimental.local_worker.agent import RefusedStart, initial_messages
 from experimental.local_worker.cuts import CUT_DEFINITION, first_edit_cut, first_source_edit
 from experimental.local_worker.episode import TurnLog
 from experimental.local_worker.gitstate import TreeState, parse_status
@@ -69,3 +70,17 @@ def test_unseen_records_must_be_find_paths():
     assert not parse_status(b"x d /abs\0").observed
     assert not parse_status(b"x q ./a\0").observed
     assert parse_status(b"x d .\0").entries == ("x d .",)
+
+
+@pytest.mark.parametrize("entry", [b"x d ./empty\0", b"x o ./pipe\0", b"x d .\0"])
+def test_a_base_with_an_empty_dir_fifo_or_socket_is_refused(tmp_path, entry):
+    """The package docstring's base rule (PR #248 review item 5): no episode runs."""
+
+    class Unseen(World):
+        def status(self) -> bytes:
+            return super().status() + entry
+
+    loop, world, _, _ = make_loop(tmp_path, [], world=Unseen())
+    with pytest.raises(RefusedStart, match="not a clean git tree"):
+        loop.run(initial_messages(TASK))
+    assert [c[0] for c in world.calls] == ["status"]

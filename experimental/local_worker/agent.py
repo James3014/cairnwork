@@ -64,7 +64,7 @@ UTC8 = timezone(timedelta(hours=8))  # spec §2: timestamps in UTC+8
 
 
 class RefusedStart(RuntimeError):
-    """The checkout is not clean at the expected base: no episode is run."""
+    """The checkout is not its clean base (see the package docstring): no episode is run."""
 
 
 class _StatusUnavailable(RuntimeError):
